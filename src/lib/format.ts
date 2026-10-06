@@ -220,6 +220,15 @@ export function formatDate(d: string | null | undefined): string {
   return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
+/** Playback position as m:ss (or h:mm:ss). */
+export function clock(seconds: number): string {
+  const t = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = String(t % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
+}
+
 export function relativeTime(unixSecs: number): string {
   const diff = Date.now() / 1000 - unixSecs;
   const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });

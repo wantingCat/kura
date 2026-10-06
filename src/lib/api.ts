@@ -83,6 +83,9 @@ export interface EpisodeRow {
   recap: boolean;
   files: FileRef[];
   watchedAt: number | null;
+  /** Saved resume point in seconds. */
+  progressPos: number | null;
+  progressDur: number | null;
 }
 
 export interface RelationCard {
@@ -175,6 +178,52 @@ export interface ScanProgress {
   message: string;
 }
 
+/** An episode surfaced on the home page (continue watching / new episode). */
+export interface UpNextItem {
+  anilistId: number;
+  epKey: string;
+  number: number;
+  path: string;
+  titleRomaji: string | null;
+  titleEnglish: string | null;
+  titleNative: string | null;
+  format: string | null;
+  episodes: number | null;
+  coverUrl: string | null;
+  coverPath: string | null;
+  coverColor: string | null;
+  bannerUrl: string | null;
+  bannerPath: string | null;
+  episodeTitle: string | null;
+  thumbUrl: string | null;
+  thumbPath: string | null;
+  runtime: number | null;
+  /** Seconds; 0 when not started. */
+  position: number;
+  duration: number;
+  ownedCount: number;
+  watchedCount: number;
+  at: number;
+  newCount: number;
+}
+
+export type PlayerKind = "system" | "mpv" | "vlc" | "mpc" | "memento";
+
+export interface DetectedPlayer {
+  kind: PlayerKind;
+  path: string;
+}
+
+export interface PlaybackEvent {
+  state: "tracking" | "untracked" | "stopped";
+  player: PlayerKind;
+  anilistId: number;
+  epKey: string;
+  position: number;
+  duration: number;
+  hint: string | null;
+}
+
 export const api = {
   listLibraries: () => invoke<Library[]>("list_libraries"),
   createLibrary: (name: string, folders: string[]) => invoke<number>("create_library", { name, folders }),
@@ -201,6 +250,11 @@ export const api = {
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),
   getPrefs: () => invoke<Record<string, string>>("get_prefs"),
   setPref: (key: string, value: string) => invoke<void>("set_pref", { key, value }),
+  detectPlayers: () => invoke<DetectedPlayer[]>("detect_players"),
+  playEpisode: (anilistId: number, epKey: string, path: string) =>
+    invoke<void>("play_episode", { anilistId, epKey, path }),
+  getUpNext: (limit = 6) => invoke<UpNextItem[]>("get_up_next", { limit }),
+  getNewEpisodes: (limit = 6) => invoke<UpNextItem[]>("get_new_episodes", { limit }),
 };
 
 export const events = {
@@ -209,6 +263,8 @@ export const events = {
     listen<ScanProgress>("scan-progress", (e) => cb(e.payload)),
   onScanFinished: (cb: () => void): Promise<UnlistenFn> => listen("scan-finished", () => cb()),
   onScanError: (cb: (msg: string) => void): Promise<UnlistenFn> => listen<string>("scan-error", (e) => cb(e.payload)),
+  onPlayback: (cb: (p: PlaybackEvent) => void): Promise<UnlistenFn> =>
+    listen<PlaybackEvent>("playback", (e) => cb(e.payload)),
 };
 
 /** Prefer the locally cached image (works offline), fall back to the remote URL. */

@@ -12,7 +12,7 @@
  */
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
-import type { EpisodeRow, Library, MediaCard, MediaDetail, RelationCard, UnmatchedGroup } from "$lib/api";
+import type { EpisodeRow, Library, MediaCard, MediaDetail, RelationCard, UnmatchedGroup, UpNextItem } from "$lib/api";
 
 const SAMPLE: { id: number; owned: number; watched: number }[] = [
   { id: 154587, owned: 10, watched: 6 }, // Frieren
@@ -161,8 +161,60 @@ async function episodes(m: AniMedia): Promise<EpisodeRow[]> {
       recap: false,
       files: has ? [{ id: n, path: `D:\\Anime\\${m.title.romaji}\\Episode ${n}.mkv`, fileName: `Episode ${n}.mkv`, size: 1_400_000_000 }] : [],
       watchedAt: seen.has(String(n)) ? Date.now() : null,
+      // Pretend the episode after the last watched one was stopped part-way.
+      progressPos: has && !seen.has(String(n)) && n === s.watched + 1 && s.watched > 0 ? 754 : null,
+      progressDur: has && !seen.has(String(n)) && n === s.watched + 1 && s.watched > 0 ? 1420 : null,
     };
   });
+}
+
+/** Home-page items: one in-progress episode per partly watched title, plus a couple of "new" ones. */
+async function upNext(kind: "continue" | "new"): Promise<UpNextItem[]> {
+  const all = await loadMedia();
+  const picks =
+    kind === "continue"
+      ? SAMPLE.filter((s) => s.watched > 0 && s.watched < s.owned)
+      : SAMPLE.filter((s) => s.watched === 0 && s.owned > 1).slice(0, 2);
+  const out: UpNextItem[] = [];
+  for (const [i, s] of picks.entries()) {
+    const m = all.get(s.id);
+    if (!m) continue;
+    const n = kind === "continue" ? s.watched + 1 : 1;
+    let ep: AniMedia = {};
+    try {
+      const r = await fetch(`https://api.ani.zip/mappings?anilist_id=${m.id}`);
+      if (r.ok) ep = (await r.json()).episodes?.[String(n)] ?? {};
+    } catch {
+      /* offline */
+    }
+    out.push({
+      anilistId: m.id,
+      epKey: String(n),
+      number: n,
+      path: `D:\\Anime\\${m.title.romaji}\\Episode ${n}.mkv`,
+      titleRomaji: m.title.romaji,
+      titleEnglish: m.title.english,
+      titleNative: m.title.native,
+      format: m.format,
+      episodes: m.episodes,
+      coverUrl: m.coverImage?.extraLarge ?? null,
+      coverPath: null,
+      coverColor: m.coverImage?.color ?? null,
+      bannerUrl: m.bannerImage,
+      bannerPath: null,
+      episodeTitle: ep.title?.en ?? null,
+      thumbUrl: ep.image ?? null,
+      thumbPath: null,
+      runtime: m.duration,
+      position: kind === "continue" && i === 0 ? 754 : 0,
+      duration: kind === "continue" && i === 0 ? 1420 : 0,
+      ownedCount: s.owned,
+      watchedCount: s.watched,
+      at: Date.now() / 1000 - i * 3600,
+      newCount: kind === "new" ? Math.min(2, s.owned) : 0,
+    });
+  }
+  return out;
 }
 
 async function detail(id: number): Promise<MediaDetail> {
@@ -277,6 +329,32 @@ export function installMock() {
         case "set_pref":
           prefs[String(a.key)] = String(a.value);
           return null;
+        case "get_up_next":
+          return empty ? [] : upNext("continue");
+        case "get_new_episodes":
+          return empty ? [] : upNext("new");
+        case "detect_players":
+          return [
+            { kind: "mpv", path: "C:\\Program Files\\mpv\\mpv.exe" },
+            { kind: "vlc", path: "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe" },
+          ];
+        case "play_episode":
+          setTimeout(
+            () =>
+              emit("playback", {
+                state: "tracking",
+                player: prefs.player ?? "mpv",
+                anilistId: a.anilistId,
+                epKey: a.epKey,
+                position: 0,
+                duration: 1420,
+                hint: null,
+              }),
+            500,
+          );
+          return null;
+        case "plugin:app|version":
+          return "0.2.0";
         default:
           console.info("[preview] ignored command", cmd, a);
           return null;

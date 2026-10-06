@@ -8,7 +8,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Mutex, MutexGuard};
 
 pub struct AppState {
@@ -17,6 +17,8 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub scanning: AtomicBool,
     pub rescan_requested: AtomicBool,
+    /// Bumped on every play; a tracker stops once its session is no longer current.
+    pub play_session: AtomicU64,
 }
 
 impl AppState {
@@ -27,6 +29,7 @@ impl AppState {
             data_dir,
             scanning: AtomicBool::new(false),
             rescan_requested: AtomicBool::new(false),
+            play_session: AtomicU64::new(0),
         }
     }
 

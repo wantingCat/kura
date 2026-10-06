@@ -133,6 +133,18 @@ CREATE TABLE settings (
 );
 "#;
 
+/// v0.2: per-episode playback position for resume + progress bars.
+const SCHEMA_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS watch_progress (
+    anilist_id  INTEGER NOT NULL,
+    ep_key      TEXT NOT NULL,
+    position    REAL NOT NULL,
+    duration    REAL NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY (anilist_id, ep_key)
+);
+"#;
+
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(
@@ -148,6 +160,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version < 1 {
         conn.execute_batch(&format!("BEGIN; {SCHEMA_V1} PRAGMA user_version = 1; COMMIT;"))?;
+    }
+    if version < 2 {
+        conn.execute_batch(&format!("BEGIN; {SCHEMA_V2} PRAGMA user_version = 2; COMMIT;"))?;
     }
     Ok(())
 }

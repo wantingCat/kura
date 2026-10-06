@@ -6,6 +6,7 @@
   import { app } from "$lib/app.svelte";
   import {
     cleanDescription,
+    clock,
     displayTitle,
     formatBytes,
     formatDate,
@@ -55,7 +56,15 @@
   const owned = $derived(regular.filter((e) => e.files.length > 0).length);
   const watched = $derived(regular.filter((e) => e.watchedAt).length);
   const totalEps = $derived(Math.max(d?.episodes ?? 0, regular.length));
-  const nextUp = $derived(regular.find((e) => !e.watchedAt && e.files.length > 0) ?? null);
+  /** An episode left part-way through wins over the first unwatched one. */
+  const nextUp = $derived(
+    regular.find((e) => !e.watchedAt && e.files.length > 0 && (e.progressPos ?? 0) > 0) ??
+      regular.find((e) => !e.watchedAt && e.files.length > 0) ??
+      null,
+  );
+  const playingKey = $derived(
+    app.nowPlaying && d && app.nowPlaying.anilistId === d.anilistId ? app.nowPlaying.epKey : null,
+  );
   const banner = $derived(d ? (img(d.bannerPath, d.bannerUrl) ?? img(d.coverPath, d.coverUrl)) : null);
   const cover = $derived(d ? img(d.coverPath, d.coverUrl) : null);
   const description = $derived(cleanDescription(d?.description));
@@ -80,13 +89,12 @@
 
   async function play(e: EpisodeRow) {
     const f = e.files[0];
-    if (!f) return;
-    try {
-      await api.openFile(f.path);
-    } catch (err) {
-      error = `Couldn't open file: ${err}`;
-    }
+    if (!f || !d) return;
+    await app.play(d.anilistId, e.epKey, f.path);
   }
+
+  const progressPct = (e: EpisodeRow) =>
+    e.progressPos && e.progressDur ? Math.min(100, (e.progressPos / e.progressDur) * 100) : 0;
 
   async function refresh() {
     if (!d) return;
@@ -193,7 +201,11 @@
               {#if nextUp}
                 <button class="btn btn-primary" onclick={() => play(nextUp!)} id="detail-play-next">
                   <Icon name="play" size={15} fill />
-                  {d.format === "MOVIE" ? "Play" : `${watched > 0 ? "Continue" : "Start"} · Ep ${nextUp.number}`}
+                  {#if nextUp.progressPos}
+                    Resume · {d.format === "MOVIE" ? "" : `Ep ${nextUp.number} · `}{clock(nextUp.progressPos)}
+                  {:else}
+                    {d.format === "MOVIE" ? "Play" : `${watched > 0 ? "Continue" : "Start"} · Ep ${nextUp.number}`}
+                  {/if}
                 </button>
               {/if}
               <button class="btn" onclick={() => (showFix = true)} id="detail-fix-match">
@@ -292,12 +304,19 @@
                         <span class="play-ov"><Icon name="play" size={20} fill /></span>
                       {/if}
                       {#if e.watchedAt}<span class="seen"><Icon name="check" size={12} stroke={3} /></span>{/if}
+                      {#if !e.watchedAt && progressPct(e) > 0}
+                        <span class="ep-prog"><span style:width={`${progressPct(e)}%`}></span></span>
+                      {/if}
                     </button>
 
                     <div class="ep-body">
                       <div class="ep-title-row">
                         <h3>{epTitle(e)}</h3>
-                        {#if isNext}<span class="badge badge-accent">Up next</span>{/if}
+                        {#if playingKey === e.epKey}
+                          <span class="badge badge-ok">Playing</span>
+                        {:else if isNext}
+                          <span class="badge badge-accent">Up next</span>
+                        {/if}
                         {#if e.filler}<span class="badge">Filler</span>{/if}
                         {#if e.recap}<span class="badge">Recap</span>{/if}
                       </div>
@@ -310,6 +329,9 @@
                       <div class="ep-meta">
                         {#if e.airDate}<span>{formatDate(e.airDate)}</span>{/if}
                         {#if e.runtime}<span><Icon name="clock" size={12} /> {e.runtime}m</span>{/if}
+                        {#if !e.watchedAt && e.progressPos && has}
+                          <span class="resume-at">Resume from {clock(e.progressPos)}</span>
+                        {/if}
                         {#if has}
                           <button class="file-chip" onclick={() => api.revealFile(e.files[0].path)} title={e.files[0].path}>
                             <Icon name="file" size={12} />
@@ -940,6 +962,23 @@
     border: 1.5px solid var(--line);
     background: var(--ok);
     color: var(--on-coral);
+  }
+  .ep-prog {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 5px;
+    background: color-mix(in srgb, var(--bg) 70%, transparent);
+  }
+  .ep-prog span {
+    display: block;
+    height: 100%;
+    background: var(--coral);
+  }
+  .resume-at {
+    color: var(--coral);
+    font-weight: 700;
   }
   .ep-body {
     flex: 1;

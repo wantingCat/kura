@@ -5,7 +5,7 @@
   <br>
   <strong>A local-first, manga-styled desktop anime media library.</strong>
   <br>
-  <em>Current Release: <code>v0.1.0-alpha</code> · Built with AI assistance</em>
+  <em>Current Release: <code>v0.2.0-alpha</code> · Built with AI assistance</em>
 </p>
 
 ---
@@ -33,13 +33,22 @@ Individual episode cards with thumbnail previews, Japanese/English titles, plot 
 
 ---
 
-## ✨ Features in `v0.1.0-alpha`
+## ✨ Features
 
+### New in `v0.2.0-alpha`
+- **Plays in your own player**: [mpv](https://mpv.io), [VLC](https://www.videolan.org/vlc/), [MPC-HC / MPC-BE](https://github.com/clsid2/mpc-hc) and [Memento](https://github.com/ripose-jp/Memento) are detected automatically (or pick the program yourself). The system default player still works too.
+- **Progress & resume**: Kura follows playback, remembers where you stopped, and resumes from there next time. Episode lists show how far into each episode you are.
+- **Auto-marked watched**: An episode counts as watched once you pass 90% of it (adjustable in Settings), so skipping the ending still counts.
+- **Autoplay next episode** *(off by default)*: When an episode ends, the next one you own starts in the same player window — including the first episode of the next season.
+- **New home page**: A comic-page “Continue watching” panel with one-click resume, plus “New episode” and “Finish this” panels above your library.
+- **Top bar instead of a sidebar**: Search from anywhere (`Ctrl K`), scan progress, review queue and settings in one slim bar.
+- **Automatic updates**: Kura checks GitHub for new versions on startup and can update itself in one click.
+
+### Library
 - **Intelligent Filename Parsing**: Handles real-world release formats, fansub group tags `[Group]`, scene conventions, `SxxEyy`, `- 05v2`, batch folders, multi-part titles (`Part 2`), OVA/SP/Movie markings, creditless OP/EDs (`NCOP`/`NCED`), and Japanese numbering (`第N話`).
 - **Season & Sequel Chain Resolution**: Accurately maps absolute episode numbering (e.g. episode `35`) or multi-season releases to the correct sequel/prequel AniList entry.
 - **Rich Episode Details**: Synopses, episode titles (English + Kanji/Kana), thumbnails, and air dates pulled from [ani.zip](https://api.ani.zip) with [Jikan](https://jikan.moe) fallback.
 - **Local-First & Offline Ready**: All metadata and cached artworks are saved locally using SQLite. Fast, lightweight, and works without an internet connection once scanned.
-- **One-Click Playback**: Click any episode or the "Start / Up Next" button to launch the file directly in your operating system's default media player.
 - **Review Queue & Manual Matcher**: "Needs review" queue and manual "Fix match" search modal for any unrecognized or ambiguous files.
 - **Watched Progress Tracking**: Mark episodes as watched individually or in bulk ("Up to here"), with active progress bars on anime cards.
 - **Grouped Seasons**: AniList splits every season, movie and OVA into its own entry; Kura stitches them back into one card per show with season tabs (switchable to separate cards in Settings).
@@ -49,9 +58,8 @@ Individual episode cards with thumbnail previews, Japanese/English titles, plot 
 ## 🗺️ Roadmap (Upcoming Features)
 
 - [ ] **AniList Account Integration**: OAuth login, list import, and safe two-way watch progress synchronization (ensures local and remote progress never accidentally regress).
-- [ ] **External Player Integrations**:
-  - Direct integration with [mpv](https://mpv.io), [MPC-HC](https://github.com/clsid2/mpc-hc), [VLC](https://www.videolan.org/vlc/), and [Memento](https://github.com/ripose-jp/Memento) (ideal for language immersion).
-  - Accurate watch-time and completion detection via player IPC.
+- [x] **External Player Integrations**: mpv, VLC, MPC-HC/BE and Memento, with watch-time and completion detection via player IPC.
+- [x] **Auto-Update**: Signed in-app updates from GitHub Releases.
 - [ ] **Folder Watcher / Auto-Rescan**: Automatic background scanning triggered when new episode downloads or torrents complete in monitored directories.
 - [ ] **Advanced Filtering & Search**: Filter by genres, tags, studios, release seasons, voice actors, and airing status.
 - [x] **Cross-Platform Release Automation**: Automated CI/CD builds for Windows (`.exe`/`.msi`), macOS (`.dmg`), and Linux (`.deb`/`.rpm`/`.AppImage`) via GitHub Actions.
@@ -64,8 +72,10 @@ Individual episode cards with thumbnail previews, Japanese/English titles, plot 
 ### Releases
 Download pre-compiled packages from the **[GitHub Releases](https://github.com/wantingCat/kura/releases)** page:
 - **Windows**: `.exe` (setup wizard, recommended) or `.msi`
-- **macOS**: `.dmg` (Apple Silicon — M1 and newer)
+- **macOS**: `.dmg` — `aarch64` for Apple Silicon (M1 and newer), `x64` for Intel Macs
 - **Linux**: `.deb` (Ubuntu / Debian), `.rpm` (Fedora / openSUSE) or `.AppImage` (any distro)
+
+From `v0.2.0` on, Kura updates itself: when a new version is out you'll see a banner with an **Update & restart** button (you can turn the check off in Settings). On Linux, self-update works with the `.AppImage`; `.deb` / `.rpm` installs are updated by downloading the new package.
 
 > [!NOTE]
 > Alpha builds are not code-signed yet. On **Windows**, SmartScreen may say "Windows protected your PC" — click **More info → Run anyway**. On **macOS**, right-click the app and choose **Open** the first time.

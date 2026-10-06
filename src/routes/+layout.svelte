@@ -5,7 +5,9 @@
   import { onMount } from "svelte";
   import { afterNavigate } from "$app/navigation";
   import { app } from "$lib/app.svelte";
-  import Sidebar from "$lib/components/Sidebar.svelte";
+  import TopBar from "$lib/components/TopBar.svelte";
+  import UpdateBanner from "$lib/components/UpdateBanner.svelte";
+  import Toasts from "$lib/components/Toasts.svelte";
 
   let { children } = $props();
   let main: HTMLElement | undefined = $state();
@@ -25,23 +27,27 @@
 </script>
 
 <div class="shell">
-  <Sidebar />
+  {#if app.loaded && app.libraries.length > 0}
+    <TopBar />
+  {/if}
   <main bind:this={main} id="main-scroll">
+    <UpdateBanner />
     {@render children()}
   </main>
+  <Toasts />
 </div>
 
 <style>
   .shell {
     display: flex;
+    flex-direction: column;
     height: 100vh;
     width: 100vw;
     overflow: hidden;
   }
   main {
     flex: 1;
-    min-width: 0;
-    height: 100vh;
+    min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
     position: relative;

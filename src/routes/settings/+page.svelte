@@ -1,7 +1,10 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
-  import { api, type Library } from "$lib/api";
+  import { getVersion } from "@tauri-apps/api/app";
+  import { api, type DetectedPlayer, type Library, type PlayerKind } from "$lib/api";
   import { app } from "$lib/app.svelte";
+  import { updater } from "$lib/updater.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import NewLibraryForm from "$lib/components/NewLibraryForm.svelte";
 
@@ -9,6 +12,60 @@
   let renaming = $state<number | null>(null);
   let renameValue = $state("");
   let confirmDelete = $state<number | null>(null);
+
+  // Playback ----------------------------------------------------------------
+  const PLAYERS: { kind: PlayerKind; name: string; blurb: string }[] = [
+    { kind: "mpv", name: "mpv", blurb: "Full tracking + autoplay" },
+    { kind: "vlc", name: "VLC", blurb: "Full tracking + autoplay" },
+    { kind: "mpc", name: "MPC-HC / BE", blurb: "Needs its web interface on" },
+    { kind: "memento", name: "Memento", blurb: "Tracked if it speaks mpv IPC" },
+    { kind: "system", name: "System default", blurb: "Opens normally, no tracking" },
+  ];
+  let detected = $state<DetectedPlayer[]>([]);
+  let version = $state("");
+  let threshold = $state(app.playback.threshold);
+  $effect(() => {
+    threshold = app.playback.threshold;
+  });
+
+  onMount(async () => {
+    try {
+      detected = await api.detectPlayers();
+    } catch {
+      detected = [];
+    }
+    try {
+      version = await getVersion();
+    } catch {
+      version = "";
+    }
+  });
+
+  const found = (k: PlayerKind) => detected.find((d) => d.kind === k) ?? null;
+  /** What the backend will actually use when nothing was picked yet. */
+  const effective = $derived<PlayerKind>(
+    app.playback.player || ((["mpv", "vlc", "mpc"] as PlayerKind[]).find((k) => found(k)) ?? "system"),
+  );
+  const auto = $derived(!app.playback.player);
+
+  async function choose(k: PlayerKind) {
+    await app.setPlayback("player", k);
+    await app.setPlayback("playerPath", "");
+  }
+
+  async function browse() {
+    const isWin = navigator.userAgent.includes("Windows");
+    const picked = await open({
+      multiple: false,
+      directory: false,
+      title: "Choose the player's program file",
+      filters: isWin ? [{ name: "Programs", extensions: ["exe"] }] : undefined,
+    });
+    if (typeof picked === "string") {
+      if (!app.playback.player) await app.setPlayback("player", effective);
+      await app.setPlayback("playerPath", picked);
+    }
+  }
 
   async function addFolder(lib: Library) {
     const picked = await open({ directory: true, multiple: true, title: `Add folders to ${lib.name}` });
@@ -46,7 +103,7 @@
 <div class="page narrow">
   <header class="head">
     <h1>Settings</h1>
-    <p class="muted">Manage your libraries and the folders Kura scans.</p>
+    <p class="muted">Libraries, playback and updates.</p>
   </header>
 
   <section class="block">
@@ -183,14 +240,186 @@
   </section>
 
   <section class="block">
+    <h2 class="section-title">Playback</h2>
+    <div class="card playback">
+      <div class="opt-head">
+        <h3>Player</h3>
+        <p class="faint">Kura opens episodes in your own player and follows along to remember where you stopped.</p>
+      </div>
+      <div class="players" role="radiogroup" aria-label="Player">
+        {#each PLAYERS as p (p.kind)}
+          {@const hit = p.kind === "system" ? true : !!found(p.kind)}
+          <button
+            class="player"
+            class:on={effective === p.kind}
+            role="radio"
+            aria-checked={effective === p.kind}
+            onclick={() => choose(p.kind)}
+            id={`player-${p.kind}`}
+          >
+            <span class="p-name">
+              {p.name}
+              {#if effective === p.kind && auto}<span class="rec">Auto</span>{/if}
+            </span>
+            <small>{p.blurb}</small>
+            {#if p.kind !== "system"}
+              <span class="badge" class:badge-ok={hit}>{hit ? "Detected" : "Not found"}</span>
+            {/if}
+          </button>
+        {/each}
+      </div>
+
+      {#if effective !== "system"}
+        <div class="field">
+          <label for="player-path">Program location</label>
+          <div class="path-row">
+            <input
+              id="player-path"
+              class="input"
+              value={app.playback.playerPath}
+              placeholder={found(effective)?.path ?? "Not found — browse to the player's program file"}
+              onchange={(e) => app.setPlayback("playerPath", e.currentTarget.value.trim())}
+            />
+            <button class="btn btn-sm" onclick={browse} id="player-browse"><Icon name="folder-open" size={14} /> Browse…</button>
+          </div>
+          {#if !app.playback.playerPath && found(effective)}
+            <small class="faint">Using the detected copy. Pick a different file to override it.</small>
+          {/if}
+        </div>
+      {/if}
+
+      {#if effective === "mpc"}
+        <div class="note">
+          <Icon name="alert" size={15} />
+          <div>
+            In MPC go to <strong>Options → Player → Web Interface</strong> and tick <strong>Listen on port</strong>.
+            <label class="port">
+              Port
+              <input
+                class="input"
+                type="number"
+                min="1"
+                max="65535"
+                value={app.playback.mpcPort}
+                onchange={(e) => app.setPlayback("mpcPort", Number(e.currentTarget.value) || 13579)}
+                id="mpc-port"
+              />
+            </label>
+          </div>
+        </div>
+      {:else if effective === "system"}
+        <div class="note">
+          <Icon name="alert" size={15} />
+          <div>With the system default player Kura can't see playback, so progress, auto-watched and autoplay are off.</div>
+        </div>
+      {/if}
+
+      <div class="rows" class:disabled={effective === "system"}>
+        <div class="row">
+          <div class="row-text">
+            <strong>Mark as watched at <span class="pct">{threshold}%</span></strong>
+            <small>Once you've seen this much of an episode it counts as watched — so skipping the ending still counts.</small>
+          </div>
+          <input
+            class="slider"
+            type="range"
+            min="50"
+            max="100"
+            step="5"
+            bind:value={threshold}
+            onchange={() => app.setPlayback("threshold", threshold)}
+            style:--fill={`${((threshold - 50) / 50) * 100}%`}
+            id="pref-threshold"
+            aria-label="Mark as watched at"
+          />
+        </div>
+        <div class="row">
+          <div class="row-text">
+            <strong>Resume where I left off</strong>
+            <small>Pick up episodes from the last position instead of the start.</small>
+          </div>
+          <button
+            class="switch"
+            class:on={app.playback.resume}
+            role="switch"
+            aria-checked={app.playback.resume}
+            aria-label="Resume where I left off"
+            onclick={() => app.setPlayback("resume", !app.playback.resume)}
+            id="pref-resume"
+          ><span></span></button>
+        </div>
+        <div class="row">
+          <div class="row-text">
+            <strong>Autoplay next episode</strong>
+            <small>When an episode ends, play the next one you own in the same window — including the next season.</small>
+          </div>
+          <button
+            class="switch"
+            class:on={app.playback.autoplay}
+            role="switch"
+            aria-checked={app.playback.autoplay}
+            aria-label="Autoplay next episode"
+            onclick={() => app.setPlayback("autoplay", !app.playback.autoplay)}
+            id="pref-autoplay"
+          ><span></span></button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2 class="section-title">Updates</h2>
+    <div class="card playback">
+      <div class="rows">
+        <div class="row">
+          <div class="row-text">
+            <strong>Check for updates automatically</strong>
+            <small>Kura looks for a new version on GitHub when it starts. Nothing is installed without asking.</small>
+          </div>
+          <button
+            class="switch"
+            class:on={app.autoUpdate}
+            role="switch"
+            aria-checked={app.autoUpdate}
+            aria-label="Check for updates automatically"
+            onclick={() => app.setAutoUpdate(!app.autoUpdate)}
+            id="pref-auto-update"
+          ><span></span></button>
+        </div>
+        <div class="row">
+          <div class="row-text">
+            <strong>Version {version || "—"}</strong>
+            <small>
+              {#if updater.status === "checking"}Checking…
+              {:else if updater.status === "none"}You're on the latest version.
+              {:else if updater.status === "available"}v{updater.version} is available — see the banner at the top.
+              {:else if updater.status === "error"}Couldn't check: {updater.error}
+              {:else}Updates come from the GitHub releases page.{/if}
+            </small>
+          </div>
+          <button
+            class="btn btn-sm"
+            onclick={() => ((updater.dismissed = false), updater.check({ silent: false }))}
+            disabled={updater.status === "checking" || updater.status === "downloading"}
+            id="update-check"
+          >
+            {#if updater.status === "checking"}<span class="spinner"></span>{:else}<Icon name="refresh" size={14} />{/if}
+            Check now
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
     <h2 class="section-title">About</h2>
     <div class="card about">
       <p>
-        <strong>Kura</strong> <span class="faint">v0.1.1-alpha</span> · a local-first anime library. Metadata from
+        <strong>Kura</strong> <span class="faint">v0.2.0-alpha</span> · a local-first anime library. Metadata from
         <strong>AniList</strong>, episode info from <strong>ani.zip</strong> and <strong>Jikan (MyAnimeList)</strong>.
         Everything is cached locally, and your media files never leave your computer.
       </p>
-      <p class="faint coming">Coming next: AniList account sync, opening episodes in Memento / mpv, and marking episodes watched automatically.</p>
+      <p class="faint coming">Coming next: AniList account sync and a built-in Memento integration.</p>
     </div>
   </section>
 </div>
@@ -343,6 +572,210 @@
   /* Display preferences ---------------------------------------------------- */
   .display {
     padding: 20px;
+  }
+
+  /* Playback / updates ----------------------------------------------------- */
+  .playback {
+    padding: 20px;
+  }
+  .players {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 12px;
+    margin-top: 16px;
+  }
+  .player {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding: 12px 14px;
+    text-align: left;
+    border-radius: var(--r-md);
+    border: var(--bw) solid var(--line);
+    background: var(--bg-elev);
+    color: var(--text);
+    cursor: pointer;
+    transition:
+      transform var(--t-fast) var(--bounce),
+      box-shadow var(--t-fast) var(--ease),
+      background var(--t-fast) var(--ease);
+  }
+  .player:hover {
+    transform: translate(-2px, -2px);
+    box-shadow: 4px 4px 0 var(--line);
+  }
+  .player.on {
+    background: var(--surface-3);
+    box-shadow: 4px 4px 0 var(--coral);
+    transform: translate(-2px, -2px);
+  }
+  .p-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-display);
+    font-size: 15.5px;
+    font-weight: 600;
+  }
+  .player small {
+    color: var(--text-3);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+  .player .badge {
+    margin-top: 6px;
+    height: 20px;
+    font-size: 10px;
+  }
+  .field {
+    margin-top: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .field label {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .field small {
+    font-size: 12px;
+  }
+  .path-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .path-row .input {
+    flex: 1;
+    min-width: 0;
+    height: 36px;
+    font-size: 13px;
+  }
+  .note {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    margin-top: 16px;
+    padding: 12px 14px;
+    border-radius: var(--r-md);
+    border: var(--bw) solid var(--line);
+    border-left: 6px solid var(--amber);
+    background: var(--bg-elev);
+    color: var(--text-2);
+    font-size: 13px;
+  }
+  .note :global(svg) {
+    flex: none;
+    color: var(--amber);
+    margin-top: 2px;
+  }
+  .port {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: 10px;
+    font-weight: 700;
+  }
+  .port .input {
+    width: 96px;
+    height: 30px;
+    padding: 0 10px;
+  }
+  .rows {
+    display: flex;
+    flex-direction: column;
+    margin-top: 10px;
+  }
+  .rows.disabled {
+    opacity: 0.5;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 14px 0;
+    border-top: 1.5px solid var(--border);
+  }
+  .rows .row:first-child {
+    border-top: none;
+  }
+  .row-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .row-text strong {
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .row-text small {
+    color: var(--text-3);
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .pct {
+    color: var(--coral);
+  }
+  .slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 220px;
+    height: 12px;
+    border-radius: 99px;
+    border: var(--bw) solid var(--line);
+    background: linear-gradient(to right, var(--coral) var(--fill), var(--bg) var(--fill));
+    cursor: pointer;
+  }
+  .slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: var(--bw) solid var(--line);
+    background: var(--cream);
+    box-shadow: 2px 2px 0 var(--line);
+    transition: transform var(--t-fast) var(--bounce);
+  }
+  .slider:active::-webkit-slider-thumb {
+    transform: scale(1.15);
+  }
+  .switch {
+    position: relative;
+    flex: none;
+    width: 50px;
+    height: 28px;
+    padding: 0;
+    border-radius: 99px;
+    border: var(--bw) solid var(--line);
+    background: var(--bg);
+    cursor: pointer;
+    transition: background var(--t-fast) var(--ease);
+  }
+  .switch span {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: var(--bw) solid var(--line);
+    background: var(--text-3);
+    transition:
+      transform var(--t-med) var(--bounce),
+      background var(--t-fast) var(--ease);
+  }
+  .switch.on {
+    background: var(--coral);
+  }
+  .switch.on span {
+    transform: translateX(22px);
+    background: var(--cream);
   }
   .opt-head h3 {
     font-size: 17px;

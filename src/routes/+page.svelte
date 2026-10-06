@@ -1,19 +1,9 @@
 <script lang="ts">
   import { page } from "$app/state";
-  import { img, type MediaCard } from "$lib/api";
+  import type { MediaCard } from "$lib/api";
   import { app } from "$lib/app.svelte";
-  import {
-    cleanDescription,
-    displayTitle,
-    formatLabel,
-    franchiseBadge,
-    groupCards,
-    norm,
-    searchHaystack,
-    seasonLabel,
-    subTitle,
-    type LibraryItem,
-  } from "$lib/format";
+  import { displayTitle, groupCards, norm, searchHaystack, type LibraryItem } from "$lib/format";
+  import HomePanels from "$lib/components/HomePanels.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import NewLibraryForm from "$lib/components/NewLibraryForm.svelte";
   import PosterCard from "$lib/components/PosterCard.svelte";
@@ -22,7 +12,6 @@
   type WatchFilter = "all" | "unwatched" | "watching" | "completed";
   type SortKey = "added" | "title" | "year" | "watched" | "score";
 
-  let query = $state("");
   let formatFilter = $state<FormatFilter>("all");
   let watchFilter = $state<WatchFilter>("all");
   let sort = $state<SortKey>("added");
@@ -54,7 +43,7 @@
   const all = $derived(present(scoped));
 
   const filtered = $derived.by(() => {
-    const q = norm(query);
+    const q = norm(app.query);
     const terms = q ? q.split(" ") : [];
     // Title + format filters look at individual entries (so "Movies" pulls the movie out of its franchise)…
     const entries = scoped.filter((c) => {
@@ -81,17 +70,8 @@
     return list.sort(by[sort]);
   });
 
-  const browsing = $derived(!query && formatFilter === "all" && watchFilter === "all");
-  const continueWatching = $derived(
-    all.filter(isWatching).sort((a, b) => (b.lastWatchedAt ?? 0) - (a.lastWatchedAt ?? 0)).slice(0, 12),
-  );
+  const browsing = $derived(!app.query && formatFilter === "all" && watchFilter === "all");
   const recentlyAdded = $derived([...all].sort((a, b) => b.addedAt - a.addedAt).slice(0, 12));
-
-  const featured = $derived.by(() => {
-    const pool = continueWatching.length ? continueWatching : recentlyAdded;
-    return pool.find((c) => c.bannerUrl || c.bannerPath) ?? pool[0] ?? null;
-  });
-  const featuredBanner = $derived(featured ? img(featured.bannerPath, featured.bannerUrl) ?? img(featured.coverPath, featured.coverUrl) : null);
 
   const counts = $derived({
     all: all.length,
@@ -99,19 +79,11 @@
     movie: present(scoped.filter((c) => formatOk(c, "movie"))).length,
     extra: present(scoped.filter((c) => formatOk(c, "extra"))).length,
   });
-
-  let searchEl: HTMLInputElement | undefined = $state();
-  function onKey(e: KeyboardEvent) {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
-      e.preventDefault();
-      searchEl?.focus();
-    }
-  }
 </script>
 
-<svelte:window onkeydown={onKey} />
 <svelte:head>
   <title>{library ? `${library.name} · Kura` : "Kura"}</title>
+  <meta name="description" content="Your local anime library — continue watching, new episodes and everything you own." />
 </svelte:head>
 
 {#if !app.loaded}
@@ -141,99 +113,23 @@
     </div>
   </section>
 {:else}
-  {#if featured && browsing}
-    <div class="hero-wrap">
-      <img class="mascot hero-cat" src="/brand/cat.png" alt="" width="120" />
-      <section class="hero">
-        <div class="hero-content">
-          <span class="eyebrow">
-            {continueWatching.length ? "Continue watching" : "Recently added"}
-          </span>
-          <h1>{displayTitle(featured)}</h1>
-          {#if subTitle(featured)}<p class="hero-sub">{subTitle(featured)}</p>{/if}
-          <div class="hero-meta">
-            {#if franchiseBadge(featured)}
-              <span class="badge badge-accent">{franchiseBadge(featured)}</span>
-            {:else if featured.format}
-              <span class="badge badge-accent">{formatLabel(featured.format)}</span>
-            {/if}
-            {#if featured.seasonYear}<span>{seasonLabel(featured.season, featured.seasonYear)}</span>{/if}
-            {#if featured.genres.length}<span>· {featured.genres.slice(0, 3).join(" · ")}</span>{/if}
-          </div>
-          <p class="hero-desc">{cleanDescription(featured.description)}</p>
-          <div class="hero-actions">
-            <a class="btn btn-primary" href={`/anime/${featured.linkId}`} id="hero-open">
-              <Icon name="play" size={15} fill />
-              {featured.watchedCount > 0 ? "Continue" : "View episodes"}
-            </a>
-            <span class="faint">
-              {featured.ownedCount} episode{featured.ownedCount === 1 ? "" : "s"} in library
-            </span>
-          </div>
-        </div>
-        <div class="hero-art">
-          {#if featuredBanner}
-            <img class="hero-bg" src={featuredBanner} alt="" />
-          {:else}
-            <img class="hero-kanji" src="/brand/kanji.png" alt="" />
-          {/if}
-        </div>
-      </section>
-    </div>
-  {/if}
+  <div class="page">
+    <h1 class="sr-only">{library?.name ?? "Your anime library"}</h1>
 
-  <div class="page" class:no-hero={!(featured && browsing)}>
-    <div class="toolbar">
-      <div class="title-block">
-        <h2>{library?.name ?? "All anime"}</h2>
-        <span class="faint">{all.length} titles</span>
-      </div>
-      <div class="search">
-        <Icon name="search" size={16} />
-        <input
-          bind:this={searchEl}
-          class="input"
-          bind:value={query}
-          placeholder="Search titles — English, romaji, 日本語…"
-          id="library-search"
-        />
-        {#if query}
-          <button class="clear" onclick={() => (query = "")} aria-label="Clear search"><Icon name="x" size={14} /></button>
-        {:else}
-          <kbd>Ctrl K</kbd>
-        {/if}
-      </div>
-    </div>
-
-    <div class="filters">
-      <div class="chips">
-        {#each [["all", "All"], ["tv", "Series"], ["movie", "Movies"], ["extra", "OVA & Specials"]] as [k, label] (k)}
-          <button
-            class="chip"
-            class:active={formatFilter === k}
-            onclick={() => (formatFilter = k as FormatFilter)}
-            id={`filter-format-${k}`}
-          >
-            {label}<span class="chip-count">{counts[k as FormatFilter]}</span>
-          </button>
+    {#if app.libraries.length > 1}
+      <nav class="libs" aria-label="Libraries">
+        <a class="chip" class:active={!library} href="/" id="lib-all">All libraries</a>
+        {#each app.libraries as lib (lib.id)}
+          <a class="chip" class:active={library?.id === lib.id} href={`/?lib=${lib.id}`} id={`lib-${lib.id}`}>
+            {lib.name}<span class="chip-count">{lib.mediaCount}</span>
+          </a>
         {/each}
-      </div>
-      <div class="right">
-        <select class="input select" bind:value={watchFilter} id="filter-watch" aria-label="Watch status">
-          <option value="all">Any status</option>
-          <option value="unwatched">Unwatched</option>
-          <option value="watching">Watching</option>
-          <option value="completed">Completed</option>
-        </select>
-        <select class="input select" bind:value={sort} id="sort-select" aria-label="Sort">
-          <option value="added">Recently added</option>
-          <option value="watched">Recently watched</option>
-          <option value="title">Title</option>
-          <option value="year">Year</option>
-          <option value="score">Score</option>
-        </select>
-      </div>
-    </div>
+      </nav>
+    {/if}
+
+    {#if browsing}
+      <HomePanels {scoped} />
+    {/if}
 
     {#if app.unmatched.length > 0 && browsing}
       <a class="review-banner" href="/review" id="review-banner">
@@ -246,18 +142,9 @@
       </a>
     {/if}
 
-    {#if browsing && continueWatching.length > 0}
+    {#if browsing && recentlyAdded.length > 0 && all.length > 8}
       <section class="row">
-        <h3 class="section-title">Continue watching <span class="count">{continueWatching.length}</span></h3>
-        <div class="rail">
-          {#each continueWatching as m, i (m.anilistId)}<PosterCard {m} index={i} />{/each}
-        </div>
-      </section>
-    {/if}
-
-    {#if browsing && recentlyAdded.length > 0 && all.length > 12}
-      <section class="row">
-        <h3 class="section-title">Recently added</h3>
+        <h2 class="section-title">Recently added</h2>
         <div class="rail">
           {#each recentlyAdded as m, i (m.anilistId)}<PosterCard {m} index={i} />{/each}
         </div>
@@ -265,11 +152,43 @@
     {/if}
 
     <section class="row">
-      {#if browsing}
-        <h3 class="section-title">Library <span class="count">{filtered.length}</span></h3>
-      {:else}
-        <h3 class="section-title">Results <span class="count">{filtered.length}</span></h3>
-      {/if}
+      <div class="toolbar">
+        <h2 class="section-title">
+          {#if app.query}
+            Results for “{app.query}” <span class="count">{filtered.length}</span>
+          {:else}
+            {library?.name ?? "Library"} <span class="count">{filtered.length}</span>
+          {/if}
+        </h2>
+        <div class="right">
+          <select class="input select" bind:value={watchFilter} id="filter-watch" aria-label="Watch status">
+            <option value="all">Any status</option>
+            <option value="unwatched">Unwatched</option>
+            <option value="watching">Watching</option>
+            <option value="completed">Completed</option>
+          </select>
+          <select class="input select" bind:value={sort} id="sort-select" aria-label="Sort">
+            <option value="added">Recently added</option>
+            <option value="watched">Recently watched</option>
+            <option value="title">Title</option>
+            <option value="year">Year</option>
+            <option value="score">Score</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="chips">
+        {#each [["all", "All"], ["tv", "Series"], ["movie", "Movies"], ["extra", "OVA & Specials"]] as [k, label] (k)}
+          <button
+            class="chip"
+            class:active={formatFilter === k}
+            onclick={() => (formatFilter = k as FormatFilter)}
+            id={`filter-format-${k}`}
+          >
+            {label}<span class="chip-count">{counts[k as FormatFilter]}</span>
+          </button>
+        {/each}
+      </div>
 
       {#if filtered.length > 0}
         <div class="grid">
@@ -298,6 +217,11 @@
           <img class="mascot empty-cat" src="/brand/cat.png" alt="" width="150" />
           <h3>Nothing matches</h3>
           <p class="muted">Try a different title, or clear the filters.</p>
+          {#if app.query}
+            <div class="empty-actions">
+              <button class="btn" onclick={() => (app.query = "")} id="clear-search">Clear search</button>
+            </div>
+          {/if}
         </div>
       {/if}
     </section>
@@ -305,215 +229,41 @@
 {/if}
 
 <style>
-  /* Hero ------------------------------------------------------------------
-   * A sticker panel: solid plum info side + banner art, with the logo cat
-   * peeking over the top edge. */
-  .hero-wrap {
-    position: relative;
-    margin: 0 auto;
-    max-width: 1680px;
-    padding: 62px 36px 0;
-  }
-  .hero-cat {
+  .sr-only {
     position: absolute;
-    top: 0;
-    right: 96px;
-    z-index: 0;
-    animation: peek 600ms var(--bounce) both 200ms;
-  }
-  .hero {
-    position: relative;
-    z-index: 1;
-    display: grid;
-    grid-template-columns: minmax(380px, 5fr) 6fr;
-    min-height: 340px;
-    border: var(--bw) solid var(--line);
-    border-radius: var(--r-xl);
-    background: var(--surface-3);
-    box-shadow: var(--sticker-lg);
+    width: 1px;
+    height: 1px;
     overflow: hidden;
-    animation: fade-up 500ms var(--ease) both;
-  }
-  .hero-art {
-    position: relative;
-    border-left: var(--bw) solid var(--line);
-    background: var(--coral);
-    overflow: hidden;
-  }
-  .hero-bg {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    object-position: center 30%;
-    animation: hero-in 900ms var(--ease) both;
-  }
-  .hero-kanji {
-    position: absolute;
-    inset: 0;
-    margin: auto;
-    width: 48%;
-    height: auto;
-  }
-  @keyframes hero-in {
-    from {
-      opacity: 0;
-      transform: scale(1.04);
-    }
-  }
-  .hero-content {
-    padding: 34px 36px 32px;
-    display: flex;
-    flex-direction: column;
-    justify-content: flex-end;
-    min-width: 0;
-  }
-  .eyebrow {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-family: var(--font-display);
-    font-size: 13px;
-    font-weight: 600;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--coral);
-  }
-  .hero h1 {
-    margin-top: 8px;
-    font-size: 38px;
-    font-weight: 600;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .hero-sub {
-    margin-top: 4px;
-    color: var(--text-2);
-    font-size: 15px;
-  }
-  .hero-meta {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 12px;
-    color: var(--text-2);
-    font-size: 13px;
-    font-weight: 600;
-  }
-  .hero-desc {
-    margin-top: 12px;
-    color: var(--text-2);
-    display: -webkit-box;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    max-width: 620px;
-  }
-  .hero-actions {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    margin-top: 22px;
-  }
-  .hero-actions .btn {
-    height: 44px;
-    padding: 0 22px;
-  }
-  .hero-actions .faint {
-    font-weight: 600;
-  }
-  @media (max-width: 1100px) {
-    .hero {
-      grid-template-columns: 1fr;
-    }
-    .hero-art {
-      order: -1;
-      height: 180px;
-      border-left: none;
-      border-bottom: var(--bw) solid var(--line);
-    }
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
-  /* Toolbar --------------------------------------------------------------- */
-  .page.no-hero {
-    padding-top: 36px;
+  .libs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 18px;
   }
+
+  /* Library toolbar -------------------------------------------------------- */
   .toolbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 20px;
-    margin-bottom: 14px;
+    gap: 16px;
+    margin-bottom: 12px;
   }
-  .title-block {
-    display: flex;
-    align-items: baseline;
-    gap: 12px;
-  }
-  .title-block h2 {
-    font-size: 28px;
-    font-weight: 600;
-  }
-  .search {
-    position: relative;
-    display: flex;
-    align-items: center;
-    width: min(420px, 45%);
-  }
-  .search > :global(svg) {
-    position: absolute;
-    left: 13px;
-    color: var(--text-3);
-    pointer-events: none;
-  }
-  .search .input {
-    width: 100%;
-    padding-left: 38px;
-    padding-right: 64px;
-  }
-  kbd {
-    position: absolute;
-    right: 10px;
-    font-family: var(--font);
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--text-3);
-    border: 1.5px solid var(--border-strong);
-    border-bottom-width: 3px;
-    border-radius: 6px;
-    padding: 1px 6px;
-    background: var(--surface);
-  }
-  .clear {
-    position: absolute;
-    right: 8px;
-    display: grid;
-    place-items: center;
-    width: 24px;
-    height: 24px;
-    border: none;
-    border-radius: 6px;
-    background: var(--surface-3);
-    cursor: pointer;
-  }
-  .filters {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin-bottom: 26px;
+  .toolbar .section-title {
+    margin: 0;
   }
   .chips,
   .right {
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+  }
+  .chips {
+    margin-bottom: 24px;
   }
   .chip-count {
     font-family: var(--font);
@@ -541,7 +291,7 @@
     align-items: center;
     gap: 12px;
     padding: 12px 16px;
-    margin-bottom: 26px;
+    margin-bottom: 30px;
     border-radius: var(--r-md);
     background: var(--surface);
     border: var(--bw) solid var(--line);
@@ -578,8 +328,8 @@
   .rail {
     display: grid;
     grid-auto-flow: column;
-    grid-auto-columns: 158px;
-    gap: 18px;
+    grid-auto-columns: 140px;
+    gap: 16px;
     overflow-x: auto;
     padding: 8px 4px 14px;
     margin: -8px -4px 0;

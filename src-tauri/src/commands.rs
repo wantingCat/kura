@@ -3,6 +3,7 @@
 use crate::db::{self, now};
 use crate::franchise;
 use crate::matcher;
+use crate::player;
 use crate::scan;
 use crate::service::AppState;
 use crate::store;
@@ -338,6 +339,9 @@ pub struct EpisodeRow {
     recap: bool,
     files: Vec<FileRef>,
     watched_at: Option<i64>,
+    /// Saved playback position / duration in seconds (resume point).
+    progress_pos: Option<f64>,
+    progress_dur: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -501,6 +505,18 @@ pub fn get_media_detail(st: St, anilist_id: i64) -> CmdResult<MediaDetail> {
             watched.insert(row.0, row.1);
         }
     }
+    let mut progress: HashMap<String, (f64, f64)> = HashMap::new();
+    {
+        let mut stmt =
+            conn.prepare("SELECT ep_key, position, duration FROM watch_progress WHERE anilist_id = ?1").map_err(err)?;
+        for row in stmt
+            .query_map([anilist_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?, r.get::<_, f64>(2)?)))
+            .map_err(err)?
+            .flatten()
+        {
+            progress.insert(row.0, (row.1, row.2));
+        }
+    }
 
     {
         let mut stmt = conn
@@ -528,6 +544,8 @@ pub fn get_media_detail(st: St, anilist_id: i64) -> CmdResult<MediaDetail> {
                     recap: r.get::<_, i64>(12)? != 0,
                     files: Vec::new(),
                     watched_at: None,
+                    progress_pos: None,
+                    progress_dur: None,
                 })
             })
             .map_err(err)?;
@@ -558,12 +576,18 @@ pub fn get_media_detail(st: St, anilist_id: i64) -> CmdResult<MediaDetail> {
                 recap: false,
                 files: Vec::new(),
                 watched_at: None,
+                progress_pos: None,
+                progress_dur: None,
             });
         }
     }
     for e in &mut d.episode_list {
         e.files = files_by_key.remove(&e.ep_key).unwrap_or_default();
         e.watched_at = watched.get(&e.ep_key).copied();
+        if let Some((p, dur)) = progress.get(&e.ep_key) {
+            e.progress_pos = Some(*p);
+            e.progress_dur = Some(*dur);
+        }
     }
     // Specials are only interesting if owned or described.
     d.episode_list.retain(|e| !e.is_special || !e.files.is_empty() || e.title_en.is_some() || e.title_ja.is_some());
@@ -696,6 +720,9 @@ pub fn set_watched(app: AppHandle, st: St, anilist_id: i64, ep_keys: Vec<String>
             tx.execute("DELETE FROM watch_state WHERE anilist_id = ?1 AND ep_key = ?2", params![anilist_id, key])
                 .map_err(err)?;
         }
+        // Either way the saved resume point is no longer meaningful.
+        tx.execute("DELETE FROM watch_progress WHERE anilist_id = ?1 AND ep_key = ?2", params![anilist_id, key])
+            .map_err(err)?;
     }
     tx.commit().map_err(err)?;
     let _ = app.emit("library-changed", ());
@@ -812,6 +839,223 @@ pub fn open_file(st: St, path: String) -> CmdResult<()> {
 pub fn reveal_file(st: St, path: String) -> CmdResult<()> {
     known_file(&st, &path)?;
     tauri_plugin_opener::reveal_item_in_dir(&path).map_err(err)
+}
+
+// ---------------------------------------------------------------------------
+// Playback
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn detect_players() -> Vec<player::Detected> {
+    player::detect_all()
+}
+
+/// Play an episode with the configured external player, tracking progress where possible.
+#[tauri::command]
+pub fn play_episode(app: AppHandle, st: St, anilist_id: i64, ep_key: String, path: String) -> CmdResult<()> {
+    known_file(&st, &path)?;
+    player::play(app, st.inner().clone(), player::Ep { anilist_id, ep_key, path }).map_err(err)
+}
+
+/// An episode to surface on the home page (continue watching / new episode).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpNextItem {
+    anilist_id: i64,
+    ep_key: String,
+    number: i64,
+    path: String,
+    title_romaji: Option<String>,
+    title_english: Option<String>,
+    title_native: Option<String>,
+    format: Option<String>,
+    episodes: Option<i64>,
+    cover_url: Option<String>,
+    cover_path: Option<String>,
+    cover_color: Option<String>,
+    banner_url: Option<String>,
+    banner_path: Option<String>,
+    episode_title: Option<String>,
+    thumb_url: Option<String>,
+    thumb_path: Option<String>,
+    runtime: Option<i64>,
+    /// Seconds; 0 when the episode hasn't been started.
+    position: f64,
+    duration: f64,
+    owned_count: i64,
+    watched_count: i64,
+    /// Last activity (continue watching) or when the file was added (new episodes).
+    at: i64,
+    /// New episodes only: how many unwatched files were added recently.
+    new_count: i64,
+}
+
+fn up_next_item(conn: &rusqlite::Connection, ep: &player::Ep, at: i64) -> Option<UpNextItem> {
+    let (pos, dur) = player::saved_progress(conn, ep.anilist_id, &ep.ep_key).unwrap_or((0.0, 0.0));
+    conn.query_row(
+        "SELECT m.title_romaji, m.title_english, m.title_native, m.format, m.episodes, m.cover_url, m.cover_path,
+                m.cover_color, m.banner_url, m.banner_path,
+                COALESCE(e.title_en, e.title_romaji, e.title_ja), e.thumb_url, e.thumb_path, e.runtime,
+                (SELECT COUNT(DISTINCT f.ep_key) FROM local_files f WHERE f.anilist_id = m.anilist_id AND f.ep_key NOT LIKE 'S%'),
+                (SELECT COUNT(*) FROM watch_state w WHERE w.anilist_id = m.anilist_id AND w.ep_key NOT LIKE 'S%')
+         FROM media m LEFT JOIN episodes e ON e.anilist_id = m.anilist_id AND e.ep_key = ?2
+         WHERE m.anilist_id = ?1",
+        params![ep.anilist_id, ep.ep_key],
+        |r| {
+            Ok(UpNextItem {
+                anilist_id: ep.anilist_id,
+                ep_key: ep.ep_key.clone(),
+                number: ep.ep_key.trim_start_matches('S').parse().unwrap_or(0),
+                path: ep.path.clone(),
+                title_romaji: r.get(0)?,
+                title_english: r.get(1)?,
+                title_native: r.get(2)?,
+                format: r.get(3)?,
+                episodes: r.get(4)?,
+                cover_url: r.get(5)?,
+                cover_path: r.get(6)?,
+                cover_color: r.get(7)?,
+                banner_url: r.get(8)?,
+                banner_path: r.get(9)?,
+                episode_title: r.get(10)?,
+                thumb_url: r.get(11)?,
+                thumb_path: r.get(12)?,
+                runtime: r.get(13)?,
+                position: pos,
+                duration: dur,
+                owned_count: r.get(14)?,
+                watched_count: r.get(15)?,
+                at,
+                new_count: 0,
+            })
+        },
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+fn is_watched(conn: &rusqlite::Connection, ep: &player::Ep) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM watch_state WHERE anilist_id = ?1 AND ep_key = ?2)",
+        params![ep.anilist_id, ep.ep_key],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
+}
+
+/// What to resume / watch next, most recently active first. One entry per franchise.
+#[tauri::command]
+pub fn get_up_next(st: St, limit: Option<usize>) -> CmdResult<Vec<UpNextItem>> {
+    let limit = limit.unwrap_or(6);
+    let conn = st.db();
+    let mut stmt = conn
+        .prepare(
+            "SELECT anilist_id, MAX(t) AS last FROM (
+                SELECT anilist_id, watched_at AS t FROM watch_state
+                UNION ALL SELECT anilist_id, updated_at AS t FROM watch_progress
+             ) GROUP BY anilist_id ORDER BY last DESC LIMIT 60",
+        )
+        .map_err(err)?;
+    let active: Vec<(i64, i64)> =
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?.flatten().collect();
+    let franchises = franchise::load(&conn).map_err(err)?;
+    let root = |id: i64| franchises.get(&id).map(|p| p.root).unwrap_or(id);
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (id, at) in active {
+        if out.len() >= limit {
+            break;
+        }
+        if !seen.insert(root(id)) {
+            continue; // a later season of this franchise is already listed
+        }
+        // 1. An episode left part-way through.
+        let partial: Option<player::Ep> = conn
+            .query_row(
+                "SELECT p.ep_key, f.path FROM watch_progress p
+                 JOIN local_files f ON f.anilist_id = p.anilist_id AND f.ep_key = p.ep_key
+                 WHERE p.anilist_id = ?1 ORDER BY p.updated_at DESC, f.path LIMIT 1",
+                [id],
+                |r| Ok(player::Ep { anilist_id: id, ep_key: r.get(0)?, path: r.get(1)? }),
+            )
+            .optional()
+            .map_err(err)?;
+        let ep = match partial {
+            Some(e) => Some(e),
+            None => {
+                // 2. The next unwatched owned episode after the furthest watched one.
+                let last: Option<String> = conn
+                    .query_row(
+                        "SELECT ep_key FROM watch_state WHERE anilist_id = ?1 AND ep_key NOT LIKE 'S%'
+                         ORDER BY CAST(ep_key AS INTEGER) DESC LIMIT 1",
+                        [id],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(err)?;
+                let mut cur = player::Ep { anilist_id: id, ep_key: last.unwrap_or_else(|| "0".into()), path: String::new() };
+                let mut found = None;
+                for _ in 0..500 {
+                    match player::next_episode(&conn, &cur) {
+                        Some(n) if is_watched(&conn, &n) => cur = n,
+                        Some(n) => {
+                            found = Some(n);
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+                found
+            }
+        };
+        if let Some(item) = ep.and_then(|e| up_next_item(&conn, &e, at)) {
+            out.push(item);
+        }
+    }
+    Ok(out)
+}
+
+/// Unwatched episodes that showed up after a show was already in the library (last 30 days).
+#[tauri::command]
+pub fn get_new_episodes(st: St, limit: Option<usize>) -> CmdResult<Vec<UpNextItem>> {
+    let limit = limit.unwrap_or(6) as i64;
+    let since = now() - 30 * 86_400;
+    let conn = st.db();
+    // A file is "new" if it arrived more than an hour after the first file of the same title.
+    let new_filter = "f.anilist_id IS NOT NULL AND f.ep_key IS NOT NULL AND f.added_at > ?1
+         AND f.added_at > (SELECT MIN(g.added_at) FROM local_files g WHERE g.anilist_id = f.anilist_id) + 3600
+         AND NOT EXISTS (SELECT 1 FROM watch_state w WHERE w.anilist_id = f.anilist_id AND w.ep_key = f.ep_key)";
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT f.anilist_id, MAX(f.added_at), COUNT(DISTINCT f.ep_key) FROM local_files f WHERE {new_filter}
+             GROUP BY f.anilist_id ORDER BY MAX(f.added_at) DESC LIMIT ?2"
+        ))
+        .map_err(err)?;
+    let rows: Vec<(i64, i64, i64)> = stmt
+        .query_map(params![since, limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(err)?
+        .flatten()
+        .collect();
+    let mut first = conn
+        .prepare(&format!(
+            "SELECT f.ep_key, f.path FROM local_files f WHERE f.anilist_id = ?2 AND {new_filter}
+             ORDER BY f.ep_key LIKE 'S%', CAST(f.ep_key AS INTEGER), f.path LIMIT 1"
+        ))
+        .map_err(err)?;
+    let mut out = Vec::new();
+    for (id, at, count) in rows {
+        let ep: Option<player::Ep> = first
+            .query_row(params![since, id], |r| Ok(player::Ep { anilist_id: id, ep_key: r.get(0)?, path: r.get(1)? }))
+            .optional()
+            .map_err(err)?;
+        if let Some(mut item) = ep.and_then(|e| up_next_item(&conn, &e, at)) {
+            item.new_count = count;
+            out.push(item);
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
