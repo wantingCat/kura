@@ -54,7 +54,7 @@ Individual episode cards with thumbnail previews, Japanese/English titles, plot 
   - Accurate watch-time and completion detection via player IPC.
 - [ ] **Folder Watcher / Auto-Rescan**: Automatic background scanning triggered when new episode downloads or torrents complete in monitored directories.
 - [ ] **Advanced Filtering & Search**: Filter by genres, tags, studios, release seasons, voice actors, and airing status.
-- [x] **Cross-Platform Release Automation**: Automated CI/CD builds for Windows (`.exe`/`.msi`), macOS (`.dmg`), and Linux (`.deb`/`.AppImage`) via GitHub Actions.
+- [x] **Cross-Platform Release Automation**: Automated CI/CD builds for Windows (`.exe`/`.msi`), macOS (`.dmg`), and Linux (`.deb`/`.rpm`/`.AppImage`) via GitHub Actions.
 - [ ] **Library Export / Backup**: Backup watch history and metadata cache to JSON or portable archives.
 
 ---
@@ -62,10 +62,13 @@ Individual episode cards with thumbnail previews, Japanese/English titles, plot 
 ## 📦 Download & Installation
 
 ### Releases
-Download pre-compiled packages for Windows, macOS, and Linux from the **[GitHub Releases](https://github.com/wantingCat/kura/releases)** page:
-- **Windows**: `.exe` (NSIS setup wizard) and `.msi` package
-- **macOS**: `.dmg` (Apple Silicon & Intel)
-- **Linux**: `.AppImage` and `.deb` package
+Download pre-compiled packages from the **[GitHub Releases](https://github.com/wantingCat/kura/releases)** page:
+- **Windows**: `.exe` (setup wizard, recommended) or `.msi`
+- **macOS**: `.dmg` (Apple Silicon — M1 and newer)
+- **Linux**: `.deb` (Ubuntu / Debian), `.rpm` (Fedora / openSUSE) or `.AppImage` (any distro)
+
+> [!NOTE]
+> Alpha builds are not code-signed yet. On **Windows**, SmartScreen may say "Windows protected your PC" — click **More info → Run anyway**. On **macOS**, right-click the app and choose **Open** the first time.
 
 ---
 
