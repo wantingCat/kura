@@ -186,7 +186,7 @@
     <h2 class="section-title">About</h2>
     <div class="card about">
       <p>
-        <strong>Kura</strong> <span class="faint">v0.1.0</span> · a local-first anime library. Metadata from
+        <strong>Kura</strong> <span class="faint">v0.1.1-alpha</span> · a local-first anime library. Metadata from
         <strong>AniList</strong>, episode info from <strong>ani.zip</strong> and <strong>Jikan (MyAnimeList)</strong>.
         Everything is cached locally, and your media files never leave your computer.
       </p>
