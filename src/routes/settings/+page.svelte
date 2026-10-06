@@ -18,7 +18,7 @@
     { kind: "mpv", name: "mpv", blurb: "Full tracking + autoplay" },
     { kind: "vlc", name: "VLC", blurb: "Full tracking + autoplay" },
     { kind: "mpc", name: "MPC-HC / BE", blurb: "Needs its web interface on" },
-    { kind: "memento", name: "Memento", blurb: "Tracked if it speaks mpv IPC" },
+    { kind: "memento", name: "Memento", blurb: "Full tracking + autoplay" },
     { kind: "system", name: "System default", blurb: "Opens normally, no tracking" },
   ];
   let detected = $state<DetectedPlayer[]>([]);
@@ -419,7 +419,7 @@
         <strong>AniList</strong>, episode info from <strong>ani.zip</strong> and <strong>Jikan (MyAnimeList)</strong>.
         Everything is cached locally, and your media files never leave your computer.
       </p>
-      <p class="faint coming">Coming next: AniList account sync and a built-in Memento integration.</p>
+      <p class="faint coming">Coming next: automatic rescans when new episodes land in your folders, and AniList account sync.</p>
     </div>
   </section>
 </div>

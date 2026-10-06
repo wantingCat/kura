@@ -497,6 +497,7 @@ impl Controller {
                 if start > 0.0 {
                     cmd.arg("/start").arg(((start * 1000.0) as i64).to_string());
                 }
+                cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
                 cmd.spawn().is_ok()
             }
         }
@@ -611,6 +612,8 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         }
         Kind::System => unreachable!(),
     };
+    // The player's own logging (e.g. VLC's "direct3d11 vout display error") is not ours to show.
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     let child = cmd.spawn().map_err(|e| anyhow!("Couldn't start {}: {e}", exe.display()))?;
     tauri::async_runtime::spawn(track(app, st, p, ep, pending, child, session));
     Ok(())
