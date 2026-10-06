@@ -53,15 +53,18 @@ Individual episode cards with thumbnail previews, Japanese/English titles, plot 
   - Accurate watch-time and completion detection via player IPC.
 - [ ] **Folder Watcher / Auto-Rescan**: Automatic background scanning triggered when new episode downloads or torrents complete in monitored directories.
 - [ ] **Advanced Filtering & Search**: Filter by genres, tags, studios, release seasons, voice actors, and airing status.
-- [ ] **Cross-Platform Releases**: Pre-built packages for macOS (Apple Silicon & Intel DMG) and Linux (Flatpak / AppImage).
+- [x] **Cross-Platform Release Automation**: Automated CI/CD builds for Windows (`.exe`/`.msi`), macOS (`.dmg`), and Linux (`.deb`/`.AppImage`) via GitHub Actions.
 - [ ] **Library Export / Backup**: Backup watch history and metadata cache to JSON or portable archives.
 
 ---
 
 ## 📦 Download & Installation
 
-### Windows (v0.1.0-alpha)
-Download the latest pre-compiled Windows installer (`.exe` setup or `.msi`) from the **[GitHub Releases](https://github.com/wantingCat/kura/releases)** page.
+### Releases
+Download pre-compiled packages for Windows, macOS, and Linux from the **[GitHub Releases](https://github.com/wantingCat/kura/releases)** page:
+- **Windows**: `.exe` (NSIS setup wizard) and `.msi` package
+- **macOS**: `.dmg` (Apple Silicon & Intel)
+- **Linux**: `.AppImage` and `.deb` package
 
 ---
 
