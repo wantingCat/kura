@@ -16,20 +16,15 @@ Point **Kura** at your local anime folders and it takes care of the rest: parses
 
 ## 📸 Screenshots
 
-### Home & Library View
-Browse your collection, view featured recently-added releases, search across English/Romaji/Japanese titles, and filter by series, movies, and specials:
+### Home & Library
+A slim top bar with search from anywhere (`Ctrl K`), recently added titles, and your whole library with filters for series, movies and specials. Multi-season shows are grouped into a single stacked card:
 
 ![Kura Home & Library](assets/screenshots/home-library.png)
 
-### Anime Details & Information
-Backdrop banners, official poster art, format tags, season/year, studio info, ratings, synopsis, and related franchise entries:
+### Anime Details & Seasons
+Banner and poster art, format, season, score and studio, one-click play in your own player, and season tabs for shows with several seasons:
 
 ![Kura Anime Details](assets/screenshots/anime-details.png)
-
-### Episode List & Metadata
-Individual episode cards with thumbnail previews, Japanese/English titles, plot summaries, air dates, file sizes, watch toggles, and "Up Next" indicators:
-
-![Kura Episode List](assets/screenshots/episodes-list.png)
 
 ---
 
