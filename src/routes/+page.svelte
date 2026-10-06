@@ -2,7 +2,18 @@
   import { page } from "$app/state";
   import { img, type MediaCard } from "$lib/api";
   import { app } from "$lib/app.svelte";
-  import { cleanDescription, displayTitle, formatLabel, norm, searchHaystack, seasonLabel, subTitle } from "$lib/format";
+  import {
+    cleanDescription,
+    displayTitle,
+    formatLabel,
+    franchiseBadge,
+    groupCards,
+    norm,
+    searchHaystack,
+    seasonLabel,
+    subTitle,
+    type LibraryItem,
+  } from "$lib/format";
   import Icon from "$lib/components/Icon.svelte";
   import NewLibraryForm from "$lib/components/NewLibraryForm.svelte";
   import PosterCard from "$lib/components/PosterCard.svelte";
@@ -32,37 +43,49 @@
   };
   const isWatching = (c: MediaCard) => c.watchedCount > 0 && !isCompleted(c);
 
+  const formatOk = (c: MediaCard, f: FormatFilter) => {
+    if (f === "tv") return ["TV", "TV_SHORT", "ONA"].includes(c.format ?? "");
+    if (f === "movie") return c.format === "MOVIE";
+    if (f === "extra") return ["OVA", "SPECIAL", "ONA"].includes(c.format ?? "");
+    return true;
+  };
+  /** Seasons of one show become a single item unless the user turned grouping off. */
+  const present = (list: MediaCard[]) => groupCards(list, app.groupSeasons);
+  const all = $derived(present(scoped));
+
   const filtered = $derived.by(() => {
     const q = norm(query);
     const terms = q ? q.split(" ") : [];
-    let list = scoped.filter((c) => {
+    // Title + format filters look at individual entries (so "Movies" pulls the movie out of its franchise)…
+    const entries = scoped.filter((c) => {
       if (terms.length) {
         const h = haystacks.get(c.anilistId) ?? "";
         if (!terms.every((t) => h.includes(t))) return false;
       }
-      if (formatFilter === "tv" && !["TV", "TV_SHORT", "ONA"].includes(c.format ?? "")) return false;
-      if (formatFilter === "movie" && c.format !== "MOVIE") return false;
-      if (formatFilter === "extra" && !["OVA", "SPECIAL", "ONA"].includes(c.format ?? "")) return false;
+      return formatOk(c, formatFilter);
+    });
+    // …while watch status is judged for the franchise as a whole.
+    const list = present(entries).filter((c) => {
       if (watchFilter === "unwatched" && c.watchedCount > 0) return false;
       if (watchFilter === "watching" && !isWatching(c)) return false;
       if (watchFilter === "completed" && !isCompleted(c)) return false;
       return true;
     });
-    const by: Record<SortKey, (a: MediaCard, b: MediaCard) => number> = {
+    const by: Record<SortKey, (a: LibraryItem, b: LibraryItem) => number> = {
       added: (a, b) => b.addedAt - a.addedAt,
       title: (a, b) => displayTitle(a).localeCompare(displayTitle(b)),
-      year: (a, b) => (b.seasonYear ?? 0) - (a.seasonYear ?? 0),
+      year: (a, b) => (b.yearEnd ?? b.seasonYear ?? 0) - (a.yearEnd ?? a.seasonYear ?? 0),
       watched: (a, b) => (b.lastWatchedAt ?? 0) - (a.lastWatchedAt ?? 0),
       score: (a, b) => (b.averageScore ?? 0) - (a.averageScore ?? 0),
     };
-    return [...list].sort(by[sort]);
+    return list.sort(by[sort]);
   });
 
   const browsing = $derived(!query && formatFilter === "all" && watchFilter === "all");
   const continueWatching = $derived(
-    scoped.filter(isWatching).sort((a, b) => (b.lastWatchedAt ?? 0) - (a.lastWatchedAt ?? 0)).slice(0, 12),
+    all.filter(isWatching).sort((a, b) => (b.lastWatchedAt ?? 0) - (a.lastWatchedAt ?? 0)).slice(0, 12),
   );
-  const recentlyAdded = $derived([...scoped].sort((a, b) => b.addedAt - a.addedAt).slice(0, 12));
+  const recentlyAdded = $derived([...all].sort((a, b) => b.addedAt - a.addedAt).slice(0, 12));
 
   const featured = $derived.by(() => {
     const pool = continueWatching.length ? continueWatching : recentlyAdded;
@@ -71,10 +94,10 @@
   const featuredBanner = $derived(featured ? img(featured.bannerPath, featured.bannerUrl) ?? img(featured.coverPath, featured.coverUrl) : null);
 
   const counts = $derived({
-    all: scoped.length,
-    tv: scoped.filter((c) => ["TV", "TV_SHORT", "ONA"].includes(c.format ?? "")).length,
-    movie: scoped.filter((c) => c.format === "MOVIE").length,
-    extra: scoped.filter((c) => ["OVA", "SPECIAL", "ONA"].includes(c.format ?? "")).length,
+    all: all.length,
+    tv: present(scoped.filter((c) => formatOk(c, "tv"))).length,
+    movie: present(scoped.filter((c) => formatOk(c, "movie"))).length,
+    extra: present(scoped.filter((c) => formatOk(c, "extra"))).length,
   });
 
   let searchEl: HTMLInputElement | undefined = $state();
@@ -129,13 +152,17 @@
           <h1>{displayTitle(featured)}</h1>
           {#if subTitle(featured)}<p class="hero-sub">{subTitle(featured)}</p>{/if}
           <div class="hero-meta">
-            {#if featured.format}<span class="badge badge-accent">{formatLabel(featured.format)}</span>{/if}
+            {#if franchiseBadge(featured)}
+              <span class="badge badge-accent">{franchiseBadge(featured)}</span>
+            {:else if featured.format}
+              <span class="badge badge-accent">{formatLabel(featured.format)}</span>
+            {/if}
             {#if featured.seasonYear}<span>{seasonLabel(featured.season, featured.seasonYear)}</span>{/if}
             {#if featured.genres.length}<span>· {featured.genres.slice(0, 3).join(" · ")}</span>{/if}
           </div>
           <p class="hero-desc">{cleanDescription(featured.description)}</p>
           <div class="hero-actions">
-            <a class="btn btn-primary" href={`/anime/${featured.anilistId}`} id="hero-open">
+            <a class="btn btn-primary" href={`/anime/${featured.linkId}`} id="hero-open">
               <Icon name="play" size={15} fill />
               {featured.watchedCount > 0 ? "Continue" : "View episodes"}
             </a>
@@ -159,7 +186,7 @@
     <div class="toolbar">
       <div class="title-block">
         <h2>{library?.name ?? "All anime"}</h2>
-        <span class="faint">{scoped.length} titles</span>
+        <span class="faint">{all.length} titles</span>
       </div>
       <div class="search">
         <Icon name="search" size={16} />
@@ -228,7 +255,7 @@
       </section>
     {/if}
 
-    {#if browsing && recentlyAdded.length > 0 && scoped.length > 12}
+    {#if browsing && recentlyAdded.length > 0 && all.length > 12}
       <section class="row">
         <h3 class="section-title">Recently added</h3>
         <div class="rail">

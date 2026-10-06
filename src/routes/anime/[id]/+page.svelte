@@ -10,6 +10,7 @@
     formatBytes,
     formatDate,
     formatLabel,
+    franchiseLabel,
     relationLabel,
     seasonLabel,
     statusLabel,
@@ -60,6 +61,11 @@
   const description = $derived(cleanDescription(d?.description));
   const lowConfidence = $derived(d?.groups.some((g) => !g.manual && (g.confidence ?? 1) < 0.8) ?? false);
   const pct = $derived(totalEps ? Math.round((watched / totalEps) * 100) : 0);
+  /** Other owned seasons / movies of this franchise, shown as tabs when grouping is on. */
+  const seasons = $derived(app.groupSeasons && d && d.franchise.length > 1 ? d.franchise : []);
+  const inTabs = $derived(new Set(seasons.map((s) => s.anilistId)));
+  // Owned entries already reachable via the tabs don't need to be repeated under "Related".
+  const relations = $derived(d?.relations.filter((r) => !inTabs.has(r.relatedId)) ?? []);
 
   async function toggleWatched(e: EpisodeRow) {
     if (!d) return;
@@ -208,6 +214,39 @@
           </div>
         </header>
 
+        {#if seasons.length > 1}
+          <nav class="seasons" aria-label="Seasons">
+            {#each seasons as s, i (s.anilistId)}
+              {@const t = s.episodes ?? (s.format === "MOVIE" ? 1 : null)}
+              {@const done = t !== null && t > 0 && s.watchedCount >= t}
+              {@const current = s.anilistId === d.anilistId}
+              <a
+                class="season"
+                class:active={current}
+                class:done
+                href={`/anime/${s.anilistId}`}
+                data-sveltekit-replacestate
+                data-sveltekit-noscroll
+                aria-current={current ? "page" : undefined}
+                title={displayTitle(s)}
+                style:--i={i}
+                id={`season-tab-${s.anilistId}`}
+              >
+                <span class="s-label">{franchiseLabel(s, seasons[0])}</span>
+                <span class="s-meta">{[formatLabel(s.format), s.seasonYear].filter(Boolean).join(" · ")}</span>
+                <span class="s-progress">
+                  {#if done}
+                    <Icon name="check" size={11} stroke={3} /> Watched
+                  {:else}
+                    {s.watchedCount}/{t ?? "?"} watched
+                  {/if}
+                </span>
+                <span class="s-bar"><span style:width={`${t ? Math.min(100, (s.watchedCount / t) * 100) : 0}%`}></span></span>
+              </a>
+            {/each}
+          </nav>
+        {/if}
+
         {#if lowConfidence}
           <div class="notice">
             <Icon name="alert" size={16} />
@@ -344,11 +383,11 @@
           </div>
 
           <aside class="side-col">
-            {#if d.relations.length > 0}
+            {#if relations.length > 0}
               <section class="card side-card">
                 <h2 class="side-title">Related</h2>
                 <div class="relations">
-                  {#each d.relations as r (r.relatedId)}
+                  {#each relations as r (r.relatedId)}
                     {@const rc = img(r.coverPath, r.coverUrl)}
                     {#if r.ownedCount > 0}
                       <a class="relation" href={`/anime/${r.relatedId}`}>
@@ -618,6 +657,98 @@
   .actions .btn-icon {
     height: 44px;
     width: 44px;
+  }
+
+  /* Season tabs -----------------------------------------------------------
+   * One sticker per owned season / movie of the franchise. */
+  .seasons {
+    display: flex;
+    gap: 12px;
+    margin-top: 30px;
+    padding: 6px 6px 12px 4px;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+  }
+  .season {
+    position: relative;
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 150px;
+    max-width: 250px;
+    padding: 10px 14px 14px;
+    border-radius: var(--r-md);
+    border: var(--bw) solid var(--line);
+    background: var(--surface);
+    box-shadow: var(--sticker);
+    color: var(--text);
+    scroll-snap-align: start;
+    overflow: hidden;
+    transition:
+      transform var(--t-fast) var(--bounce),
+      box-shadow var(--t-fast) var(--ease),
+      background var(--t-fast) var(--ease);
+  }
+  .season:hover {
+    transform: translate(-2px, -2px) rotate(-0.6deg);
+    box-shadow: 5px 5px 0 var(--line);
+  }
+  .season.active {
+    background: var(--coral);
+    color: var(--on-coral);
+    transform: translate(-2px, -2px);
+    box-shadow: 5px 5px 0 var(--line);
+  }
+  .s-label {
+    font-family: var(--font-display);
+    font-size: 15.5px;
+    font-weight: 600;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .s-meta,
+  .s-progress {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+  .s-progress {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 2px;
+  }
+  .season.done .s-progress {
+    color: var(--ok);
+  }
+  .season.active .s-meta,
+  .season.active .s-progress {
+    color: color-mix(in srgb, var(--on-coral) 75%, transparent);
+  }
+  .s-bar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 5px;
+    background: var(--bg-elev);
+    border-top: 1.5px solid var(--line);
+  }
+  .s-bar span {
+    display: block;
+    height: 100%;
+    background: var(--coral);
+    transition: width 600ms var(--ease);
+  }
+  .season.active .s-bar span {
+    background: var(--on-coral);
+  }
+  .season.done .s-bar span {
+    background: var(--ok);
   }
 
   .notice {

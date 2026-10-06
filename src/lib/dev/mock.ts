@@ -21,7 +21,11 @@ const SAMPLE: { id: number; owned: number; watched: number }[] = [
   { id: 161645, owned: 1, watched: 0 }, // Kusuriya no Hitorigoto
   { id: 21519, owned: 1, watched: 0 }, // Kimi no Na wa.
   { id: 108465, owned: 3, watched: 1 }, // Mushoku Tensei
-  { id: 16498, owned: 1, watched: 0 }, // Shingeki no Kyojin
+  { id: 16498, owned: 25, watched: 25 }, // Shingeki no Kyojin
+  { id: 20958, owned: 12, watched: 12 }, // Shingeki no Kyojin S2
+  { id: 99147, owned: 12, watched: 4 }, // Shingeki no Kyojin S3
+  { id: 104578, owned: 10, watched: 0 }, // Shingeki no Kyojin S3 Part 2
+  { id: 21355, owned: 25, watched: 0 }, // Re:Zero S1
   { id: 108632, owned: 3, watched: 0 }, // Re:Zero S2
 ];
 
@@ -62,6 +66,35 @@ async function loadMedia(): Promise<Map<number, AniMedia>> {
 const date = (d: { year: number | null; month: number | null; day: number | null } | null) =>
   d?.year ? `${d.year}-${String(d.month ?? 1).padStart(2, "0")}-${String(d.day ?? 1).padStart(2, "0")}` : null;
 
+const prefs: Record<string, string> = {};
+
+/** Same idea as franchise.rs: connected components over PREQUEL/SEQUEL edges, ordered by start date. */
+function franchises(all: Map<number, AniMedia>) {
+  const parent = new Map<number, number>();
+  const find = (x: number): number => {
+    if (!parent.has(x)) parent.set(x, x);
+    while (parent.get(x) !== x) x = parent.get(x)!;
+    return x;
+  };
+  for (const m of all.values()) {
+    find(m.id);
+    for (const e of m.relations?.edges ?? []) {
+      if (e.relationType === "PREQUEL" || e.relationType === "SEQUEL") parent.set(find(m.id), find(e.node.id));
+    }
+  }
+  const groups = new Map<number, AniMedia[]>();
+  for (const m of all.values()) {
+    const r = find(m.id);
+    groups.set(r, [...(groups.get(r) ?? []), m]);
+  }
+  const out = new Map<number, { root: number; index: number; size: number; members: AniMedia[] }>();
+  for (const members of groups.values()) {
+    members.sort((a, b) => (date(a.startDate) ?? "9999").localeCompare(date(b.startDate) ?? "9999"));
+    members.forEach((m, index) => out.set(m.id, { root: members[0].id, index, size: members.length, members }));
+  }
+  return out;
+}
+
 function card(m: AniMedia, i: number): MediaCard {
   const s = SAMPLE.find((x) => x.id === m.id)!;
   return {
@@ -89,6 +122,9 @@ function card(m: AniMedia, i: number): MediaCard {
     lastWatchedAt: s.watched > 0 ? Date.now() - i * 60_000 : null,
     needsReview: m.id === 108632,
     libraryIds: [1],
+    franchiseId: (media && franchises(media).get(m.id)?.root) ?? m.id,
+    franchiseIndex: (media && franchises(media).get(m.id)?.index) ?? 0,
+    franchiseSize: (media && franchises(media).get(m.id)?.size) ?? 1,
   };
 }
 
@@ -164,6 +200,26 @@ async function detail(id: number): Promise<MediaDetail> {
     relations,
     otherFiles: [],
     groups: [{ id: 1, displayName: m.title.romaji, folderPath: `D:\\Anime\\${m.title.romaji}`, confidence: 0.97, manual: false }],
+    franchise: (() => {
+      const f = franchises(all).get(id);
+      if (!f || f.size < 2) return [];
+      return f.members.map((x) => {
+        const c = card(x, 0);
+        return {
+          anilistId: x.id,
+          titleRomaji: x.title.romaji,
+          titleEnglish: x.title.english,
+          titleNative: x.title.native,
+          format: x.format,
+          status: x.status,
+          season: x.season,
+          seasonYear: x.seasonYear,
+          episodes: x.episodes,
+          ownedCount: c.ownedCount,
+          watchedCount: c.watchedCount,
+        };
+      });
+    })(),
   };
 }
 
@@ -216,6 +272,11 @@ export function installMock() {
         }
         case "search_anilist":
           return [];
+        case "get_prefs":
+          return prefs;
+        case "set_pref":
+          prefs[String(a.key)] = String(a.value);
+          return null;
         default:
           console.info("[preview] ignored command", cmd, a);
           return null;

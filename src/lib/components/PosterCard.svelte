@@ -1,11 +1,17 @@
 <script lang="ts">
   import type { MediaCard } from "$lib/api";
   import { img } from "$lib/api";
-  import { displayTitle, formatLabel, totalEpisodes } from "$lib/format";
+  import { displayTitle, formatLabel, franchiseBadge, totalEpisodes, type LibraryItem } from "$lib/format";
   import Icon from "./Icon.svelte";
 
-  let { m, index = 0 }: { m: MediaCard; index?: number } = $props();
+  let { m, index = 0 }: { m: MediaCard | LibraryItem; index?: number } = $props();
 
+  const item = $derived("members" in m ? m : null);
+  const badge = $derived(item ? franchiseBadge(item) : null);
+  const href = $derived(`/anime/${item?.linkId ?? m.anilistId}`);
+  const years = $derived(
+    item?.yearEnd && m.seasonYear && item.yearEnd !== m.seasonYear ? `${m.seasonYear}–${item.yearEnd}` : m.seasonYear,
+  );
   const src = $derived(img(m.coverPath, m.coverUrl));
   const total = $derived(totalEpisodes(m));
   const watchedPct = $derived(total ? Math.min(100, (m.watchedCount / total) * 100) : 0);
@@ -16,7 +22,8 @@
 
 <a
   class="poster-card"
-  href={`/anime/${m.anilistId}`}
+  class:stack={!!badge}
+  {href}
   style:--i={Math.min(index, 24)}
   id={`card-${m.anilistId}`}
 >
@@ -28,7 +35,9 @@
     {/if}
 
     <div class="top">
-      {#if m.format && m.format !== "TV"}
+      {#if badge}
+        <span class="badge seasons"><Icon name="library" size={11} stroke={2.5} /> {badge}</span>
+      {:else if m.format && m.format !== "TV"}
         <span class="badge tag">{formatLabel(m.format)}</span>
       {/if}
       {#if m.needsReview}
@@ -59,8 +68,8 @@
   <div class="meta">
     <h3 title={displayTitle(m)}>{displayTitle(m)}</h3>
     <p>
-      {#if m.seasonYear}{m.seasonYear}{/if}
-      {#if m.seasonYear && m.genres.length} · {/if}
+      {#if years}{years}{/if}
+      {#if years && m.genres.length} · {/if}
       {m.genres.slice(0, 2).join(", ")}
     </p>
   </div>
@@ -92,6 +101,33 @@
   .poster-card:focus-visible .art {
     transform: translate(-3px, -3px) rotate(-0.6deg);
     box-shadow: 6px 6px 0 var(--coral);
+  }
+  /* Grouped franchise: a second "sheet" peeking out behind the cover, like a stack of volumes. */
+  .poster-card.stack {
+    position: relative;
+  }
+  .poster-card.stack::before {
+    content: "";
+    position: absolute;
+    top: -6px;
+    left: 7px;
+    right: -7px;
+    aspect-ratio: 2 / 3;
+    border-radius: var(--r-md);
+    border: var(--bw) solid var(--line);
+    background: var(--surface-3);
+    transform: rotate(2.2deg);
+    transition: transform var(--t-med) var(--bounce);
+  }
+  .poster-card.stack:hover::before {
+    transform: rotate(4deg) translate(3px, -1px);
+  }
+  .seasons {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--coral);
+    color: var(--on-coral);
   }
   img {
     width: 100%;

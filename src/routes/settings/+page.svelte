@@ -143,6 +143,46 @@
   </section>
 
   <section class="block">
+    <h2 class="section-title">Display</h2>
+    <div class="card display">
+      <div class="opt-head">
+        <h3>Multi-season shows</h3>
+        <p class="faint">AniList lists every season, movie and OVA as a separate entry.</p>
+      </div>
+      <div class="choices" role="radiogroup" aria-label="Multi-season shows">
+        <button
+          class="choice"
+          class:on={app.groupSeasons}
+          role="radio"
+          aria-checked={app.groupSeasons}
+          onclick={() => app.setGroupSeasons(true)}
+          id="pref-group-seasons"
+        >
+          <span class="illo grouped" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="choice-text">
+            <strong>Grouped <span class="rec">Default</span></strong>
+            <small>One card per show. Seasons become tabs on the show's page.</small>
+          </span>
+        </button>
+        <button
+          class="choice"
+          class:on={!app.groupSeasons}
+          role="radio"
+          aria-checked={!app.groupSeasons}
+          onclick={() => app.setGroupSeasons(false)}
+          id="pref-separate-seasons"
+        >
+          <span class="illo separate" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="choice-text">
+            <strong>Separate</strong>
+            <small>Every season, movie and OVA gets its own card, like on AniList.</small>
+          </span>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
     <h2 class="section-title">About</h2>
     <div class="card about">
       <p>
@@ -298,5 +338,128 @@
   .coming {
     margin-top: 10px;
     font-size: 13px;
+  }
+
+  /* Display preferences ---------------------------------------------------- */
+  .display {
+    padding: 20px;
+  }
+  .opt-head h3 {
+    font-size: 17px;
+  }
+  .opt-head p {
+    margin-top: 2px;
+    font-size: 13px;
+  }
+  .choices {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-top: 16px;
+  }
+  @media (max-width: 700px) {
+    .choices {
+      grid-template-columns: 1fr;
+    }
+  }
+  .choice {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 16px;
+    text-align: left;
+    border-radius: var(--r-md);
+    border: var(--bw) solid var(--line);
+    background: var(--bg-elev);
+    color: var(--text);
+    cursor: pointer;
+    transition:
+      transform var(--t-fast) var(--bounce),
+      box-shadow var(--t-fast) var(--ease),
+      background var(--t-fast) var(--ease);
+  }
+  .choice:hover {
+    transform: translate(-2px, -2px);
+    box-shadow: 4px 4px 0 var(--line);
+  }
+  .choice.on {
+    background: var(--surface-3);
+    box-shadow: 4px 4px 0 var(--coral);
+    transform: translate(-2px, -2px);
+  }
+  .choice-text {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .choice-text strong {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-display);
+    font-size: 15.5px;
+    font-weight: 600;
+  }
+  .choice-text small {
+    color: var(--text-3);
+    font-size: 12.5px;
+    font-weight: 600;
+    line-height: 1.45;
+  }
+  .rec {
+    padding: 1px 7px;
+    border-radius: 99px;
+    border: 1.5px solid var(--line);
+    background: var(--coral);
+    color: var(--on-coral);
+    font-family: var(--font);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  /* Tiny poster illustrations: a stacked pile vs. three loose cards. */
+  .illo {
+    position: relative;
+    flex: none;
+    width: 62px;
+    height: 48px;
+  }
+  .illo i {
+    position: absolute;
+    width: 22px;
+    height: 32px;
+    border-radius: 5px;
+    border: 2px solid var(--line);
+    background: var(--surface-2);
+  }
+  .choice.on .illo i:last-child {
+    background: var(--coral);
+  }
+  .grouped i:nth-child(1) {
+    left: 24px;
+    top: 4px;
+    transform: rotate(10deg);
+  }
+  .grouped i:nth-child(2) {
+    left: 20px;
+    top: 7px;
+    transform: rotate(4deg);
+  }
+  .grouped i:nth-child(3) {
+    left: 16px;
+    top: 10px;
+  }
+  .separate i {
+    top: 8px;
+  }
+  .separate i:nth-child(1) {
+    left: 0;
+  }
+  .separate i:nth-child(2) {
+    left: 20px;
+  }
+  .separate i:nth-child(3) {
+    left: 40px;
   }
 </style>

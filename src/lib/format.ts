@@ -73,6 +73,134 @@ export function totalEpisodes(m: Pick<MediaCard, "episodes" | "format"> & { owne
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Franchise grouping
+// ---------------------------------------------------------------------------
+
+const SERIES_FORMATS = ["TV", "TV_SHORT", "ONA"];
+export const isSeriesFormat = (f: string | null | undefined) => SERIES_FORMATS.includes(f ?? "");
+
+/** A library card that may stand for several AniList entries of one franchise. */
+export interface LibraryItem extends MediaCard {
+  /** Entries merged into this card (1 for a standalone title). */
+  members: MediaCard[];
+  /** Where clicking the card goes — the season you're currently on. */
+  linkId: number;
+  yearEnd: number | null;
+}
+
+const isDone = (m: MediaCard) => {
+  const t = totalEpisodes(m);
+  return t !== null && t > 0 && m.watchedCount >= t;
+};
+
+function single(m: MediaCard): LibraryItem {
+  return { ...m, members: [m], linkId: m.anilistId, yearEnd: null };
+}
+
+function merge(members: MediaCard[]): LibraryItem {
+  if (members.length === 1) return single(members[0]);
+  const ordered = [...members].sort((a, b) => a.franchiseIndex - b.franchiseIndex);
+  const base = ordered[0];
+  const totals = ordered.map(totalEpisodes);
+  const years = ordered.map((m) => m.seasonYear).filter((y): y is number => y !== null);
+
+  // Resume where you left off: the latest entry with progress, or the next one if that's finished.
+  let linkId = base.anilistId;
+  let last = -1;
+  ordered.forEach((m, i) => {
+    if (m.watchedCount > 0) last = i;
+  });
+  if (last >= 0) linkId = (isDone(ordered[last]) && ordered[last + 1] ? ordered[last + 1] : ordered[last]).anilistId;
+
+  return {
+    ...base,
+    members: ordered,
+    linkId,
+    episodes: totals.every((t) => t !== null) ? totals.reduce<number>((s, t) => s + (t ?? 0), 0) : null,
+    // A movie on its own still reads as "1 file"; a mixed franchise is counted in episodes.
+    format: ordered.every((m) => m.format === base.format) ? base.format : "TV",
+    status: ordered.some((m) => m.status === "RELEASING") ? "RELEASING" : ordered[ordered.length - 1].status,
+    ownedCount: ordered.reduce((s, m) => s + m.ownedCount, 0),
+    watchedCount: ordered.reduce((s, m) => s + m.watchedCount, 0),
+    addedAt: Math.max(...ordered.map((m) => m.addedAt)),
+    lastWatchedAt: Math.max(0, ...ordered.map((m) => m.lastWatchedAt ?? 0)) || null,
+    needsReview: ordered.some((m) => m.needsReview),
+    libraryIds: [...new Set(ordered.flatMap((m) => m.libraryIds))],
+    averageScore: base.averageScore,
+    seasonYear: years.length ? Math.min(...years) : null,
+    yearEnd: years.length ? Math.max(...years) : null,
+  };
+}
+
+/** Collapse cards into one item per franchise (or wrap them 1:1 when grouping is off). */
+export function groupCards(cards: MediaCard[], grouped: boolean): LibraryItem[] {
+  if (!grouped) return cards.map(single);
+  const byFranchise = new Map<number, MediaCard[]>();
+  for (const c of cards) {
+    const list = byFranchise.get(c.franchiseId);
+    if (list) list.push(c);
+    else byFranchise.set(c.franchiseId, [c]);
+  }
+  return [...byFranchise.values()].map(merge);
+}
+
+/** "3 seasons", "2 seasons + 1", "4 parts" — short badge for grouped cards. */
+export function franchiseBadge(item: LibraryItem): string | null {
+  const n = item.members.length;
+  if (n < 2) return null;
+  const series = item.members.filter((m) => isSeriesFormat(m.format)).length;
+  if (series === n) return `${n} seasons`;
+  if (series === 0) return `${n} parts`;
+  return `${series} season${series === 1 ? "" : "s"} + ${n - series}`;
+}
+
+type Labelled = Titled & { anilistId: number; format: string | null };
+
+function stripPrefix(title: string | null, base: string | null): string | null {
+  if (!title || !base || title.length <= base.length) return null;
+  if (!title.toLowerCase().startsWith(base.toLowerCase())) return null;
+  const rest = title
+    .slice(base.length)
+    .replace(/^[\s:\-–—~,.!]+/, "")
+    .replace(/[\s\-–—~]+$/, "")
+    .trim();
+  if (!/[\p{L}\p{N}]/u.test(rest)) return null; // "Love is War?" vs "Love is War"
+  return /^\d+$/.test(rest) ? `Season ${rest}` : rest;
+}
+
+const MARKER =
+  /\b(final season(?: part \d+)?|(?:season|cour) \d+(?: part \d+)?|\d+(?:st|nd|rd|th) season(?: part \d+)?|part \d+)\b/i;
+
+function seasonMarker(m: Titled): string | null {
+  for (const t of [m.titleEnglish, m.titleRomaji]) {
+    const hit = t?.match(MARKER)?.[1];
+    if (hit) return hit.replace(/\b\p{L}/gu, (c) => c.toUpperCase());
+  }
+  return null;
+}
+
+/**
+ * Short tab label for an entry inside its franchise: strips the shared franchise
+ * title so "Attack on Titan Season 3 Part 2" becomes "Season 3 Part 2". Falls back
+ * to the full title rather than guessing a season number.
+ */
+export function franchiseLabel(entry: Labelled, root: Labelled): string {
+  if (entry.anilistId === root.anilistId) {
+    const marker = seasonMarker(entry);
+    if (marker) return marker;
+    // The earliest *owned* entry. Only call it Season 1 when nothing says otherwise.
+    if (isSeriesFormat(entry.format)) return "Season 1";
+    return formatLabel(entry.format) || displayTitle(entry);
+  }
+  return (
+    stripPrefix(entry.titleEnglish, root.titleEnglish) ??
+    stripPrefix(entry.titleRomaji, root.titleRomaji) ??
+    seasonMarker(entry) ??
+    displayTitle(entry)
+  );
+}
+
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   const units = ["KB", "MB", "GB", "TB"];

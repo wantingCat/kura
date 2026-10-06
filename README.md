@@ -42,6 +42,7 @@ Individual episode cards with thumbnail previews, Japanese/English titles, plot 
 - **One-Click Playback**: Click any episode or the "Start / Up Next" button to launch the file directly in your operating system's default media player.
 - **Review Queue & Manual Matcher**: "Needs review" queue and manual "Fix match" search modal for any unrecognized or ambiguous files.
 - **Watched Progress Tracking**: Mark episodes as watched individually or in bulk ("Up to here"), with active progress bars on anime cards.
+- **Grouped Seasons**: AniList splits every season, movie and OVA into its own entry; Kura stitches them back into one card per show with season tabs (switchable to separate cards in Settings).
 
 ---
 

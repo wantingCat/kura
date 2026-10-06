@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod db;
+pub mod franchise;
 pub mod matcher;
 pub mod parser;
 pub mod providers;
@@ -76,6 +77,8 @@ pub fn run() {
             commands::refresh_media,
             commands::open_file,
             commands::reveal_file,
+            commands::get_prefs,
+            commands::set_pref,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

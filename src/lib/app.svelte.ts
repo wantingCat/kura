@@ -10,6 +10,8 @@ class AppStore {
   lastError = $state<string | null>(null);
   /** Bumped on every library change so pages can re-fetch their own data. */
   version = $state(0);
+  /** Show one card per franchise (seasons as tabs) instead of one per AniList entry. */
+  groupSeasons = $state(true);
 
   #refreshTimer: ReturnType<typeof setTimeout> | null = null;
   #initialised = false;
@@ -31,6 +33,12 @@ class AppStore {
     });
     await events.onScanError((msg) => (this.lastError = msg));
     this.scanning = await api.isScanning();
+    try {
+      const prefs = await api.getPrefs();
+      this.groupSeasons = prefs.group_seasons !== "0";
+    } catch {
+      /* keep defaults */
+    }
     await this.refresh();
   }
 
@@ -57,6 +65,11 @@ class AppStore {
     this.lastError = null;
     this.progress = { phase: "discover", current: 0, total: 0, message: "Starting scan…" };
     await api.startScan(libraryId);
+  }
+
+  async setGroupSeasons(on: boolean) {
+    this.groupSeasons = on;
+    await api.setPref("group_seasons", on ? "1" : "0");
   }
 
   get reviewCount() {

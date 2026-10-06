@@ -41,6 +41,11 @@ export interface MediaCard {
   lastWatchedAt: number | null;
   needsReview: boolean;
   libraryIds: number[];
+  /** AniList id of the first owned entry of this franchise (own id if standalone). */
+  franchiseId: number;
+  /** Position among owned entries of the franchise, in release order. */
+  franchiseIndex: number;
+  franchiseSize: number;
 }
 
 export interface UnmatchedGroup {
@@ -101,6 +106,20 @@ export interface GroupRef {
   manual: boolean;
 }
 
+export interface FranchiseEntry {
+  anilistId: number;
+  titleRomaji: string | null;
+  titleEnglish: string | null;
+  titleNative: string | null;
+  format: string | null;
+  status: string | null;
+  season: string | null;
+  seasonYear: number | null;
+  episodes: number | null;
+  ownedCount: number;
+  watchedCount: number;
+}
+
 export interface MediaDetail {
   anilistId: number;
   idMal: number | null;
@@ -133,6 +152,8 @@ export interface MediaDetail {
   relations: RelationCard[];
   otherFiles: FileRef[];
   groups: GroupRef[];
+  /** Owned entries of the same franchise in release order (empty if standalone). */
+  franchise: FranchiseEntry[];
 }
 
 export interface SearchResult {
@@ -178,6 +199,8 @@ export const api = {
   refreshMedia: (anilistId: number) => invoke<void>("refresh_media", { anilistId }),
   openFile: (path: string) => invoke<void>("open_file", { path }),
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),
+  getPrefs: () => invoke<Record<string, string>>("get_prefs"),
+  setPref: (key: string, value: string) => invoke<void>("set_pref", { key, value }),
 };
 
 export const events = {

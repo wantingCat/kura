@@ -1,6 +1,7 @@
 //! Tauri commands exposed to the frontend.
 
 use crate::db::{self, now};
+use crate::franchise;
 use crate::matcher;
 use crate::scan;
 use crate::service::AppState;
@@ -174,6 +175,10 @@ pub struct MediaCard {
     last_watched_at: Option<i64>,
     needs_review: bool,
     library_ids: Vec<i64>,
+    /// AniList id of the first owned entry in this franchise (itself if standalone).
+    franchise_id: i64,
+    franchise_index: usize,
+    franchise_size: usize,
 }
 
 #[tauri::command]
@@ -197,7 +202,8 @@ pub fn get_library(st: St, library_id: Option<i64>) -> CmdResult<Vec<MediaCard>>
              GROUP BY m.anilist_id",
         )
         .map_err(err)?;
-    let rows = stmt
+    let franchises = franchise::load(&conn).map_err(err)?;
+    let mut rows = stmt
         .query_map([library_id], |r: &Row| {
             let conf: f64 = r.get(20)?;
             let libs: Option<String> = r.get(21)?;
@@ -226,11 +232,24 @@ pub fn get_library(st: St, library_id: Option<i64>) -> CmdResult<Vec<MediaCard>>
                 library_ids: libs.unwrap_or_default().split(',').filter_map(|s| s.parse().ok()).collect(),
                 watched_count: r.get(22)?,
                 last_watched_at: r.get(23)?,
+                franchise_id: 0,
+                franchise_index: 0,
+                franchise_size: 1,
             })
         })
         .map_err(err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(err)?;
+    for c in &mut rows {
+        match franchises.get(&c.anilist_id) {
+            Some(p) => {
+                c.franchise_id = p.root;
+                c.franchise_index = p.index;
+                c.franchise_size = p.size;
+            }
+            None => c.franchise_id = c.anilist_id,
+        }
+    }
     Ok(rows)
 }
 
@@ -346,6 +365,23 @@ pub struct GroupRef {
     manual: bool,
 }
 
+/// One owned entry of the franchise this title belongs to, in release order.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FranchiseEntry {
+    anilist_id: i64,
+    title_romaji: Option<String>,
+    title_english: Option<String>,
+    title_native: Option<String>,
+    format: Option<String>,
+    status: Option<String>,
+    season: Option<String>,
+    season_year: Option<i64>,
+    episodes: Option<i64>,
+    owned_count: i64,
+    watched_count: i64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaDetail {
@@ -380,6 +416,7 @@ pub struct MediaDetail {
     relations: Vec<RelationCard>,
     other_files: Vec<FileRef>,
     groups: Vec<GroupRef>,
+    franchise: Vec<FranchiseEntry>,
 }
 
 fn file_ref(id: i64, path: String, size: i64) -> FileRef {
@@ -431,6 +468,7 @@ pub fn get_media_detail(st: St, anilist_id: i64) -> CmdResult<MediaDetail> {
                     relations: Vec::new(),
                     other_files: Vec::new(),
                     groups: Vec::new(),
+                    franchise: Vec::new(),
                 })
             },
         )
@@ -595,6 +633,47 @@ pub fn get_media_detail(st: St, anilist_id: i64) -> CmdResult<MediaDetail> {
             .flatten()
             .collect();
     }
+
+    // Other owned seasons / movies / OVAs of the same franchise
+    {
+        let franchises = franchise::load(&conn).map_err(err)?;
+        if let Some(me) = franchises.get(&anilist_id).filter(|p| p.size > 1) {
+            let mut members: Vec<(usize, i64)> =
+                franchises.iter().filter(|(_, p)| p.root == me.root).map(|(id, p)| (p.index, *id)).collect();
+            members.sort();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT m.anilist_id, m.title_romaji, m.title_english, m.title_native, m.format, m.status, m.season,
+                            m.season_year, m.episodes,
+                            (SELECT COUNT(DISTINCT f.ep_key) FROM local_files f
+                              WHERE f.anilist_id = m.anilist_id AND f.ep_key NOT LIKE 'S%'),
+                            (SELECT COUNT(*) FROM watch_state w WHERE w.anilist_id = m.anilist_id AND w.ep_key NOT LIKE 'S%')
+                     FROM media m WHERE m.anilist_id = ?1",
+                )
+                .map_err(err)?;
+            for (_, id) in members {
+                let entry = stmt
+                    .query_row([id], |r| {
+                        Ok(FranchiseEntry {
+                            anilist_id: r.get(0)?,
+                            title_romaji: r.get(1)?,
+                            title_english: r.get(2)?,
+                            title_native: r.get(3)?,
+                            format: r.get(4)?,
+                            status: r.get(5)?,
+                            season: r.get(6)?,
+                            season_year: r.get(7)?,
+                            episodes: r.get(8)?,
+                            owned_count: r.get(9)?,
+                            watched_count: r.get(10)?,
+                        })
+                    })
+                    .optional()
+                    .map_err(err)?;
+                d.franchise.extend(entry);
+            }
+        }
+    }
     Ok(d)
 }
 
@@ -733,4 +812,27 @@ pub fn open_file(st: St, path: String) -> CmdResult<()> {
 pub fn reveal_file(st: St, path: String) -> CmdResult<()> {
     known_file(&st, &path)?;
     tauri_plugin_opener::reveal_item_in_dir(&path).map_err(err)
+}
+
+// ---------------------------------------------------------------------------
+// Preferences
+// ---------------------------------------------------------------------------
+
+/// UI preferences, stored as `pref.<key>` rows in the settings table.
+#[tauri::command]
+pub fn get_prefs(st: St) -> CmdResult<HashMap<String, String>> {
+    let conn = st.db();
+    let mut stmt = conn.prepare("SELECT key, value FROM settings WHERE key LIKE 'pref.%'").map_err(err)?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(err)?
+        .flatten()
+        .map(|(k, v)| (k.trim_start_matches("pref.").to_string(), v))
+        .collect();
+    Ok(rows)
+}
+
+#[tauri::command]
+pub fn set_pref(st: St, key: String, value: String) -> CmdResult<()> {
+    db::set_setting(&st.db(), &format!("pref.{key}"), &value).map_err(err)
 }
