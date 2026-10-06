@@ -1,0 +1,437 @@
+/* Kura design system ------------------------------------------------------
+ * Derived from the logo: plum-brown ink (#453033), coral (#F76D4D), cream,
+ * and the cat's pink. Flat surfaces, chunky radii and solid "sticker"
+ * offset shadows — no gradients, glass or glows.
+ * ------------------------------------------------------------------------ */
+
+:root {
+  /* Brand */
+  --coral: #f76d4d;
+  --coral-hi: #ff8466;
+  --coral-lo: #d9553a;
+  --plum: #453033; /* exact kanji ink */
+  --pink: #f8b9ba; /* cat ear / paw */
+  --cream: #f7ede2;
+
+  /* Surfaces (plum family, darkest → lightest) */
+  --line: #140c0d; /* sticker outlines + offset shadows */
+  --bg: #1d1415;
+  --bg-elev: #241819;
+  --surface: #2c1f21;
+  --surface-2: #362628;
+  --surface-3: #453033;
+  --border: #3d2b2e;
+  --border-strong: #5a4145;
+
+  /* Text */
+  --text: var(--cream);
+  --text-2: #cdbab0;
+  --text-3: #93807b;
+  --on-coral: #2a1719;
+
+  /* Status */
+  --ok: #8fcf9a;
+  --amber: #f5b84d;
+  --danger: #ff6b6b;
+
+  /* Legacy aliases (kept so older component styles map onto the brand) */
+  --sakura: var(--coral);
+  --violet: var(--coral);
+  --sky: var(--pink);
+  --mint: var(--ok);
+  --accent: var(--coral);
+  --grad: var(--coral);
+  --grad-soft: color-mix(in srgb, var(--coral) 14%, transparent);
+  --glass: var(--surface);
+  --blur: none;
+
+  /* Shape & depth */
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 20px;
+  --r-xl: 28px;
+  --bw: 2px;
+  --sticker: 3px 3px 0 var(--line);
+  --sticker-lg: 5px 5px 0 var(--line);
+  --shadow-sm: var(--sticker);
+  --shadow-md: var(--sticker);
+  --shadow-lg: var(--sticker-lg);
+
+  /* Type */
+  --font: "Nunito Variable", "Segoe UI", system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", "Noto Sans CJK JP", sans-serif;
+  --font-display: "Fredoka Variable", var(--font);
+  --font-jp: "Hiragino Sans", "Yu Gothic UI", "Meiryo", "Noto Sans CJK JP", "Noto Sans JP", var(--font);
+
+  /* Motion */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --t-fast: 140ms;
+  --t-med: 260ms;
+
+  --sidebar-w: 240px;
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14.5px;
+  font-weight: 500;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: 0;
+  line-height: 1.15;
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+.jp {
+  font-family: var(--font-jp);
+}
+
+::selection {
+  background: var(--coral);
+  color: var(--on-coral);
+}
+
+:focus-visible {
+  outline: 2px solid var(--coral);
+  outline-offset: 2px;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: 99px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--border-strong);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Buttons -----------------------------------------------------------------
+ * Sticker buttons: solid fill, dark outline, offset shadow that "presses". */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 16px;
+  border-radius: var(--r-md);
+  border: var(--bw) solid var(--line);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 14.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: var(--sticker);
+  transition:
+    background var(--t-fast) var(--ease),
+    transform var(--t-fast) var(--ease),
+    box-shadow var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+.btn:hover {
+  background: var(--surface-3);
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--line);
+}
+.btn:active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 var(--line);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: var(--sticker);
+}
+.btn svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.btn-primary {
+  background: var(--coral);
+  color: var(--on-coral);
+}
+.btn-primary:hover {
+  background: var(--coral-hi);
+}
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--text-2);
+}
+.btn-ghost:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  box-shadow: none;
+  transform: none;
+}
+.btn-ghost:active {
+  box-shadow: none;
+  transform: translateY(1px);
+}
+.btn-danger:hover {
+  background: var(--danger);
+  color: var(--on-coral);
+}
+.btn-sm {
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+  border-radius: var(--r-sm);
+}
+.btn-icon {
+  width: 40px;
+  padding: 0;
+}
+.btn-sm.btn-icon {
+  width: 32px;
+}
+
+/* Inputs ------------------------------------------------------------------ */
+.input {
+  height: 40px;
+  padding: 0 14px;
+  border-radius: var(--r-md);
+  border: var(--bw) solid var(--line);
+  background: var(--bg-elev);
+  outline: none;
+  box-shadow: inset 2px 2px 0 hsl(0 0% 0% / 0.25);
+  transition:
+    border-color var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
+}
+.input::placeholder {
+  color: var(--text-3);
+}
+.input:focus {
+  border-color: var(--coral);
+  background: var(--surface);
+}
+
+/* Chips & badges ---------------------------------------------------------- */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 99px;
+  border: var(--bw) solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--t-fast) var(--ease);
+}
+.chip:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.chip.active {
+  background: var(--coral);
+  border-color: var(--line);
+  color: var(--on-coral);
+  box-shadow: 2px 2px 0 var(--line);
+}
+.chip.active .chip-count {
+  color: color-mix(in srgb, var(--on-coral) 70%, transparent);
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+.badge-accent {
+  background: var(--coral);
+  color: var(--on-coral);
+}
+.badge-warn {
+  background: var(--amber);
+  color: var(--on-coral);
+}
+.badge-ok {
+  background: var(--ok);
+  color: var(--on-coral);
+}
+
+/* Layout helpers ---------------------------------------------------------- */
+.page {
+  padding: 28px 36px 64px;
+  max-width: 1680px;
+  margin: 0 auto;
+}
+.section-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 14px;
+  font-size: 21px;
+  font-weight: 600;
+}
+.section-title .count {
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+.muted {
+  color: var(--text-2);
+}
+.faint {
+  color: var(--text-3);
+}
+.card {
+  background: var(--surface);
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--sticker);
+}
+
+/* Mascot ------------------------------------------------------------------ */
+.mascot {
+  display: block;
+  user-select: none;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+/* Animations -------------------------------------------------------------- */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes peek {
+  from {
+    transform: translateY(70%);
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes wave {
+  0%,
+  60%,
+  100% {
+    transform: rotate(0);
+  }
+  70% {
+    transform: rotate(-6deg);
+  }
+  85% {
+    transform: rotate(4deg);
+  }
+}
+@keyframes pulse-soft {
+  50% {
+    opacity: 0.55;
+  }
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.skeleton {
+  background: var(--surface);
+  animation: pulse-soft 1.4s ease-in-out infinite;
+}
+.spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2.5px solid var(--surface-3);
+  border-top-color: var(--coral);
+  animation: spin 0.8s linear infinite;
+  flex: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}
