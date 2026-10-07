@@ -76,6 +76,12 @@ export interface ExtraFile {
   size: number;
 }
 
+export interface MediaTrackPref {
+  audioPref: string | null;
+  subPref: string | null;
+  subFallback: string | null;
+}
+
 export interface EpisodeRow {
   epKey: string;
   number: number;
@@ -167,6 +173,7 @@ export interface MediaDetail {
   groups: GroupRef[];
   /** Owned entries of the same franchise in release order (empty if standalone). */
   franchise: FranchiseEntry[];
+  trackPref: MediaTrackPref | null;
 }
 
 export interface SearchResult {
@@ -265,6 +272,9 @@ export const api = {
     invoke<void>("play_episode", { anilistId, epKey, path }),
   getUpNext: (limit = 6) => invoke<UpNextItem[]>("get_up_next", { limit }),
   getNewEpisodes: (limit = 6) => invoke<UpNextItem[]>("get_new_episodes", { limit }),
+  getMediaTrackPref: (anilistId: number) => invoke<MediaTrackPref | null>("get_media_track_pref", { anilistId }),
+  setMediaTrackPref: (anilistId: number, pref: MediaTrackPref | null) =>
+    invoke<void>("set_media_track_pref", { anilistId, pref }),
 };
 
 export const events = {

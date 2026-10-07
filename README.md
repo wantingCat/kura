@@ -5,7 +5,7 @@
   <br>
   <strong>A local-first, manga-styled desktop anime media library.</strong>
   <br>
-  <em>Current Release: <code>v0.3.0-alpha</code> · Built with AI assistance</em>
+  <em>Current Release: <code>v0.3.1-alpha</code> · Built with AI assistance</em>
 </p>
 
 ---
@@ -35,11 +35,12 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 
 ## ✨ Features
 
-### New in `v0.3.0-alpha`
+### New in `v0.3.1-alpha`
 - **Plays in your own player**: [mpv](https://mpv.io), [VLC](https://www.videolan.org/vlc/), [MPC-HC / MPC-BE](https://github.com/clsid2/mpc-hc) and [Memento](https://github.com/ripose-jp/Memento) are detected automatically (or pick the program yourself). The system default player still works too.
 - **Progress & resume**: Kura follows playback, remembers where you stopped, and resumes from there next time. Episode lists show how far into each episode you are.
 - **Auto-marked watched**: An episode counts as watched once you pass 90% of it (adjustable in Settings), so skipping the ending still counts.
 - **Autoplay next episode** *(off by default)*: When an episode ends, the next one you own starts in the same player window — including the first episode of the next season.
+- **Audio & Subtitle Track Defaults**: Set your global preferences (e.g. Japanese audio + Japanese subtitles with English fallback, English dub with subtitles off, etc.) in Settings. Automatically passes track selection flags to mpv, Memento, and VLC. Custom track overrides can also be configured per anime directly on the series detail page.
 - **Plex & Jellyfin folder support**: Robust matching for multi-season libraries organized by folders (`Season 1`, `Season 2`). Handles complex franchise bridges across OVAs, specials, and TV side-stories (*Slime*, *Date A Live*, *Full Metal Panic*).
 - **Extras & Bonus videos**: Automatic classification and dedicated playback section for creditless openings (`NCOP`), endings (`NCED`), trailers, PVs, and bonus features without polluting episode tallies.
 - **Cinematic Backdrop Header**: Expanded widescreen backdrop panel with gradient shade and layered poster artwork on anime detail pages.
@@ -65,7 +66,7 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 - [x] **Auto-Update**: Signed in-app updates from GitHub Releases.
 - [ ] **Folder Watcher / Auto-Rescan**: Automatic background scanning triggered when new episode downloads or torrents complete in monitored directories.
 - [ ] **Rich Cast & Staff Metadata**: Character voice actors (Japanese seiyuu & English cast with character portraits), director, series composition, music composers, and key studio staff on the anime detail page.
-- [ ] **Subtitles & Audio Track Defaults**: Configurable default audio language (e.g. Japanese vs. English dub) and subtitle preferences automatically passed to players on launch.
+- [x] **Subtitles & Audio Track Defaults**: Configurable default audio language (e.g. Japanese vs. English dub) and subtitle preferences automatically passed to players on launch.
 - [ ] **Advanced Filtering & Search**: Filter by genres, tags, studios, release seasons, voice actors, and airing status.
 - [ ] **Local Art & Poster Overrides**: Priority detection for local `poster.jpg`, `backdrop.jpg`, and season artwork from Jellyfin/Plex directories.
 - [x] **Cross-Platform Release Automation**: Automated CI/CD builds for Windows (`.exe`/`.msi`), macOS (`.dmg`), and Linux (`.deb`/`.rpm`/`.AppImage`) via GitHub Actions.

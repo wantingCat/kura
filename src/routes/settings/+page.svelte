@@ -1,12 +1,22 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { getVersion } from "@tauri-apps/api/app";
   import { api, type DetectedPlayer, type Library, type PlayerKind } from "$lib/api";
   import { app } from "$lib/app.svelte";
   import { updater } from "$lib/updater.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import NewLibraryForm from "$lib/components/NewLibraryForm.svelte";
+  import {
+    AUDIO_LANG_OPTIONS,
+    SUB_LANG_OPTIONS,
+    SUB_FALLBACK_OPTIONS,
+    TRACK_PRESETS,
+    describeTrackSummary,
+    matchingPresetId,
+    type TrackPreset,
+  } from "$lib/languages";
 
   let showNew = $state(false);
   let renaming = $state<number | null>(null);
@@ -51,6 +61,20 @@
   async function choose(k: PlayerKind) {
     await app.setPlayback("player", k);
     await app.setPlayback("playerPath", "");
+  }
+
+  // Audio & Subtitles -------------------------------------------------------
+  const currentTrackPreset = $derived(
+    matchingPresetId(app.playback.audioLang, app.playback.subLang, app.playback.subFallback)
+  );
+  const trackSummary = $derived(
+    describeTrackSummary(app.playback.audioLang, app.playback.subLang, app.playback.subFallback)
+  );
+
+  async function applyTrackPreset(p: TrackPreset) {
+    await app.setPlayback("audioLang", p.audio);
+    await app.setPlayback("subLang", p.sub);
+    await app.setPlayback("subFallback", p.fallback);
   }
 
   async function browse() {
@@ -368,6 +392,101 @@
   </section>
 
   <section class="block">
+    <h2 class="section-title">Audio & Subtitles</h2>
+    <div class="card playback">
+      <div class="opt-head">
+        <h3>Default track preferences</h3>
+        <p class="faint">Kura tells mpv, Memento, and VLC your language priorities when launching episodes. You can also override this for individual shows.</p>
+      </div>
+
+      <div class="choices presets-grid" role="radiogroup" aria-label="Audio and subtitle presets">
+        {#each TRACK_PRESETS as p (p.id)}
+          <button
+            class="choice"
+            class:on={currentTrackPreset === p.id}
+            role="radio"
+            aria-checked={currentTrackPreset === p.id}
+            onclick={() => applyTrackPreset(p)}
+            id={`track-preset-${p.id}`}
+          >
+            <span class="choice-text">
+              <strong>
+                {p.name}
+                {#if p.id === "jp-jp-en"}<span class="rec">Default</span>{/if}
+              </strong>
+              <small>{p.blurb}</small>
+            </span>
+          </button>
+        {/each}
+        <button
+          class="choice"
+          class:on={currentTrackPreset === "custom"}
+          role="radio"
+          aria-checked={currentTrackPreset === "custom"}
+          onclick={() => {}}
+          id="track-preset-custom"
+        >
+          <span class="choice-text">
+            <strong>Custom priority</strong>
+            <small>Fine-tune languages using the selectors below.</small>
+          </span>
+        </button>
+      </div>
+
+      <div class="track-fields">
+        <div class="field">
+          <label for="pref-audio-lang">Preferred audio</label>
+          <select
+            id="pref-audio-lang"
+            class="input select"
+            value={app.playback.audioLang}
+            onchange={(e) => app.setPlayback("audioLang", e.currentTarget.value)}
+          >
+            {#each AUDIO_LANG_OPTIONS as opt}
+              <option value={opt.value}>{opt.label}</option>
+            {/each}
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="pref-sub-lang">Primary subtitles</label>
+          <select
+            id="pref-sub-lang"
+            class="input select"
+            value={app.playback.subLang}
+            onchange={(e) => app.setPlayback("subLang", e.currentTarget.value)}
+          >
+            {#each SUB_LANG_OPTIONS as opt}
+              <option value={opt.value}>{opt.label}</option>
+            {/each}
+          </select>
+        </div>
+
+        <div class="field" class:disabled={app.playback.subLang === "off"}>
+          <label for="pref-sub-fallback">Fallback subtitles</label>
+          <select
+            id="pref-sub-fallback"
+            class="input select"
+            disabled={app.playback.subLang === "off"}
+            value={app.playback.subFallback}
+            onchange={(e) => app.setPlayback("subFallback", e.currentTarget.value)}
+          >
+            {#each SUB_FALLBACK_OPTIONS as opt}
+              <option value={opt.value}>{opt.label}</option>
+            {/each}
+          </select>
+          <small class="faint">Selected if the primary subtitle language isn't present in the file.</small>
+        </div>
+      </div>
+
+      <div class="track-summary-pill">
+        <Icon name="languages" size={15} />
+        <span>Active priority: <strong>{trackSummary}</strong></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
     <h2 class="section-title">Updates</h2>
     <div class="card playback">
       <div class="rows">
@@ -414,12 +533,59 @@
   <section class="block">
     <h2 class="section-title">About</h2>
     <div class="card about">
-      <p>
-        <strong>Kura</strong> <span class="faint">v0.2.0-alpha</span> · a local-first anime library. Metadata from
-        <strong>AniList</strong>, episode info from <strong>ani.zip</strong> and <strong>Jikan (MyAnimeList)</strong>.
-        Everything is cached locally, and your media files never leave your computer.
-      </p>
-      <p class="faint coming">Coming next: automatic rescans when new episodes land in your folders, and AniList account sync.</p>
+      <div class="about-hero">
+        <img class="about-logo" src="/brand/logo.png" alt="Kura Logo" width="48" height="48" />
+        <div class="about-title-block">
+          <h3>
+            Kura 蔵
+            <span class="badge badge-accent">v{version || "0.3.1-alpha"}</span>
+          </h3>
+          <p class="faint">A local-first, manga-styled desktop anime media library.</p>
+        </div>
+      </div>
+
+      <div class="about-body">
+        <p>
+          Point Kura at your folders and it parses release filenames, matches series to AniList,
+          fetches episode guides and artworks via ani.zip, and plays episodes directly in your preferred video player.
+          All metadata, watch history, and image caches remain stored locally in SQLite — your files never leave your computer.
+        </p>
+      </div>
+
+      <div class="about-grid">
+        <div class="about-item">
+          <strong>Metadata Providers</strong>
+          <small>AniList API · ani.zip · Jikan (MyAnimeList)</small>
+        </div>
+        <div class="about-item">
+          <strong>Player Integrations</strong>
+          <small>mpv · Memento · VLC · MPC-HC / MPC-BE</small>
+        </div>
+      </div>
+
+      <div class="about-actions">
+        <button
+          class="btn btn-sm"
+          onclick={() => openUrl("https://github.com/wantingCat/kura")}
+          id="about-github"
+        >
+          <Icon name="external" size={14} /> GitHub Repository
+        </button>
+        <button
+          class="btn btn-sm btn-ghost"
+          onclick={() => openUrl("https://github.com/wantingCat/kura/releases")}
+          id="about-releases"
+        >
+          Releases & Changelog
+        </button>
+      </div>
+
+      <div class="about-coming">
+        <strong>Coming up in future releases:</strong>
+        <p class="faint">
+          Automatic background folder watcher, 2-way AniList & MyAnimeList account sync, and rich cast/voice actors & staff metadata.
+        </p>
+      </div>
     </div>
   </section>
 </div>
@@ -560,13 +726,76 @@
     font-size: 12.5px;
   }
   .about {
-    padding: 20px;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
     color: var(--text-2);
-    line-height: 1.7;
   }
-  .coming {
-    margin-top: 10px;
+  .about-hero {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .about-logo {
+    width: 48px;
+    height: 48px;
+    border-radius: var(--r-md);
+    border: var(--bw) solid var(--line);
+    background: var(--bg-elev);
+    box-shadow: 2px 2px 0 var(--line);
+    object-fit: contain;
+    flex: none;
+  }
+  .about-title-block h3 {
+    font-size: 19px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .about-body p {
+    line-height: 1.65;
+    font-size: 14px;
+  }
+  .about-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+  }
+  .about-item {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 12px 14px;
+    border-radius: var(--r-md);
+    background: var(--surface);
+    border: var(--bw) solid var(--line);
+  }
+  .about-item strong {
     font-size: 13px;
+    font-family: var(--font-display);
+    color: var(--text);
+  }
+  .about-item small {
+    font-size: 12px;
+    color: var(--text-3);
+  }
+  .about-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .about-coming {
+    padding-top: 14px;
+    border-top: 1.5px solid var(--border);
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .about-coming strong {
+    font-family: var(--font-display);
+    color: var(--text);
   }
 
   /* Display preferences ---------------------------------------------------- */
@@ -894,5 +1123,40 @@
   }
   .separate i:nth-child(3) {
     left: 40px;
+  }
+
+  .presets-grid {
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .track-fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-top: 20px;
+    padding-top: 18px;
+    border-top: 1.5px solid var(--border);
+  }
+  .track-fields select {
+    cursor: pointer;
+  }
+  .track-summary-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    background: var(--surface);
+    border: var(--bw) solid var(--line);
+    border-radius: 99px;
+    font-size: 13px;
+    color: var(--text-2);
+    margin-top: 18px;
+  }
+  .track-summary-pill strong {
+    color: var(--coral);
+  }
+  .field.disabled {
+    opacity: 0.45;
+    pointer-events: none;
   }
 </style>

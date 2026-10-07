@@ -434,6 +434,7 @@ pub struct MediaDetail {
     other_files: Vec<FileRef>,
     groups: Vec<GroupRef>,
     franchise: Vec<FranchiseEntry>,
+    track_pref: Option<db::MediaTrackPref>,
 }
 
 fn file_ref(id: i64, path: String, size: i64) -> FileRef {
@@ -487,6 +488,7 @@ pub fn get_media_detail(st: St, anilist_id: i64) -> CmdResult<MediaDetail> {
                     other_files: Vec::new(),
                     groups: Vec::new(),
                     franchise: Vec::new(),
+                    track_pref: None,
                 })
             },
         )
@@ -755,6 +757,7 @@ pub fn get_media_detail(st: St, anilist_id: i64) -> CmdResult<MediaDetail> {
             }
         }
     }
+    d.track_pref = db::get_media_track_pref(&conn, anilist_id).map_err(err)?;
     Ok(d)
 }
 
@@ -1136,4 +1139,16 @@ pub fn get_prefs(st: St) -> CmdResult<HashMap<String, String>> {
 #[tauri::command]
 pub fn set_pref(st: St, key: String, value: String) -> CmdResult<()> {
     db::set_setting(&st.db(), &format!("pref.{key}"), &value).map_err(err)
+}
+
+#[tauri::command]
+pub fn get_media_track_pref(st: St, anilist_id: i64) -> CmdResult<Option<db::MediaTrackPref>> {
+    db::get_media_track_pref(&st.db(), anilist_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn set_media_track_pref(app: AppHandle, st: St, anilist_id: i64, pref: Option<db::MediaTrackPref>) -> CmdResult<()> {
+    db::set_media_track_pref(&st.db(), anilist_id, pref).map_err(err)?;
+    let _ = app.emit("library-changed", ());
+    Ok(())
 }

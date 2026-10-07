@@ -252,6 +252,7 @@ async function detail(id: number): Promise<MediaDetail> {
     relations,
     extras: [],
     otherFiles: [],
+    trackPref: null,
     groups: [{ id: 1, displayName: m.title.romaji, folderPath: `D:\\Anime\\${m.title.romaji}`, confidence: 0.97, manual: false }],
     franchise: (() => {
       const f = franchises(all).get(id);
@@ -355,7 +356,7 @@ export function installMock() {
           );
           return null;
         case "plugin:app|version":
-          return "0.2.0";
+          return "0.3.1";
         default:
           console.info("[preview] ignored command", cmd, a);
           return null;

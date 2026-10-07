@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 const SCHEMA_V1: &str = r#"
@@ -145,6 +146,17 @@ CREATE TABLE IF NOT EXISTS watch_progress (
 );
 "#;
 
+/// v0.3: per-show audio & subtitle track preferences.
+const SCHEMA_V3: &str = r#"
+CREATE TABLE IF NOT EXISTS media_track_prefs (
+    anilist_id    INTEGER PRIMARY KEY,
+    audio_pref    TEXT,
+    sub_pref      TEXT,
+    sub_fallback  TEXT,
+    updated_at    INTEGER NOT NULL
+);
+"#;
+
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(
@@ -163,6 +175,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if version < 2 {
         conn.execute_batch(&format!("BEGIN; {SCHEMA_V2} PRAGMA user_version = 2; COMMIT;"))?;
+    }
+    if version < 3 {
+        conn.execute_batch(&format!("BEGIN; {SCHEMA_V3} PRAGMA user_version = 3; COMMIT;"))?;
     }
     Ok(())
 }
@@ -265,4 +280,49 @@ pub fn episode_index(conn: &Connection, id: i64) -> Result<Vec<(String, Option<i
         .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)? != 0)))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaTrackPref {
+    pub audio_pref: Option<String>,
+    pub sub_pref: Option<String>,
+    pub sub_fallback: Option<String>,
+}
+
+pub fn get_media_track_pref(conn: &Connection, anilist_id: i64) -> Result<Option<MediaTrackPref>> {
+    conn.query_row(
+        "SELECT audio_pref, sub_pref, sub_fallback FROM media_track_prefs WHERE anilist_id = ?1",
+        [anilist_id],
+        |r| {
+            Ok(MediaTrackPref {
+                audio_pref: r.get(0)?,
+                sub_pref: r.get(1)?,
+                sub_fallback: r.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn set_media_track_pref(conn: &Connection, anilist_id: i64, pref: Option<MediaTrackPref>) -> Result<()> {
+    match pref {
+        Some(p) => {
+            conn.execute(
+                "INSERT INTO media_track_prefs (anilist_id, audio_pref, sub_pref, sub_fallback, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(anilist_id) DO UPDATE SET
+                    audio_pref = excluded.audio_pref,
+                    sub_pref = excluded.sub_pref,
+                    sub_fallback = excluded.sub_fallback,
+                    updated_at = excluded.updated_at",
+                rusqlite::params![anilist_id, p.audio_pref, p.sub_pref, p.sub_fallback, now()],
+            )?;
+        }
+        None => {
+            conn.execute("DELETE FROM media_track_prefs WHERE anilist_id = ?1", [anilist_id])?;
+        }
+    }
+    Ok(())
 }

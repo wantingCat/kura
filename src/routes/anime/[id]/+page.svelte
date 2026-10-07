@@ -19,11 +19,13 @@
   } from "$lib/format";
   import Icon from "$lib/components/Icon.svelte";
   import FixMatchDialog from "$lib/components/FixMatchDialog.svelte";
+  import TrackPrefsDialog from "$lib/components/TrackPrefsDialog.svelte";
 
   const id = $derived(Number(page.params.id));
   let d = $state<MediaDetail | null>(null);
   let error = $state<string | null>(null);
   let showFix = $state(false);
+  let showTracks = $state(false);
   let synopsisOpen = $state(false);
   let refreshing = $state(false);
   let expanded = $state<Set<string>>(new Set());
@@ -224,6 +226,12 @@
                   {/if}
                 </button>
               {/if}
+              <button class="btn" onclick={() => (showTracks = true)} id="detail-track-prefs" title="Audio & Subtitles">
+                <Icon name="subtitles" size={15} /> Audio & Subs
+                {#if d.trackPref}
+                  <span class="custom-track-badge">Custom</span>
+                {/if}
+              </button>
               <button class="btn" onclick={() => (showFix = true)} id="detail-fix-match">
                 <Icon name="link" size={15} /> Fix match
               </button>
@@ -539,6 +547,18 @@
         subtitle={`Currently matched to “${displayTitle(d)}”`}
         onclose={() => (showFix = false)}
         ondone={(newId) => goto(`/anime/${newId}`)}
+      />
+    {/if}
+
+    {#if showTracks}
+      <TrackPrefsDialog
+        anilistId={d.anilistId}
+        title={displayTitle(d)}
+        initialPref={d.trackPref}
+        onclose={() => (showTracks = false)}
+        onsave={(saved) => {
+          if (d) d.trackPref = saved;
+        }}
       />
     {/if}
   {/key}
@@ -1445,5 +1465,16 @@
   .src {
     margin-top: 10px;
     font-size: 11.5px;
+  }
+  .custom-track-badge {
+    padding: 1px 6px;
+    border-radius: 99px;
+    background: var(--coral);
+    color: var(--on-coral);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-left: 2px;
   }
 </style>

@@ -191,6 +191,75 @@ pub fn prefs(conn: &Connection) -> Prefs {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct EffectiveTrackPrefs {
+    pub audio: Option<String>,
+    pub sub: Option<String>,
+    pub sub_fallback: Option<String>,
+}
+
+pub fn effective_track_prefs(conn: &Connection, anilist_id: i64) -> EffectiveTrackPrefs {
+    let show = db::get_media_track_pref(conn, anilist_id).ok().flatten();
+    let get_global = |k: &str| db::get_setting(conn, &format!("pref.{k}")).ok().flatten().filter(|s| !s.trim().is_empty());
+
+    let audio = show
+        .as_ref()
+        .and_then(|s| s.audio_pref.clone())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| get_global("audio_lang"))
+        .unwrap_or_else(|| "jpn".into());
+
+    let sub = show
+        .as_ref()
+        .and_then(|s| s.sub_pref.clone())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| get_global("sub_lang"))
+        .unwrap_or_else(|| "jpn".into());
+
+    let sub_fallback = show
+        .as_ref()
+        .and_then(|s| s.sub_fallback.clone())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| get_global("sub_fallback"))
+        .unwrap_or_else(|| "eng".into());
+
+    EffectiveTrackPrefs {
+        audio: Some(audio),
+        sub: Some(sub),
+        sub_fallback: Some(sub_fallback),
+    }
+}
+
+pub fn lang_aliases(code: &str) -> Vec<&'static str> {
+    match code.trim().to_ascii_lowercase().as_str() {
+        "jpn" | "ja" | "japanese" => vec!["jpn", "ja", "Japanese", "jp"],
+        "eng" | "en" | "english" => vec!["eng", "en", "English"],
+        "ger" | "de" | "deu" | "german" => vec!["ger", "deu", "de", "German"],
+        "spa" | "es" | "spanish" => vec!["spa", "es", "Spanish", "Castilian"],
+        "fre" | "fr" | "fra" | "french" => vec!["fre", "fra", "fr", "French"],
+        "ita" | "it" | "italian" => vec!["ita", "it", "Italian"],
+        "por" | "pt" | "portuguese" => vec!["por", "pt", "Portuguese", "Brazilian"],
+        "chi" | "zho" | "zh" | "chinese" => vec!["chi", "zho", "zh", "Chinese"],
+        "kor" | "ko" | "korean" => vec!["kor", "ko", "Korean"],
+        "rus" | "ru" | "russian" => vec!["rus", "ru", "Russian"],
+        "ara" | "ar" | "arabic" => vec!["ara", "ar", "Arabic"],
+        _ => vec![],
+    }
+}
+
+pub fn expand_lang_list(code: &str) -> Vec<String> {
+    let trimmed = code.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("any") || trimmed.eq_ignore_ascii_case("default") {
+        return vec![];
+    }
+    let aliases = lang_aliases(trimmed);
+    if aliases.is_empty() {
+        vec![trimmed.to_string()]
+    } else {
+        aliases.into_iter().map(String::from).collect()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Progress storage
 // ---------------------------------------------------------------------------
@@ -467,11 +536,40 @@ impl Controller {
     }
 
     /// Load another file into the same player window (autoplay).
-    async fn load(&mut self, path: &str, start: f64) -> bool {
+    async fn load(&mut self, path: &str, start: f64, tracks: &EffectiveTrackPrefs) -> bool {
         match self {
             Controller::Mpv(m) => {
                 let start_opt = if start > 0.0 { format!("+{start:.0}") } else { "none".into() };
                 let _ = m.call(serde_json::json!(["set_property", "start", start_opt])).await;
+                if let Some(ref a) = tracks.audio {
+                    let list = expand_lang_list(a);
+                    if !list.is_empty() {
+                        let _ = m.call(serde_json::json!(["set_property", "alang", list.join(",")])).await;
+                    }
+                }
+                match tracks.sub.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+                    Some(s) if s == "off" || s == "none" => {
+                        let _ = m.call(serde_json::json!(["set_property", "sid", "no"])).await;
+                    }
+                    Some(s) if !s.is_empty() && s != "any" && s != "default" => {
+                        let mut list = expand_lang_list(&s);
+                        if let Some(fb) = tracks.sub_fallback.as_deref() {
+                            let fb_clean = fb.trim().to_ascii_lowercase();
+                            if fb_clean != "off" && fb_clean != "none" && fb_clean != "any" && fb_clean != s {
+                                for lang in expand_lang_list(&fb_clean) {
+                                    if !list.contains(&lang) {
+                                        list.push(lang);
+                                    }
+                                }
+                            }
+                        }
+                        if !list.is_empty() {
+                            let _ = m.call(serde_json::json!(["set_property", "slang", list.join(",")])).await;
+                            let _ = m.call(serde_json::json!(["set_property", "subs-with-matching-audio", "yes"])).await;
+                        }
+                    }
+                    _ => {}
+                }
                 m.call(serde_json::json!(["loadfile", path, "replace"])).await.is_some()
             }
             Controller::Vlc(v) => {
@@ -559,11 +657,12 @@ fn ipc_address(tag: &str) -> String {
 
 /// Start playing an episode with the configured player. Returns immediately; tracking runs in the background.
 pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
-    let (p, start) = {
+    let (p, start, track_prefs) = {
         let conn = st.db();
         let p = prefs(&conn);
         let start = if p.resume { resume_point(saved_progress(&conn, ep.anilist_id, &ep.ep_key), p.threshold) } else { 0.0 };
-        (p, start)
+        let track_prefs = effective_track_prefs(&conn, ep.anilist_id);
+        (p, start, track_prefs)
     };
     // Supersede any previous tracking session.
     let session = st.play_session.fetch_add(1, Ordering::SeqCst) + 1;
@@ -584,6 +683,41 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
 
     let tag = token();
     let mut cmd = std::process::Command::new(&exe);
+
+    let audio_args: Option<String> = track_prefs.audio.as_deref().and_then(|a| {
+        let list = expand_lang_list(a);
+        if list.is_empty() { None } else { Some(list.join(",")) }
+    });
+
+    enum SubArg {
+        Off,
+        Langs(String),
+        Default,
+    }
+
+    let sub_arg = match track_prefs.sub.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+        Some(s) if s == "off" || s == "none" => SubArg::Off,
+        Some(s) if !s.is_empty() && s != "any" && s != "default" => {
+            let mut list = expand_lang_list(&s);
+            if let Some(fb) = track_prefs.sub_fallback.as_deref() {
+                let fb_clean = fb.trim().to_ascii_lowercase();
+                if fb_clean != "off" && fb_clean != "none" && fb_clean != "any" && fb_clean != s {
+                    for lang in expand_lang_list(&fb_clean) {
+                        if !list.contains(&lang) {
+                            list.push(lang);
+                        }
+                    }
+                }
+            }
+            if list.is_empty() {
+                SubArg::Default
+            } else {
+                SubArg::Langs(list.join(","))
+            }
+        }
+        _ => SubArg::Default,
+    };
+
     let pending = match p.kind {
         Kind::Mpv | Kind::Memento => {
             let addr = ipc_address(&tag);
@@ -593,6 +727,19 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             }
             if start > 0.0 {
                 cmd.arg(format!("--start=+{start:.0}"));
+            }
+            if let Some(ref a) = audio_args {
+                cmd.arg(format!("--alang={a}"));
+            }
+            match &sub_arg {
+                SubArg::Off => {
+                    cmd.arg("--sid=no");
+                }
+                SubArg::Langs(s) => {
+                    cmd.arg(format!("--slang={s}"));
+                    cmd.arg("--subs-with-matching-audio=yes");
+                }
+                SubArg::Default => {}
             }
             cmd.arg("--").arg(&ep.path);
             Pending::Mpv(addr)
@@ -605,6 +752,18 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
                 .arg(format!("--http-password={password}"));
             if start > 0.0 {
                 cmd.arg(format!("--start-time={start:.0}"));
+            }
+            if let Some(ref a) = audio_args {
+                cmd.arg(format!("--audio-language={a}"));
+            }
+            match &sub_arg {
+                SubArg::Off => {
+                    cmd.args(["--no-sub-autodetect-file", "--sub-track=99999"]);
+                }
+                SubArg::Langs(s) => {
+                    cmd.arg(format!("--sub-language={s}"));
+                }
+                SubArg::Default => {}
             }
             cmd.arg(&ep.path);
             Pending::Vlc { base: format!("http://127.0.0.1:{port}"), password }
@@ -738,7 +897,8 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
             };
             let start = if p.resume { resume_point(saved_progress(&st.db(), next.anilist_id, &next.ep_key), p.threshold) } else { 0.0 };
             ctl.notify(&format!("Up next: episode {}", next.ep_key)).await;
-            if !ctl.load(&next.path, start).await {
+            let next_tracks = effective_track_prefs(&st.db(), next.anilist_id);
+            if !ctl.load(&next.path, start, &next_tracks).await {
                 break;
             }
             ep = next;
@@ -823,5 +983,79 @@ mod tests {
         assert_eq!(next_episode(&conn, &ep(1, "10")).unwrap().path, "b1"); // next season
         assert!(next_episode(&conn, &ep(2, "1")).is_none());
         assert!(next_episode(&conn, &ep(1, "S1")).is_none());
+    }
+
+    #[test]
+    fn track_lang_expansion() {
+        let jp = expand_lang_list("jpn");
+        assert!(jp.contains(&"jpn".to_string()));
+        assert!(jp.contains(&"ja".to_string()));
+        assert!(jp.contains(&"Japanese".to_string()));
+
+        let en = expand_lang_list("eng");
+        assert!(en.contains(&"eng".to_string()));
+        assert!(en.contains(&"en".to_string()));
+        assert!(en.contains(&"English".to_string()));
+
+        let custom = expand_lang_list("kor");
+        assert_eq!(custom, vec!["kor".to_string(), "ko".to_string(), "Korean".to_string()]);
+    }
+
+    #[test]
+    fn track_prefs_resolution() {
+        let conn = mem_db();
+        conn.execute_batch(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE media_track_prefs (
+                 anilist_id INTEGER PRIMARY KEY,
+                 audio_pref TEXT,
+                 sub_pref TEXT,
+                 sub_fallback TEXT,
+                 updated_at INTEGER NOT NULL
+             );"
+        ).unwrap();
+
+        // 1. Defaults when nothing is configured
+        let eff = effective_track_prefs(&conn, 100);
+        assert_eq!(eff.audio.as_deref(), Some("jpn"));
+        assert_eq!(eff.sub.as_deref(), Some("jpn"));
+        assert_eq!(eff.sub_fallback.as_deref(), Some("eng"));
+
+        // 2. Global settings
+        crate::db::set_setting(&conn, "pref.audio_lang", "eng").unwrap();
+        crate::db::set_setting(&conn, "pref.sub_lang", "off").unwrap();
+        crate::db::set_setting(&conn, "pref.sub_fallback", "none").unwrap();
+        let eff_global = effective_track_prefs(&conn, 100);
+        assert_eq!(eff_global.audio.as_deref(), Some("eng"));
+        assert_eq!(eff_global.sub.as_deref(), Some("off"));
+        assert_eq!(eff_global.sub_fallback.as_deref(), Some("none"));
+
+        // 3. Show-specific override
+        crate::db::set_media_track_pref(
+            &conn,
+            100,
+            Some(crate::db::MediaTrackPref {
+                audio_pref: Some("ger".into()),
+                sub_pref: Some("ger".into()),
+                sub_fallback: Some("eng".into()),
+            }),
+        ).unwrap();
+
+        // Show 100 uses override
+        let eff_show = effective_track_prefs(&conn, 100);
+        assert_eq!(eff_show.audio.as_deref(), Some("ger"));
+        assert_eq!(eff_show.sub.as_deref(), Some("ger"));
+        assert_eq!(eff_show.sub_fallback.as_deref(), Some("eng"));
+
+        // Other shows still use global
+        let eff_other = effective_track_prefs(&conn, 200);
+        assert_eq!(eff_other.audio.as_deref(), Some("eng"));
+        assert_eq!(eff_other.sub.as_deref(), Some("off"));
+
+        // 4. Reset override
+        crate::db::set_media_track_pref(&conn, 100, None).unwrap();
+        let eff_reset = effective_track_prefs(&conn, 100);
+        assert_eq!(eff_reset.audio.as_deref(), Some("eng"));
+        assert_eq!(eff_reset.sub.as_deref(), Some("off"));
     }
 }

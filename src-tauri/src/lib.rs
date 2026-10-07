@@ -88,6 +88,8 @@ pub fn run() {
             commands::play_episode,
             commands::get_up_next,
             commands::get_new_episodes,
+            commands::get_media_track_pref,
+            commands::set_media_track_pref,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

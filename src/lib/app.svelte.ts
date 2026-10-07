@@ -19,6 +19,9 @@ export interface PlaybackPrefs {
   resume: boolean;
   autoplay: boolean;
   mpcPort: number;
+  audioLang: string;
+  subLang: string;
+  subFallback: string;
 }
 
 export interface Toast {
@@ -48,6 +51,9 @@ class AppStore {
     resume: true,
     autoplay: false,
     mpcPort: 13579,
+    audioLang: "jpn",
+    subLang: "jpn",
+    subFallback: "eng",
   });
   autoUpdate = $state(true);
   /** Latest playback event while a player is being tracked. */
@@ -95,6 +101,9 @@ class AppStore {
         resume: prefs.resume !== "0",
         autoplay: prefs.autoplay === "1",
         mpcPort: num(prefs.mpc_port, 13579),
+        audioLang: prefs.audio_lang ?? "jpn",
+        subLang: prefs.sub_lang ?? "jpn",
+        subFallback: prefs.sub_fallback ?? "eng",
       };
     } catch {
       /* keep defaults */
@@ -147,6 +156,9 @@ class AppStore {
       resume: "resume",
       autoplay: "autoplay",
       mpcPort: "mpc_port",
+      audioLang: "audio_lang",
+      subLang: "sub_lang",
+      subFallback: "sub_fallback",
     };
     const v = typeof value === "boolean" ? (value ? "1" : "0") : String(value);
     await api.setPref(names[key], v);
