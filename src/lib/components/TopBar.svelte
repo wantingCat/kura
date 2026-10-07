@@ -128,7 +128,7 @@
     z-index: 20;
     flex: none;
     display: grid;
-    grid-template-columns: 1fr minmax(260px, 560px) 1fr;
+    grid-template-columns: auto 1fr auto;
     align-items: center;
     gap: 20px;
     height: 68px;
@@ -141,6 +141,7 @@
     align-items: center;
     gap: 11px;
     justify-self: start;
+    flex-shrink: 0;
   }
   .brand-mark {
     border-radius: 11px;
@@ -160,6 +161,9 @@
     position: relative;
     display: flex;
     align-items: center;
+    width: 100%;
+    max-width: 520px;
+    margin: 0 auto;
   }
   .search > :global(svg) {
     position: absolute;
@@ -204,7 +208,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    min-width: 0;
+    flex-shrink: 0;
   }
   .icon-btn {
     display: grid;

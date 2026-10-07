@@ -67,6 +67,15 @@ export interface FileRef {
   size: number;
 }
 
+export interface ExtraFile {
+  id: number;
+  path: string;
+  fileName: string;
+  title: string;
+  kind: "opening" | "ending" | "trailer" | "pv" | "bonus" | "other";
+  size: number;
+}
+
 export interface EpisodeRow {
   epKey: string;
   number: number;
@@ -153,6 +162,7 @@ export interface MediaDetail {
   episodesSource: string | null;
   episodeList: EpisodeRow[];
   relations: RelationCard[];
+  extras: ExtraFile[];
   otherFiles: FileRef[];
   groups: GroupRef[];
   /** Owned entries of the same franchise in release order (empty if standalone). */

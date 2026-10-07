@@ -18,6 +18,12 @@
   const complete = $derived(total !== null && m.watchedCount >= total && total > 0);
   const missing = $derived(total !== null && m.ownedCount < total && m.status === "FINISHED");
   let loaded = $state(false);
+
+  function imgAction(node: HTMLImageElement) {
+    if (node.complete && node.naturalWidth > 0) {
+      loaded = true;
+    }
+  }
 </script>
 
 <a
@@ -29,7 +35,7 @@
 >
   <div class="art">
     {#if src}
-      <img {src} alt="" loading="lazy" decoding="async" class:loaded onload={() => (loaded = true)} />
+      <img {src} alt="" loading="lazy" decoding="async" class:loaded onload={() => (loaded = true)} use:imgAction />
     {:else}
       <img class="kanji-fallback" src="/brand/kanji-white.png" alt="" />
     {/if}
@@ -87,6 +93,11 @@
   }
   .art {
     position: relative;
+    z-index: 1;
+    isolation: isolate;
+    -webkit-backface-visibility: hidden;
+    backface-visibility: hidden;
+    transform: translateZ(0);
     aspect-ratio: 2 / 3;
     border-radius: var(--r-md);
     overflow: hidden;
@@ -99,7 +110,7 @@
   }
   .poster-card:hover .art,
   .poster-card:focus-visible .art {
-    transform: translate(-3px, -3px) rotate(-0.6deg);
+    transform: translate(-3px, -3px) rotate(-0.6deg) translateZ(0);
     box-shadow: 6px 6px 0 var(--coral);
   }
   /* Grouped franchise: a second "sheet" peeking out behind the cover, like a stack of volumes. */
@@ -109,6 +120,7 @@
   .poster-card.stack::before {
     content: "";
     position: absolute;
+    z-index: 0;
     top: -6px;
     left: 7px;
     right: -7px;

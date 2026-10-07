@@ -73,6 +73,7 @@ struct GroupInfo {
     year: Option<u32>,
     season_hint: Option<u32>,
     special_folder: bool,
+    extra_folder: bool,
 }
 
 fn compute_group(root: &Path, path: &Path, parsed: &Parsed) -> Option<GroupInfo> {
@@ -82,9 +83,7 @@ fn compute_group(root: &Path, path: &Path, parsed: &Parsed) -> Option<GroupInfo>
         .map(|p| p.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect())
         .unwrap_or_default();
 
-    if dirs.iter().any(|d| parser::classify_subfolder(d) == Some(SubfolderKind::Extras)) {
-        return None;
-    }
+    let extra_folder = dirs.iter().any(|d| parser::classify_subfolder(d) == Some(SubfolderKind::Extras));
     let special_folder = dirs.iter().any(|d| parser::classify_subfolder(d) == Some(SubfolderKind::Specials));
     let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let root_s = root.to_string_lossy();
@@ -100,6 +99,7 @@ fn compute_group(root: &Path, path: &Path, parsed: &Parsed) -> Option<GroupInfo>
             year: parsed.year,
             season_hint: parsed.season,
             special_folder,
+            extra_folder,
         });
     }
 
@@ -126,6 +126,7 @@ fn compute_group(root: &Path, path: &Path, parsed: &Parsed) -> Option<GroupInfo>
             year: parsed.year,
             season_hint,
             special_folder,
+            extra_folder,
         })
     } else {
         Some(GroupInfo {
@@ -137,6 +138,7 @@ fn compute_group(root: &Path, path: &Path, parsed: &Parsed) -> Option<GroupInfo>
             year: pf.year.or(parsed.year),
             season_hint,
             special_folder,
+            extra_folder,
         })
     }
 }
@@ -223,9 +225,6 @@ fn sync_files(st: &AppState, found: &[Found], libraries: &[i64]) -> Result<usize
         }
         let file_name = f.path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let parsed = parser::parse_filename(&file_name);
-        if parsed.extra {
-            continue;
-        }
         let Some(g) = compute_group(&f.root, &f.path, &parsed) else { continue };
 
         tx.execute(
@@ -239,7 +238,14 @@ fn sync_files(st: &AppState, found: &[Found], libraries: &[i64]) -> Result<usize
             params![f.library_id, g.key],
             |r| r.get(0),
         )?;
-        let special_hint: Option<&str> = if g.special_folder { Some("special") } else { None };
+        let is_extra = parsed.extra || g.extra_folder;
+        let special_hint: Option<&str> = if is_extra {
+            Some("extra")
+        } else if g.special_folder {
+            Some("special")
+        } else {
+            None
+        };
         tx.execute(
             "INSERT INTO local_files (library_id, group_id, path, size, mtime, parsed, season_hint, special_hint, anilist_id, ep_key, added_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, ?9)
@@ -309,10 +315,16 @@ fn pending_groups(st: &AppState, libraries: &[i64]) -> Result<Vec<PendingGroup>>
             .filter_map(|r| r.ok())
             .filter_map(|(p, s)| serde_json::from_str::<Parsed>(&p).ok().map(|p| (p, s)))
             .collect();
-        let movie = files.iter().any(|(p, _)| p.special == Some(SpecialKind::Movie))
-            || (files.len() == 1 && files[0].0.episode.is_none() && files[0].0.special.is_none());
-        let special = !files.is_empty()
-            && files.iter().all(|(p, s)| s.is_some() || matches!(p.special, Some(SpecialKind::Ova | SpecialKind::Special | SpecialKind::Ona)));
+        let has_regular = files.iter().any(|(p, s)| !p.extra && s.as_deref() != Some("extra"));
+        let target_files: Vec<&(Parsed, Option<String>)> = if has_regular {
+            files.iter().filter(|(p, s)| !p.extra && s.as_deref() != Some("extra")).collect()
+        } else {
+            files.iter().collect()
+        };
+        let movie = target_files.iter().any(|(p, _)| p.special == Some(SpecialKind::Movie))
+            || (target_files.len() == 1 && target_files[0].0.episode.is_none() && target_files[0].0.special.is_none());
+        let special = !target_files.is_empty()
+            && target_files.iter().all(|(p, s)| s.as_deref() == Some("special") || matches!(p.special, Some(SpecialKind::Ova | SpecialKind::Special | SpecialKind::Ona)));
         out.push(PendingGroup { id, title_guess, title_full, year, hints: MatchHints { year, movie, special } });
     }
     Ok(out)
@@ -375,6 +387,7 @@ struct PendingFile {
     parsed: Parsed,
     season: Option<u32>,
     special_folder: bool,
+    extra_folder: bool,
 }
 
 fn pending_files(st: &AppState) -> Result<Vec<PendingFile>> {
@@ -401,7 +414,8 @@ fn pending_files(st: &AppState) -> Result<Vec<PendingFile>> {
                 base,
                 parsed,
                 season,
-                special_folder: sh.is_some(),
+                special_folder: sh.as_deref() == Some("special"),
+                extra_folder: sh.as_deref() == Some("extra"),
             })
         })
         .collect();
@@ -441,7 +455,12 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
         let res = service::resolve_file(
             st,
             f.base,
-            FileHints { season: f.season, special_folder: f.special_folder, parsed: &f.parsed },
+            FileHints {
+                season: f.season,
+                special_folder: f.special_folder,
+                extra_folder: f.extra_folder,
+                parsed: &f.parsed,
+            },
         )
         .await;
         let conn = st.db();

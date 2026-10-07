@@ -2,7 +2,7 @@
   import { page } from "$app/state";
   import { goto } from "$app/navigation";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { api, img, type EpisodeRow, type MediaDetail } from "$lib/api";
+  import { api, img, type EpisodeRow, type ExtraFile, type MediaDetail } from "$lib/api";
   import { app } from "$lib/app.svelte";
   import {
     cleanDescription,
@@ -120,6 +120,22 @@
     if (e.titleRomaji) return e.titleRomaji;
     if (e.titleJa) return e.titleJa;
     return e.isSpecial ? `Special ${e.number}` : `Episode ${e.number}`;
+  }
+
+  async function playExtra(ex: ExtraFile) {
+    if (!d) return;
+    await app.play(d.anilistId, `extra:${ex.id}`, ex.path);
+  }
+
+  function extraBadge(kind: ExtraFile["kind"]) {
+    switch (kind) {
+      case "opening": return "OP";
+      case "ending": return "ED";
+      case "trailer": return "Trailer";
+      case "pv": return "PV";
+      case "bonus": return "Bonus";
+      default: return "Extra";
+    }
   }
 </script>
 
@@ -386,6 +402,43 @@
               </section>
             {/if}
 
+            {#if d.extras && d.extras.length > 0}
+              <section class="block">
+                <h2 class="section-title">
+                  Extras & Bonus <span class="count">{d.extras.length}</span>
+                </h2>
+                <p class="hint faint">Openings, endings, trailers, and promotional material.</p>
+                <div class="extras-grid">
+                  {#each d.extras as ex (ex.id)}
+                    <div class="extra-card" id={`extra-${ex.id}`}>
+                      <div class="extra-thumb">
+                        <span class="extra-kind-badge" class:badge-accent={ex.kind === 'opening' || ex.kind === 'ending'} class:badge-ok={ex.kind === 'trailer' || ex.kind === 'pv'}>
+                          {extraBadge(ex.kind)}
+                        </span>
+                        <button class="extra-play-btn" onclick={() => playExtra(ex)} title={`Play ${ex.title}`}>
+                          <Icon name="play" size={16} fill />
+                        </button>
+                      </div>
+                      <div class="extra-body">
+                        <div class="extra-title-row">
+                          <h4 class="extra-title" title={ex.title}>{ex.title}</h4>
+                        </div>
+                        <p class="extra-filename faint" title={ex.fileName}>{ex.fileName}</p>
+                        <div class="extra-meta">
+                          <span class="file-chip" title={ex.path}>
+                            <Icon name="file" size={11} /> {formatBytes(ex.size)}
+                          </span>
+                          <button class="btn btn-ghost btn-sm extra-reveal" onclick={() => api.revealFile(ex.path)} title="Show in folder">
+                            <Icon name="folder" size={12} /> Show
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              </section>
+            {/if}
+
             {#if d.otherFiles.length > 0}
               <section class="block">
                 <h2 class="section-title">Other files <span class="count">{d.otherFiles.length}</span></h2>
@@ -506,11 +559,11 @@
   }
 
   /* Banner ----------------------------------------------------------------
-   * An outlined sticker panel; the poster overlaps its bottom edge. */
+   * A grand cinematic backdrop panel; the poster overlaps its bottom edge. */
   .banner {
     position: relative;
-    height: 270px;
-    margin: 24px 36px 0;
+    height: 380px;
+    margin: 20px 28px 0;
     border: var(--bw) solid var(--line);
     border-radius: var(--r-xl);
     background: var(--coral);
@@ -528,7 +581,7 @@
     animation: hero-in 1s var(--ease) both;
   }
   .banner img.blur {
-    filter: blur(20px) saturate(1.2) brightness(0.85);
+    filter: blur(24px) saturate(1.2) brightness(0.8);
     transform: scale(1.2);
   }
   @keyframes hero-in {
@@ -538,10 +591,21 @@
     }
   }
   .banner-shade {
-    display: none;
+    display: block;
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 0.2) 0%,
+      transparent 35%,
+      rgba(20, 14, 16, 0.35) 70%,
+      rgba(20, 14, 16, 0.75) 100%
+    );
+    pointer-events: none;
   }
   .back {
     position: absolute;
+    z-index: 2;
     top: 16px;
     left: 16px;
     height: 36px;
@@ -1131,6 +1195,124 @@
     white-space: nowrap;
     color: var(--text-2);
     font-size: 13px;
+  }
+
+  /* Extras & Bonus -------------------------------------------------------- */
+  .extras-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+  }
+  .extra-card {
+    display: flex;
+    gap: 12px;
+    padding: 12px;
+    border: var(--bw) solid var(--line);
+    border-radius: var(--r-lg);
+    background: var(--surface);
+    box-shadow: var(--sticker-sm);
+    transition: transform var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+  }
+  .extra-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--sticker-md);
+  }
+  .extra-thumb {
+    position: relative;
+    width: 64px;
+    height: 64px;
+    flex-shrink: 0;
+    border: var(--bw) solid var(--line);
+    border-radius: var(--r-md);
+    background: var(--surface-2);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .extra-kind-badge {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    padding: 1px 5px;
+    font-size: 10px;
+    font-family: var(--font-display);
+    font-weight: 700;
+    border-radius: var(--r-full);
+    border: 1.5px solid var(--line);
+    background: var(--surface-3);
+    color: var(--text);
+  }
+  .extra-kind-badge.badge-accent {
+    background: var(--coral);
+    color: var(--cream);
+  }
+  .extra-kind-badge.badge-ok {
+    background: var(--mint);
+    color: var(--ink);
+  }
+  .extra-play-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: var(--bw) solid var(--line);
+    background: var(--surface);
+    color: var(--coral);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    box-shadow: var(--sticker-sm);
+    transition: transform var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+    margin-top: 12px;
+  }
+  .extra-play-btn:hover {
+    transform: scale(1.1);
+    background: var(--coral);
+    color: var(--cream);
+  }
+  .extra-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .extra-title-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .extra-title {
+    font-family: var(--font-display);
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text);
+  }
+  .extra-filename {
+    font-size: 11.5px;
+    margin: 2px 0 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-3);
+  }
+  .extra-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .extra-reveal {
+    padding: 2px 6px;
+    font-size: 11px;
+    height: 22px;
   }
 
   /* Side column ----------------------------------------------------------- */

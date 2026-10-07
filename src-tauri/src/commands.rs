@@ -3,6 +3,7 @@
 use crate::db::{self, now};
 use crate::franchise;
 use crate::matcher;
+use crate::parser;
 use crate::player;
 use crate::scan;
 use crate::service::AppState;
@@ -386,6 +387,17 @@ pub struct FranchiseEntry {
     watched_count: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtraFile {
+    pub id: i64,
+    pub path: String,
+    pub file_name: String,
+    pub title: String,
+    pub kind: String,
+    pub size: i64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaDetail {
@@ -400,7 +412,7 @@ pub struct MediaDetail {
     episodes: Option<i64>,
     duration: Option<i64>,
     season: Option<String>,
-    season_year: Option<i64>,
+    season_year: Option<u32>,
     start_date: Option<String>,
     end_date: Option<String>,
     description: Option<String>,
@@ -418,6 +430,7 @@ pub struct MediaDetail {
     episodes_source: Option<String>,
     episode_list: Vec<EpisodeRow>,
     relations: Vec<RelationCard>,
+    extras: Vec<ExtraFile>,
     other_files: Vec<FileRef>,
     groups: Vec<GroupRef>,
     franchise: Vec<FranchiseEntry>,
@@ -470,6 +483,7 @@ pub fn get_media_detail(st: St, anilist_id: i64) -> CmdResult<MediaDetail> {
                     episodes_source: r.get(26)?,
                     episode_list: Vec::new(),
                     relations: Vec::new(),
+                    extras: Vec::new(),
                     other_files: Vec::new(),
                     groups: Vec::new(),
                     franchise: Vec::new(),
@@ -482,20 +496,63 @@ pub fn get_media_detail(st: St, anilist_id: i64) -> CmdResult<MediaDetail> {
     let mut files_by_key: HashMap<String, Vec<FileRef>> = HashMap::new();
     {
         let mut stmt = conn
-            .prepare("SELECT id, path, size, ep_key FROM local_files WHERE anilist_id = ?1 ORDER BY path")
+            .prepare("SELECT id, path, size, ep_key, special_hint, parsed FROM local_files WHERE anilist_id = ?1 ORDER BY path")
             .map_err(err)?;
         let rows = stmt
             .query_map([anilist_id], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<String>>(3)?))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
             })
             .map_err(err)?;
         for row in rows.flatten() {
-            let (id, path, size, key) = row;
-            match key {
-                Some(k) => files_by_key.entry(k).or_default().push(file_ref(id, path, size)),
-                None => d.other_files.push(file_ref(id, path, size)),
+            let (id, path, size, key, special_hint, parsed_str) = row;
+            let is_extra = special_hint.as_deref() == Some("extra") || parsed_str.contains("\"extra\":true");
+            if is_extra {
+                let file_name = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.clone());
+                let (kind, title) = parser::classify_extra(&file_name);
+                let kind_str = match kind {
+                    parser::ExtraKind::Opening => "opening",
+                    parser::ExtraKind::Ending => "ending",
+                    parser::ExtraKind::Trailer => "trailer",
+                    parser::ExtraKind::Pv => "pv",
+                    parser::ExtraKind::Bonus => "bonus",
+                    parser::ExtraKind::Other => "other",
+                };
+                d.extras.push(ExtraFile {
+                    id,
+                    path,
+                    file_name,
+                    title,
+                    kind: kind_str.to_string(),
+                    size,
+                });
+            } else {
+                match key {
+                    Some(k) => files_by_key.entry(k).or_default().push(file_ref(id, path, size)),
+                    None => d.other_files.push(file_ref(id, path, size)),
+                }
             }
         }
+        d.extras.sort_by(|a, b| {
+            let order = |k: &str| match k {
+                "opening" => 1,
+                "ending" => 2,
+                "trailer" => 3,
+                "pv" => 4,
+                "bonus" => 5,
+                _ => 6,
+            };
+            order(&a.kind).cmp(&order(&b.kind)).then_with(|| a.title.cmp(&b.title))
+        });
     }
 
     let mut watched: HashMap<String, i64> = HashMap::new();

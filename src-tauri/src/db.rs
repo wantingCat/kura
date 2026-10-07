@@ -191,9 +191,13 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
 pub struct MediaLite {
     pub id: i64,
     pub id_mal: Option<i64>,
+    pub title_romaji: Option<String>,
+    pub title_english: Option<String>,
     pub format: Option<String>,
     pub status: Option<String>,
     pub episodes: Option<i64>,
+    pub season_year: Option<u32>,
+    pub start_date: Option<String>,
     pub next_airing_episode: Option<i64>,
     pub fetched_at: i64,
     pub episodes_fetched_at: Option<i64>,
@@ -202,19 +206,23 @@ pub struct MediaLite {
 pub fn media_lite(conn: &Connection, id: i64) -> Result<Option<MediaLite>> {
     Ok(conn
         .query_row(
-            "SELECT anilist_id, id_mal, format, status, episodes, next_airing_episode, fetched_at, episodes_fetched_at
+            "SELECT anilist_id, id_mal, title_romaji, title_english, format, status, episodes, season_year, start_date, next_airing_episode, fetched_at, episodes_fetched_at
              FROM media WHERE anilist_id = ?1",
             [id],
             |r| {
                 Ok(MediaLite {
                     id: r.get(0)?,
                     id_mal: r.get(1)?,
-                    format: r.get(2)?,
-                    status: r.get(3)?,
-                    episodes: r.get(4)?,
-                    next_airing_episode: r.get(5)?,
-                    fetched_at: r.get(6)?,
-                    episodes_fetched_at: r.get(7)?,
+                    title_romaji: r.get(2)?,
+                    title_english: r.get(3)?,
+                    format: r.get(4)?,
+                    status: r.get(5)?,
+                    episodes: r.get(6)?,
+                    season_year: r.get(7)?,
+                    start_date: r.get(8)?,
+                    next_airing_episode: r.get(9)?,
+                    fetched_at: r.get(10)?,
+                    episodes_fetched_at: r.get(11)?,
                 })
             },
         )

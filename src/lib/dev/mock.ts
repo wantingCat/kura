@@ -250,6 +250,7 @@ async function detail(id: number): Promise<MediaDetail> {
     episodesSource: "anizip",
     episodeList: await episodes(m),
     relations,
+    extras: [],
     otherFiles: [],
     groups: [{ id: 1, displayName: m.title.romaji, folderPath: `D:\\Anime\\${m.title.romaji}`, confidence: 0.97, manual: false }],
     franchise: (() => {

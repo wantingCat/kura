@@ -208,6 +208,9 @@ pub fn saved_progress(conn: &Connection, anilist_id: i64, ep_key: &str) -> Optio
 }
 
 fn save_progress(conn: &Connection, ep: &Ep, pos: f64, dur: f64) {
+    if ep.ep_key.starts_with("extra:") {
+        return;
+    }
     let _ = conn.execute(
         "INSERT INTO watch_progress (anilist_id, ep_key, position, duration, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(anilist_id, ep_key) DO UPDATE SET position = excluded.position, duration = excluded.duration,
@@ -217,6 +220,9 @@ fn save_progress(conn: &Connection, ep: &Ep, pos: f64, dur: f64) {
 }
 
 fn mark_watched(conn: &Connection, ep: &Ep) {
+    if ep.ep_key.starts_with("extra:") {
+        return;
+    }
     let _ = conn.execute(
         "INSERT OR IGNORE INTO watch_state (anilist_id, ep_key, watched_at) VALUES (?1, ?2, ?3)",
         params![ep.anilist_id, ep.ep_key, now()],

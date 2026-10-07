@@ -5,7 +5,7 @@
   <br>
   <strong>A local-first, manga-styled desktop anime media library.</strong>
   <br>
-  <em>Current Release: <code>v0.2.0-alpha</code> · Built with AI assistance</em>
+  <em>Current Release: <code>v0.3.0-alpha</code> · Built with AI assistance</em>
 </p>
 
 ---
@@ -17,24 +17,32 @@ Point **Kura** at your local anime folders and it takes care of the rest: parses
 ## 📸 Screenshots
 
 ### Home & Library
-A slim top bar with search from anywhere (`Ctrl K`), recently added titles, and your whole library with filters for series, movies and specials. Multi-season shows are grouped into a single stacked card:
+A slim top bar with instant search from anywhere (`Ctrl K`), a comic-inspired "Continue watching" hero panel, recently added titles, and your library with multi-season shows neatly grouped into stacked cards:
 
 ![Kura Home & Library](assets/screenshots/home-library.png)
 
-### Anime Details & Seasons
-Banner and poster art, format, season, score and studio, one-click play in your own player, and season tabs for shows with several seasons:
+### Cinematic Backdrop & Season Tabs
+A widescreen cinematic backdrop, cover art overlay, airing and release metadata, watch progress, and seamless tabbed navigation across all seasons and movies in the franchise:
 
 ![Kura Anime Details](assets/screenshots/anime-details.png)
+
+### Rich Episode Guides & Metadata
+Individual episode thumbnails, Japanese and English titles, air dates, runtimes, file sizes, watch toggles, and detailed synopsis with genres, tags, and studio info:
+
+![Kura Episode List & Details](assets/screenshots/episodes-list.png)
 
 ---
 
 ## ✨ Features
 
-### New in `v0.2.0-alpha`
+### New in `v0.3.0-alpha`
 - **Plays in your own player**: [mpv](https://mpv.io), [VLC](https://www.videolan.org/vlc/), [MPC-HC / MPC-BE](https://github.com/clsid2/mpc-hc) and [Memento](https://github.com/ripose-jp/Memento) are detected automatically (or pick the program yourself). The system default player still works too.
 - **Progress & resume**: Kura follows playback, remembers where you stopped, and resumes from there next time. Episode lists show how far into each episode you are.
 - **Auto-marked watched**: An episode counts as watched once you pass 90% of it (adjustable in Settings), so skipping the ending still counts.
 - **Autoplay next episode** *(off by default)*: When an episode ends, the next one you own starts in the same player window — including the first episode of the next season.
+- **Plex & Jellyfin folder support**: Robust matching for multi-season libraries organized by folders (`Season 1`, `Season 2`). Handles complex franchise bridges across OVAs, specials, and TV side-stories (*Slime*, *Date A Live*, *Full Metal Panic*).
+- **Extras & Bonus videos**: Automatic classification and dedicated playback section for creditless openings (`NCOP`), endings (`NCED`), trailers, PVs, and bonus features without polluting episode tallies.
+- **Cinematic Backdrop Header**: Expanded widescreen backdrop panel with gradient shade and layered poster artwork on anime detail pages.
 - **New home page**: A comic-page “Continue watching” panel with one-click resume, plus “New episode” and “Finish this” panels above your library.
 - **Top bar instead of a sidebar**: Search from anywhere (`Ctrl K`), scan progress, review queue and settings in one slim bar.
 - **Automatic updates**: Kura checks GitHub for new versions on startup and can update itself in one click.

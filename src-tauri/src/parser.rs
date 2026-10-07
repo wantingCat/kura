@@ -339,6 +339,77 @@ pub enum SubfolderKind {
     Extras,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtraKind {
+    Opening,
+    Ending,
+    Trailer,
+    Pv,
+    Bonus,
+    Other,
+}
+
+re!(RE_NCOP_NUM, r"(?i)(?:nc\s?op|op)\s*(\d+)");
+re!(RE_NCED_NUM, r"(?i)(?:nc\s?ed|ed)\s*(\d+)");
+re!(RE_TRAILER_NUM, r"(?i)(?:trailer|teaser|preview)\s*(\d+)");
+re!(RE_PV_NUM, r"(?i)(?:pv|cm)\s*(\d+)");
+
+pub fn classify_extra(filename: &str) -> (ExtraKind, String) {
+    let lower = filename.to_ascii_lowercase();
+    if lower.contains("ncop")
+        || lower.contains("nc op")
+        || lower.contains("creditless op")
+        || lower.contains("clean op")
+        || lower.contains("opening")
+    {
+        let num = RE_NCOP_NUM.captures(filename).and_then(|c| c.get(1)).map(|m| m.as_str());
+        let label = match num {
+            Some(n) => format!("Opening {n} (Creditless)"),
+            None => "Opening (Creditless)".to_string(),
+        };
+        (ExtraKind::Opening, label)
+    } else if lower.contains("nced")
+        || lower.contains("nc ed")
+        || lower.contains("creditless ed")
+        || lower.contains("clean ed")
+        || lower.contains("ending")
+    {
+        let num = RE_NCED_NUM.captures(filename).and_then(|c| c.get(1)).map(|m| m.as_str());
+        let label = match num {
+            Some(n) => format!("Ending {n} (Creditless)"),
+            None => "Ending (Creditless)".to_string(),
+        };
+        (ExtraKind::Ending, label)
+    } else if lower.contains("trailer") || lower.contains("teaser") || lower.contains("preview") {
+        let num = RE_TRAILER_NUM.captures(filename).and_then(|c| c.get(1)).map(|m| m.as_str());
+        let label = match num {
+            Some(n) => format!("Trailer {n}"),
+            None => "Trailer".to_string(),
+        };
+        (ExtraKind::Trailer, label)
+    } else if lower.contains("pv") || lower.contains("cm") {
+        let num = RE_PV_NUM.captures(filename).and_then(|c| c.get(1)).map(|m| m.as_str());
+        let label = match num {
+            Some(n) => format!("Promo {n}"),
+            None => "Promotional Video".to_string(),
+        };
+        (ExtraKind::Pv, label)
+    } else if lower.contains("bonus")
+        || lower.contains("making")
+        || lower.contains("interview")
+        || lower.contains("featurette")
+    {
+        (ExtraKind::Bonus, "Bonus Feature".to_string())
+    } else {
+        let stem = std::path::Path::new(filename)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| filename.to_string());
+        (ExtraKind::Other, stem)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

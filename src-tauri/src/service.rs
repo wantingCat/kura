@@ -6,7 +6,7 @@ use crate::providers::{EpisodeMeta, Providers};
 use crate::store;
 use anyhow::Result;
 use rusqlite::Connection;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Mutex, MutexGuard};
@@ -149,45 +149,58 @@ pub async fn fetch_episodes(st: &AppState, m: &MediaLite) -> Result<()> {
 }
 
 /// The ordered chain of main-series entries (TV / ONA) this entry belongs to.
+/// Traverses PREQUEL, SEQUEL, bridge nodes (OVA, SPECIAL, MOVIE), and TV SIDE_STORY/SPIN_OFF relations,
+/// and orders all discovered TV/ONA series entries chronologically by release date.
 pub async fn franchise_chain(st: &AppState, base: i64) -> Result<Vec<i64>> {
-    let pick = |rels: &[db::RelationLite], rel: &str, seen: &HashSet<i64>| -> Option<i64> {
-        rels.iter()
-            .filter(|r| r.relation_type == rel)
-            .filter(|r| r.media_type.as_deref().unwrap_or("ANIME") == "ANIME")
-            .filter(|r| r.format.as_deref().map_or(false, |f| SERIES_FORMATS.contains(&f)))
-            .map(|r| r.related_id)
-            .find(|id| !seen.contains(id))
-    };
+    let mut visited: HashSet<i64> = HashSet::new();
+    let mut queue: VecDeque<i64> = VecDeque::new();
+    queue.push_back(base);
+    visited.insert(base);
 
-    let mut seen = HashSet::from([base]);
-    let mut root = base;
-    for _ in 0..12 {
-        ensure_media(st, root).await?;
-        let rels = db::relations(&st.db(), root)?;
-        match pick(&rels, "PREQUEL", &seen) {
-            Some(p) => {
-                seen.insert(p);
-                root = p;
-            }
-            None => break,
+    // BFS walk up to 40 related nodes to find all franchise entries and bridge nodes
+    while let Some(cur) = queue.pop_front() {
+        if visited.len() > 40 {
+            break;
         }
-    }
-
-    let mut chain = vec![root];
-    let mut seen = HashSet::from([root]);
-    let mut cur = root;
-    for _ in 0..20 {
         ensure_media(st, cur).await?;
         let rels = db::relations(&st.db(), cur)?;
-        match pick(&rels, "SEQUEL", &seen) {
-            Some(n) => {
-                seen.insert(n);
-                chain.push(n);
-                cur = n;
+        for r in rels {
+            if r.media_type.as_deref().unwrap_or("ANIME") != "ANIME" {
+                continue;
             }
-            None => break,
+            let is_seq_or_pre = matches!(r.relation_type.as_str(), "PREQUEL" | "SEQUEL");
+            let is_side_tv = matches!(r.relation_type.as_str(), "SIDE_STORY" | "SPIN_OFF" | "PARENT")
+                && r.format.as_deref().map_or(false, |f| SERIES_FORMATS.contains(&f));
+
+            if is_seq_or_pre || is_side_tv {
+                if visited.insert(r.related_id) {
+                    queue.push_back(r.related_id);
+                }
+            }
         }
     }
+
+    // Filter to main-series TV / ONA formats
+    let conn = st.db();
+    let mut series_entries = Vec::new();
+    for id in &visited {
+        if let Some(m) = db::media_lite(&conn, *id)? {
+            if m.format.as_deref().map_or(false, |f| SERIES_FORMATS.contains(&f)) {
+                let start = m.start_date.clone().unwrap_or_else(|| "9999".into());
+                let year = m.season_year.unwrap_or(9999);
+                series_entries.push((*id, start, year));
+            }
+        }
+    }
+
+    // Sort chronologically by start date, then season year, then id
+    series_entries.sort_by(|a, b| {
+        let ka = (&a.1, a.2, a.0);
+        let kb = (&b.1, b.2, b.0);
+        ka.cmp(&kb)
+    });
+
+    let mut chain: Vec<i64> = series_entries.into_iter().map(|(id, ..)| id).collect();
     if !chain.contains(&base) {
         chain.insert(0, base);
     }
@@ -219,12 +232,16 @@ async fn rollover(st: &AppState, chain: &[i64], start_idx: usize, ep: i64) -> (i
 pub struct FileHints<'a> {
     pub season: Option<u32>,
     pub special_folder: bool,
+    pub extra_folder: bool,
     pub parsed: &'a Parsed,
 }
 
 /// Map a local file to (anilist_id, ep_key) given the group's base match.
 pub async fn resolve_file(st: &AppState, base: i64, h: FileHints<'_>) -> Result<Option<(i64, String)>> {
     let p = h.parsed;
+    if p.extra || h.extra_folder {
+        return Ok(None);
+    }
     ensure_media(st, base).await?;
     ensure_episodes(st, base).await?;
     let Some(lite) = db::media_lite(&st.db(), base)? else { return Ok(None) };
@@ -311,6 +328,48 @@ pub async fn resolve_file(st: &AppState, base: i64, h: FileHints<'_>) -> Result<
         if s_idx < chain.len() {
             let (id, n) = rollover(st, &chain, s_idx, ep).await;
             return Ok(Some((id, n.to_string())));
+        }
+
+        // Additional fallback: If s > 1 and not yet found in chain, search AniList for "{base_title} Season {s}"
+        if s > 1 {
+            let titles = {
+                let conn = st.db();
+                let mut list = Vec::new();
+                if let Ok(Some(base_media)) = db::media_lite(&conn, base) {
+                    if let Some(en) = base_media.title_english {
+                        list.push(en);
+                    }
+                    if let Some(ro) = base_media.title_romaji {
+                        list.push(ro);
+                    }
+                }
+                list
+            };
+            for base_title in titles {
+                let queries = [format!("{base_title} Season {s}"), format!("{base_title} {s}")];
+                for q in queries {
+                    if let Ok(results) = st.providers.anilist_search(&q, 4).await {
+                        for cand in results {
+                            if cand.format.as_deref().map_or(false, |f| SERIES_FORMATS.contains(&f)) {
+                                let _ = ensure_media(st, cand.id).await;
+                                let _ = ensure_episodes(st, cand.id).await;
+                                let idx = {
+                                    let conn = st.db();
+                                    db::episode_index(&conn, cand.id).ok()
+                                };
+                                if let Some(idx) = idx {
+                                    if let Some((k, ..)) = idx.iter().find(|(_, ts, te, _, sp)| !*sp && *ts == Some(s) && *te == Some(ep)) {
+                                        return Ok(Some((cand.id, k.clone())));
+                                    }
+                                    if idx.iter().any(|(k, ..)| k == &ep.to_string()) {
+                                        return Ok(Some((cand.id, ep.to_string())));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     } else {
         // Absolute numbering across the franchise.
