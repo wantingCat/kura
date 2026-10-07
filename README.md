@@ -64,7 +64,10 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 - [x] **External Player Integrations**: mpv, VLC, MPC-HC/BE and Memento, with watch-time and completion detection via player IPC.
 - [x] **Auto-Update**: Signed in-app updates from GitHub Releases.
 - [ ] **Folder Watcher / Auto-Rescan**: Automatic background scanning triggered when new episode downloads or torrents complete in monitored directories.
+- [ ] **Rich Cast & Staff Metadata**: Character voice actors (Japanese seiyuu & English cast with character portraits), director, series composition, music composers, and key studio staff on the anime detail page.
+- [ ] **Subtitles & Audio Track Defaults**: Configurable default audio language (e.g. Japanese vs. English dub) and subtitle preferences automatically passed to players on launch.
 - [ ] **Advanced Filtering & Search**: Filter by genres, tags, studios, release seasons, voice actors, and airing status.
+- [ ] **Local Art & Poster Overrides**: Priority detection for local `poster.jpg`, `backdrop.jpg`, and season artwork from Jellyfin/Plex directories.
 - [x] **Cross-Platform Release Automation**: Automated CI/CD builds for Windows (`.exe`/`.msi`), macOS (`.dmg`), and Linux (`.deb`/`.rpm`/`.AppImage`) via GitHub Actions.
 - [ ] **Library Export / Backup**: Backup watch history and metadata cache to JSON or portable archives.
 
