@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { MediaCard } from "$lib/api";
   import { img } from "$lib/api";
+  import { app } from "$lib/app.svelte";
   import { displayTitle, formatLabel, franchiseBadge, totalEpisodes, type LibraryItem } from "$lib/format";
   import Icon from "./Icon.svelte";
 
@@ -37,7 +38,11 @@
     {#if src}
       <img {src} alt="" loading="lazy" decoding="async" class:loaded onload={() => (loaded = true)} use:imgAction />
     {:else}
-      <img class="kanji-fallback" src="/brand/kanji-white.png" alt="" />
+      <img
+        class="kanji-fallback"
+        src={app.theme === "manga" ? "/brand/kanji.png" : "/brand/kanji-white.png"}
+        alt=""
+      />
     {/if}
 
     <div class="top">

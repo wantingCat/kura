@@ -616,10 +616,10 @@
     inset: 0;
     background: linear-gradient(
       to bottom,
-      rgba(0, 0, 0, 0.2) 0%,
+      color-mix(in srgb, var(--line) 20%, transparent) 0%,
       transparent 35%,
-      rgba(20, 14, 16, 0.35) 70%,
-      rgba(20, 14, 16, 0.75) 100%
+      color-mix(in srgb, var(--bg) 40%, transparent) 70%,
+      var(--bg) 100%
     );
     pointer-events: none;
   }

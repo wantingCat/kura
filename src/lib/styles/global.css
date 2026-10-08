@@ -72,6 +72,69 @@
   color-scheme: dark;
 }
 
+/* Manga Mode (Light Theme — Authentic Printed Manga / Tankōbon) ------------
+ * Warm off-white newsprint/manga paper (#f5f2eb), deep sumi ink linework (#12100e),
+ * screentone paper shades (#ece8df, #ded8cb), and a vibrant Japanese vermilion
+ * red stamp seal (#e53935) accent.
+ * ------------------------------------------------------------------------ */
+:root[data-theme="manga"],
+[data-theme="manga"] {
+  /* Brand */
+  --coral: #e53935; /* Japanese vermilion / cinnabar seal stamp */
+  --coral-hi: #ef5350;
+  --coral-lo: #c62828;
+  --plum: #2c2523;
+  --pink: #f48fb1;
+  --cream: #141210;
+
+  /* Surfaces (authentic manga paper / newsprint / screentone) */
+  --line: #12100e; /* deep sumi ink line art + crisp offset sticker shadows */
+  --bg: #f5f2eb; /* warm manga newsprint paper */
+  --bg-elev: #ffffff; /* pure page white */
+  --surface: #ffffff;
+  --surface-2: #ece8df; /* light screentone shading */
+  --surface-3: #ded8cb; /* darker tone shading / chip fills */
+  --border: #dcd6c9; /* soft panel divider line */
+  --border-strong: #12100e;
+
+  /* Text (sumi ink & pencil wash) */
+  --text: #141210; /* deep sumi black */
+  --text-2: #4a453f; /* pencil tone */
+  --text-3: #7c766d; /* screentone grey */
+  --on-coral: #ffffff;
+
+  /* Status */
+  --ok: #2e7d32;
+  --amber: #d84315;
+  --danger: #c62828;
+
+  /* Legacy aliases */
+  --sakura: var(--coral);
+  --violet: var(--coral);
+  --sky: #1976d2;
+  --mint: var(--ok);
+  --accent: var(--coral);
+  --grad: var(--coral);
+  --grad-soft: color-mix(in srgb, var(--coral) 12%, transparent);
+  --glass: var(--surface);
+  --blur: none;
+
+  color-scheme: light;
+}
+
+[data-theme="manga"] .input {
+  box-shadow: inset 1.5px 1.5px 0 hsl(0 0% 0% / 0.08);
+}
+
+[data-theme="manga"] ::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-color: var(--bg);
+}
+
+[data-theme="manga"] ::-webkit-scrollbar-thumb:hover {
+  background-color: var(--text-3);
+}
+
 *,
 *::before,
 *::after {

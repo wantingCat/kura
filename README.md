@@ -65,7 +65,7 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 - [x] **Subtitles & Audio Track Defaults**: Configurable default audio language (e.g. Japanese vs. English dub) and subtitle preferences automatically passed to players on launch, with per-show overrides.
 - [x] **Auto-Update**: Cryptographically signed in-app updates from GitHub Releases.
 - [x] **Cross-Platform Release Automation**: Automated CI/CD builds for Windows (`.exe`/`.msi`), macOS (`.dmg`), and Linux (`.deb`/`.rpm`/`.AppImage`) via GitHub Actions.
-- [ ] **Manga Mode (Light Theme)**: High-contrast sumi ink on warm manga paper with authentic Japanese vermilion stamp accents (`#e53935`).
+- [x] **Manga Mode (Light Theme)**: High-contrast sumi ink on warm manga paper with authentic Japanese vermilion stamp accents (`#e53935`).
 - [ ] **Priority Artwork Engine & ClearLogos**: Strict priority pipeline (`Local > Fanart.tv/ani.zip > AniList`) with official transparent anime title logos floating over 1080p backdrops.
 - [ ] **Discord Rich Presence (RPC)**: Live watching activity on your Discord profile with anime title, episode number/title, live remaining time bar, and cover thumbnails.
 - [ ] **Folder Watcher / Auto-Rescan**: Automatic background scanning triggered when new episode downloads complete in monitored directories.

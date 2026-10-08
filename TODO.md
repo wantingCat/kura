@@ -18,21 +18,21 @@ This document serves as the master planning roadmap for Kura, organizing propose
 ---
 
 ## 🎨 Phase 1: Manga Mode (Light Theme — Ink & Paper)
-*Target: v0.3.2*
+*Target: v0.3.2* — **Completed**
 
 Transform Kura's visual identity from the current plum/coral "Comicbook Dark" mode into an authentic Japanese printed manga aesthetic inspired by *Tankōbon* volumes and Shōnen Jump.
 
 ### Checklist
-- [ ] **Design Tokens & Theme Engine (`[data-theme="manga"]`)**
-  - [ ] **Backgrounds**: Warm off-white newsprint / manga paper (`#f5f2eb` page background, `#ffffff` card panels).
-  - [ ] **Sumi Ink Outlines**: Deep black line art (`#111111`) with crisp 2px solid sticker drop shadows (`3px 3px 0 #111111`).
-  - [ ] **Option A Accent — Vermilion Red Stamp**: Authentic Japanese red seal (`#e53935` / `#eb4d3d`) for play buttons, active season tabs, and key highlight badges.
-  - [ ] **Screentone Midtones**: Subtle wash surfaces (`#ece8df`, `#ded9cd`) for secondary cards, inputs, and tab bars.
-  - [ ] **Monochrome Icons & Typography**: High-contrast dark ink text with native `color-scheme: light` support.
-- [ ] **Settings & Boot Persistence**
-  - [ ] Add `pref.theme` setting in SQLite `settings` table (`"comic"` vs `"manga"`).
-  - [ ] Add Theme / Appearance radio card picker under **Settings → Display**.
-  - [ ] Initialize theme class on `document.documentElement` during early boot to prevent any Flash of Unstyled Content (FOUC).
+- [x] **Design Tokens & Theme Engine (`[data-theme="manga"]`)**
+  - [x] **Backgrounds**: Warm off-white newsprint / manga paper (`#f5f2eb` page background, `#ffffff` card panels).
+  - [x] **Sumi Ink Outlines**: Deep black sumi line art (`#12100e`) with crisp 2px solid sticker drop shadows (`3px 3px 0 #12100e`).
+  - [x] **Option A Accent — Vermilion Red Stamp**: Authentic Japanese red seal (`#e53935` / `#eb4d3d`) for play buttons, active season tabs, and key highlight badges.
+  - [x] **Screentone Midtones**: Subtle wash surfaces (`#ece8df`, `#ded8cb`) for secondary cards, inputs, and tab bars.
+  - [x] **Monochrome Icons & Typography**: High-contrast dark ink text with native `color-scheme: light` support.
+- [x] **Settings & Boot Persistence**
+  - [x] Add `pref.theme` setting in SQLite `settings` table (`"comic"` vs `"manga"`).
+  - [x] Add Theme / Appearance radio card picker under **Settings → Display**.
+  - [x] Initialize theme class on `document.documentElement` during early boot to prevent any Flash of Unstyled Content (FOUC).
 
 ---
 

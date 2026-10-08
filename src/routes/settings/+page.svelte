@@ -227,6 +227,55 @@
     <h2 class="section-title">Display</h2>
     <div class="card display">
       <div class="opt-head">
+        <h3>Theme</h3>
+        <p class="faint">Choose between the classic dark comicbook look and the printed manga ink & paper aesthetic.</p>
+      </div>
+      <div class="choices" role="radiogroup" aria-label="Theme">
+        <button
+          class="choice theme-choice"
+          class:on={app.theme === "comic"}
+          role="radio"
+          aria-checked={app.theme === "comic"}
+          onclick={() => app.setTheme("comic")}
+          id="pref-theme-comic"
+        >
+          <span class="theme-preview comic-preview" aria-hidden="true">
+            <span class="preview-shell">
+              <span class="preview-badge"></span>
+              <span class="preview-bar"></span>
+              <span class="preview-sub"></span>
+            </span>
+          </span>
+          <span class="choice-text">
+            <strong>Comicbook <span class="rec">Dark</span></strong>
+            <small>Deep plum-brown ink, warm coral accents, and chunky sticker shadows.</small>
+          </span>
+        </button>
+        <button
+          class="choice theme-choice"
+          class:on={app.theme === "manga"}
+          role="radio"
+          aria-checked={app.theme === "manga"}
+          onclick={() => app.setTheme("manga")}
+          id="pref-theme-manga"
+        >
+          <span class="theme-preview manga-preview" aria-hidden="true">
+            <span class="preview-shell">
+              <span class="preview-badge"></span>
+              <span class="preview-bar"></span>
+              <span class="preview-sub"></span>
+            </span>
+          </span>
+          <span class="choice-text">
+            <strong>Manga <span class="rec manga-rec">Light</span></strong>
+            <small>Authentic printed tankōbon — warm newsprint paper, sumi ink linework, and vermilion stamp seals.</small>
+          </span>
+        </button>
+      </div>
+
+      <div class="opt-divider"></div>
+
+      <div class="opt-head">
         <h3>Multi-season shows</h3>
         <p class="faint">AniList lists every season, movie and OVA as a separate entry.</p>
       </div>
@@ -801,6 +850,88 @@
   /* Display preferences ---------------------------------------------------- */
   .display {
     padding: 20px;
+  }
+  .opt-divider {
+    height: 1.5px;
+    background: var(--border);
+    margin: 22px 0;
+  }
+  .theme-preview {
+    position: relative;
+    flex: none;
+    width: 62px;
+    height: 48px;
+    border-radius: 8px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .comic-preview {
+    background: #1d1415;
+    border: 2px solid #140c0d;
+    box-shadow: 2px 2px 0 #140c0d;
+  }
+  .manga-preview {
+    background: #f5f2eb;
+    border: 2px solid #12100e;
+    box-shadow: 2px 2px 0 #12100e;
+    background-image: radial-gradient(#dcd6c9 1px, transparent 1px);
+    background-size: 6px 6px;
+  }
+  .preview-shell {
+    width: 44px;
+    height: 32px;
+    border-radius: 5px;
+    padding: 5px;
+    display: flex;
+    flex-direction: column;
+    gap: 3.5px;
+  }
+  .comic-preview .preview-shell {
+    background: #2c1f21;
+    border: 1.5px solid #140c0d;
+  }
+  .manga-preview .preview-shell {
+    background: #ffffff;
+    border: 1.5px solid #12100e;
+  }
+  .preview-badge {
+    width: 14px;
+    height: 4px;
+    border-radius: 2px;
+  }
+  .comic-preview .preview-badge {
+    background: #f76d4d;
+  }
+  .manga-preview .preview-badge {
+    background: #e53935;
+  }
+  .preview-bar {
+    width: 28px;
+    height: 3px;
+    border-radius: 2px;
+  }
+  .comic-preview .preview-bar {
+    background: #f7ede2;
+  }
+  .manga-preview .preview-bar {
+    background: #141210;
+  }
+  .preview-sub {
+    width: 18px;
+    height: 2.5px;
+    border-radius: 2px;
+  }
+  .comic-preview .preview-sub {
+    background: #cdbab0;
+  }
+  .manga-preview .preview-sub {
+    background: #7c766d;
+  }
+  .manga-rec {
+    background: #e53935;
+    color: #ffffff;
   }
 
   /* Playback / updates ----------------------------------------------------- */

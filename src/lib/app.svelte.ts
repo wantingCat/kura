@@ -24,6 +24,8 @@ export interface PlaybackPrefs {
   subFallback: string;
 }
 
+export type AppTheme = "comic" | "manga";
+
 export interface Toast {
   id: number;
   kind: "info" | "warn" | "error";
@@ -42,6 +44,8 @@ class AppStore {
   version = $state(0);
   /** Show one card per franchise (seasons as tabs) instead of one per AniList entry. */
   groupSeasons = $state(true);
+  /** Current visual theme ("comic" = dark plum/coral, "manga" = light sumi/newsprint). */
+  theme = $state<AppTheme>("comic");
   /** Library search, driven by the top bar. */
   query = $state("");
   playback = $state<PlaybackPrefs>({
@@ -67,6 +71,13 @@ class AppStore {
   async init() {
     if (this.#initialised) return;
     this.#initialised = true;
+    if (typeof localStorage !== "undefined") {
+      const localTheme = localStorage.getItem("kura-theme") as AppTheme | null;
+      if (localTheme === "manga" || localTheme === "comic") {
+        this.theme = localTheme;
+        this.applyTheme(this.theme);
+      }
+    }
     await events.onLibraryChanged(() => this.scheduleRefresh());
     await events.onScanProgress((p) => {
       this.scanning = p.phase !== "done";
@@ -91,6 +102,10 @@ class AppStore {
     this.scanning = await api.isScanning();
     try {
       const prefs = await api.getPrefs();
+      if (prefs.theme === "manga" || prefs.theme === "comic") {
+        this.theme = prefs.theme;
+        this.applyTheme(this.theme);
+      }
       this.groupSeasons = prefs.group_seasons !== "0";
       this.autoUpdate = prefs.auto_update !== "0";
       const num = (v: string | undefined, d: number) => (v !== undefined && !isNaN(Number(v)) ? Number(v) : d);
@@ -135,6 +150,35 @@ class AppStore {
     this.lastError = null;
     this.progress = { phase: "discover", current: 0, total: 0, message: "Starting scan…" };
     await api.startScan(libraryId);
+  }
+
+  async setTheme(t: AppTheme) {
+    this.theme = t;
+    this.applyTheme(t);
+    await api.setPref("theme", t);
+  }
+
+  applyTheme(t: AppTheme) {
+    if (typeof document !== "undefined") {
+      if (t === "manga") {
+        document.documentElement.dataset.theme = "manga";
+      } else {
+        delete document.documentElement.dataset.theme;
+      }
+      const metaTheme = document.querySelector('meta[name="theme-color"]');
+      if (metaTheme) {
+        metaTheme.setAttribute("content", t === "manga" ? "#f5f2eb" : "#1d1415");
+      }
+      const metaScheme = document.querySelector('meta[name="color-scheme"]');
+      if (metaScheme) {
+        metaScheme.setAttribute("content", t === "manga" ? "light" : "dark");
+      }
+    }
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem("kura-theme", t);
+      } catch {}
+    }
   }
 
   async setGroupSeasons(on: boolean) {

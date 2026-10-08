@@ -42,7 +42,12 @@
 <header class="topbar">
   <a class="brand" href="/" aria-label="Kura home" id="nav-home" onclick={() => (app.query = "")}>
     <img class="brand-mark" src="/brand/logo.png" alt="" width="38" height="38" />
-    <img class="brand-word" src="/brand/wordmark-white.png" alt="Kura" height="18" />
+    <img
+      class="brand-word"
+      src={app.theme === "manga" ? "/brand/wordmark.png" : "/brand/wordmark-white.png"}
+      alt="Kura"
+      height="18"
+    />
   </a>
 
   <div class="search">
