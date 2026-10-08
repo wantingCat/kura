@@ -34,6 +34,8 @@ export interface MediaCard {
   coverColor: string | null;
   bannerUrl: string | null;
   bannerPath: string | null;
+  logoUrl: string | null;
+  logoPath: string | null;
   description: string | null;
   ownedCount: number;
   watchedCount: number;
@@ -162,6 +164,8 @@ export interface MediaDetail {
   coverColor: string | null;
   bannerUrl: string | null;
   bannerPath: string | null;
+  logoUrl: string | null;
+  logoPath: string | null;
   averageScore: number | null;
   nextAiringEpisode: number | null;
   nextAiringAt: number | null;
@@ -211,6 +215,8 @@ export interface UpNextItem {
   coverColor: string | null;
   bannerUrl: string | null;
   bannerPath: string | null;
+  logoUrl: string | null;
+  logoPath: string | null;
   episodeTitle: string | null;
   thumbUrl: string | null;
   thumbPath: string | null;
@@ -275,6 +281,7 @@ export const api = {
   getMediaTrackPref: (anilistId: number) => invoke<MediaTrackPref | null>("get_media_track_pref", { anilistId }),
   setMediaTrackPref: (anilistId: number, pref: MediaTrackPref | null) =>
     invoke<void>("set_media_track_pref", { anilistId, pref }),
+  rebuildMetadata: () => invoke<void>("rebuild_metadata"),
 };
 
 export const events = {

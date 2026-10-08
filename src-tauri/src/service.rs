@@ -5,7 +5,7 @@ use crate::parser::{Parsed, SpecialKind};
 use crate::providers::{EpisodeMeta, Providers};
 use crate::store;
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -89,17 +89,78 @@ pub async fn ensure_episodes(st: &AppState, id: i64) -> Result<()> {
 
 pub async fn fetch_episodes(st: &AppState, m: &MediaLite) -> Result<()> {
     let mut source = Vec::new();
-    let mut eps: Vec<EpisodeMeta> = match st.providers.anizip_episodes(m.id).await {
-        Ok(e) if !e.is_empty() => {
-            source.push("anizip");
-            e
+    let (mut eps, anizip_imgs, thetvdb_id) = match st.providers.anizip_data(m.id).await {
+        Ok(data) => {
+            if !data.episodes.is_empty() {
+                source.push("anizip");
+            }
+            (data.episodes, Some(data.images), data.thetvdb_id)
         }
-        Ok(_) => Vec::new(),
         Err(e) => {
             eprintln!("[kura] ani.zip failed for {}: {e}", m.id);
-            Vec::new()
+            (Vec::new(), None, None)
         }
     };
+
+    let fanart_key = {
+        let conn = st.db();
+        db::get_setting(&conn, "pref.fanart_api_key")
+            .ok()
+            .flatten()
+            .or_else(|| db::get_setting(&conn, "fanart_api_key").ok().flatten())
+    };
+
+    let fanart_imgs = if let (Some(key), Some(tvdb)) = (fanart_key.as_deref(), thetvdb_id) {
+        if !key.trim().is_empty() {
+            match st.providers.fanart_tv_images(tvdb, key.trim()).await {
+                Ok(imgs) => Some(imgs),
+                Err(e) => {
+                    eprintln!("[kura] Fanart.tv failed for TVDB {tvdb}: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Store high-resolution Fanart backdrop and ClearLogo URLs into media table
+    {
+        let conn = st.db();
+        let fanart_bg = fanart_imgs
+            .as_ref()
+            .and_then(|i| i.fanart.clone())
+            .or_else(|| anizip_imgs.as_ref().and_then(|i| i.fanart.clone()));
+        let clearlogo = fanart_imgs
+            .as_ref()
+            .and_then(|i| i.clearlogo.clone());
+
+        if let Some(bg) = fanart_bg {
+            conn.execute(
+                "UPDATE media SET
+                    banner_path = CASE WHEN banner_url IS ?2 THEN banner_path ELSE NULL END,
+                    banner_url = ?2
+                 WHERE anilist_id = ?1",
+                params![m.id, bg],
+            )?;
+        }
+        if let Some(logo) = clearlogo {
+            conn.execute(
+                "UPDATE media SET
+                    logo_path = CASE WHEN logo_url IS ?2 THEN logo_path ELSE NULL END,
+                    logo_url = ?2
+                 WHERE anilist_id = ?1",
+                params![m.id, logo],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE media SET logo_url = '' WHERE anilist_id = ?1 AND logo_url IS NULL",
+                params![m.id],
+            )?;
+        }
+    }
 
     let regular_titled = eps.iter().filter(|e| !e.is_special && (e.title_en.is_some() || e.title_ja.is_some())).count();
     if regular_titled == 0 {
@@ -330,47 +391,6 @@ pub async fn resolve_file(st: &AppState, base: i64, h: FileHints<'_>) -> Result<
             return Ok(Some((id, n.to_string())));
         }
 
-        // Additional fallback: If s > 1 and not yet found in chain, search AniList for "{base_title} Season {s}"
-        if s > 1 {
-            let titles = {
-                let conn = st.db();
-                let mut list = Vec::new();
-                if let Ok(Some(base_media)) = db::media_lite(&conn, base) {
-                    if let Some(en) = base_media.title_english {
-                        list.push(en);
-                    }
-                    if let Some(ro) = base_media.title_romaji {
-                        list.push(ro);
-                    }
-                }
-                list
-            };
-            for base_title in titles {
-                let queries = [format!("{base_title} Season {s}"), format!("{base_title} {s}")];
-                for q in queries {
-                    if let Ok(results) = st.providers.anilist_search(&q, 4).await {
-                        for cand in results {
-                            if cand.format.as_deref().map_or(false, |f| SERIES_FORMATS.contains(&f)) {
-                                let _ = ensure_media(st, cand.id).await;
-                                let _ = ensure_episodes(st, cand.id).await;
-                                let idx = {
-                                    let conn = st.db();
-                                    db::episode_index(&conn, cand.id).ok()
-                                };
-                                if let Some(idx) = idx {
-                                    if let Some((k, ..)) = idx.iter().find(|(_, ts, te, _, sp)| !*sp && *ts == Some(s) && *te == Some(ep)) {
-                                        return Ok(Some((cand.id, k.clone())));
-                                    }
-                                    if idx.iter().any(|(k, ..)| k == &ep.to_string()) {
-                                        return Ok(Some((cand.id, ep.to_string())));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
     } else {
         // Absolute numbering across the franchise.
         for id in &chain {
@@ -387,3 +407,4 @@ pub async fn resolve_file(st: &AppState, base: i64, h: FileHints<'_>) -> Result<
     let (id, n) = rollover(st, &chain, start, ep).await;
     Ok(Some((id, n.to_string())))
 }
+

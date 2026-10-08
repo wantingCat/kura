@@ -26,9 +26,21 @@ pub fn upsert_media(conn: &Connection, m: &AlMedia) -> Result<()> {
             season = excluded.season, season_year = excluded.season_year, start_date = excluded.start_date,
             end_date = excluded.end_date, description = excluded.description, genres = excluded.genres,
             tags = excluded.tags, studios = excluded.studios,
-            cover_path = CASE WHEN media.cover_url IS excluded.cover_url THEN media.cover_path ELSE NULL END,
-            banner_path = CASE WHEN media.banner_url IS excluded.banner_url THEN media.banner_path ELSE NULL END,
-            cover_url = excluded.cover_url, cover_color = excluded.cover_color, banner_url = excluded.banner_url,
+            cover_path = CASE
+                WHEN media.cover_path IS NOT NULL AND (media.cover_url IS NULL OR media.cover_url IS excluded.cover_url) THEN media.cover_path
+                WHEN media.cover_path IS NOT NULL AND NOT (media.cover_path LIKE '%images%covers%' OR media.cover_path LIKE '%images/covers%') THEN media.cover_path
+                ELSE NULL
+            END,
+            banner_path = CASE
+                WHEN media.banner_path IS NOT NULL AND (media.banner_url IS NULL OR media.banner_url IS excluded.banner_url) THEN media.banner_path
+                WHEN media.banner_path IS NOT NULL AND NOT (media.banner_path LIKE '%images%banners%' OR media.banner_path LIKE '%images/banners%') THEN media.banner_path
+                ELSE NULL
+            END,
+            banner_url = CASE
+                WHEN media.banner_url LIKE '%thetvdb.com%' OR media.banner_url LIKE '%fanart.tv%' THEN media.banner_url
+                ELSE COALESCE(excluded.banner_url, media.banner_url)
+            END,
+            cover_url = excluded.cover_url, cover_color = excluded.cover_color,
             average_score = excluded.average_score, next_airing_episode = excluded.next_airing_episode,
             next_airing_at = excluded.next_airing_at, fetched_at = excluded.fetched_at",
         params![

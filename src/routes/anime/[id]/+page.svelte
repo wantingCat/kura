@@ -47,10 +47,13 @@
     void app.version;
     load(id);
   });
+  let logoFailed = $state(false);
+
   $effect(() => {
     void id;
     synopsisOpen = false;
     expanded = new Set();
+    logoFailed = false;
   });
 
   const regular = $derived(d?.episodeList.filter((e) => !e.isSpecial) ?? []);
@@ -69,6 +72,7 @@
   );
   const banner = $derived(d ? (img(d.bannerPath, d.bannerUrl) ?? img(d.coverPath, d.coverUrl)) : null);
   const cover = $derived(d ? img(d.coverPath, d.coverUrl) : null);
+  const logo = $derived(d && !logoFailed ? img(d.logoPath, d.logoUrl) : null);
   const description = $derived(cleanDescription(d?.description));
   const lowConfidence = $derived(d?.groups.some((g) => !g.manual && (g.confidence ?? 1) < 0.8) ?? false);
   const pct = $derived(totalEps ? Math.round((watched / totalEps) * 100) : 0);
@@ -158,11 +162,16 @@
   {#key d.anilistId}
     <div class="detail">
       <section class="banner">
-        {#if banner}<img src={banner} alt="" class:blur={!d.bannerUrl} />{/if}
+        {#if banner}<img src={banner} alt="" class:blur={!d.bannerUrl && !d.bannerPath} />{/if}
         <div class="banner-shade"></div>
         <button class="btn btn-ghost back" onclick={() => history.back()} id="detail-back">
           <Icon name="arrow-left" size={16} /> Back
         </button>
+        {#if logo}
+          <div class="banner-clearart">
+            <img src={logo} alt="" onerror={() => (logoFailed = true)} />
+          </div>
+        {/if}
       </section>
 
       <div class="page body">
@@ -685,6 +694,42 @@
   .badge-accent {
     background: var(--coral);
     color: var(--on-coral);
+  }
+  .banner-clearart {
+    position: absolute;
+    right: 32px;
+    bottom: 24px;
+    z-index: 2;
+    max-width: min(380px, 42vw);
+    max-height: 120px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: flex-end;
+    pointer-events: none;
+    user-select: none;
+  }
+  .banner-clearart img {
+    max-width: 100%;
+    max-height: 120px;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    filter: drop-shadow(0 4px 16px rgba(0, 0, 0, 0.8)) drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
+    animation: hero-in 600ms var(--ease) both;
+  }
+  :global([data-theme="manga"]) .banner-clearart img {
+    filter: drop-shadow(3px 3px 0 #000) drop-shadow(-1px -1px 0 #fff);
+  }
+  @media (max-width: 768px) {
+    .banner-clearart {
+      right: 16px;
+      bottom: 16px;
+      max-width: 180px;
+      max-height: 60px;
+    }
+    .banner-clearart img {
+      max-height: 60px;
+    }
   }
   h1 {
     margin-top: 12px;

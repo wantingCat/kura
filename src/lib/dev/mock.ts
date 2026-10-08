@@ -115,6 +115,8 @@ function card(m: AniMedia, i: number): MediaCard {
     coverColor: m.coverImage?.color ?? null,
     bannerUrl: m.bannerImage,
     bannerPath: null,
+    logoUrl: null,
+    logoPath: null,
     description: m.description,
     ownedCount: s.owned,
     watchedCount: watched.get(m.id)?.size ?? s.watched,
@@ -202,6 +204,8 @@ async function upNext(kind: "continue" | "new"): Promise<UpNextItem[]> {
       coverColor: m.coverImage?.color ?? null,
       bannerUrl: m.bannerImage,
       bannerPath: null,
+      logoUrl: null,
+      logoPath: null,
       episodeTitle: ep.title?.en ?? null,
       thumbUrl: ep.image ?? null,
       thumbPath: null,
@@ -356,7 +360,7 @@ export function installMock() {
           );
           return null;
         case "plugin:app|version":
-          return "0.3.1";
+          return "0.3.2";
         default:
           console.info("[preview] ignored command", cmd, a);
           return null;

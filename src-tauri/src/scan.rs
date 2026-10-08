@@ -1,6 +1,6 @@
 //! Library scanning pipeline: discover → sync DB → match → resolve → episodes → artwork.
 
-use crate::db::{self, now};
+use crate::db::now;
 use crate::matcher::{self, MatchHints};
 use crate::parser::{self, Parsed, SpecialKind, SubfolderKind};
 use crate::service::{self, AppState, FileHints};
@@ -491,12 +491,100 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
         }
         let _ = service::ensure_episodes(st, *id).await;
     }
+
+    // 6. Scan candidate directories for local artwork (Priority 1: Local Folder Assets)
+    for id in &owned {
+        let dirs: Vec<PathBuf> = {
+            let conn = st.db();
+            let mut set: HashSet<PathBuf> = HashSet::new();
+            if let Ok(mut stmt) = conn.prepare("SELECT path FROM local_files WHERE anilist_id = ?1") {
+                if let Ok(paths) = stmt.query_map([id], |r| r.get::<_, String>(0)) {
+                    for p in paths.flatten() {
+                        let p = PathBuf::from(p);
+                        if let Some(parent) = p.parent() {
+                            let p_str = parent.to_string_lossy().to_ascii_lowercase();
+                            if p_str.contains("season") || p_str.contains("specials") || p_str.contains("extras") {
+                                if let Some(grandparent) = parent.parent() {
+                                    set.insert(grandparent.to_path_buf());
+                                }
+                            }
+                            set.insert(parent.to_path_buf());
+                        }
+                    }
+                }
+            }
+            if let Ok(mut stmt_g) = conn.prepare("SELECT folder_path FROM match_groups WHERE anilist_id = ?1 AND folder_path IS NOT NULL") {
+                if let Ok(g_paths) = stmt_g.query_map([id], |r| r.get::<_, String>(0)) {
+                    for g in g_paths.flatten() {
+                        set.insert(PathBuf::from(g));
+                    }
+                }
+            }
+            set.into_iter().collect()
+        };
+
+        let local = scan_folder_assets(&dirs);
+        let conn = st.db();
+        if let Some(poster) = local.poster {
+            let s = poster.to_string_lossy().to_string();
+            let _ = conn.execute("UPDATE media SET cover_path = ?2 WHERE anilist_id = ?1", params![id, s]);
+        }
+        if let Some(backdrop) = local.backdrop {
+            let s = backdrop.to_string_lossy().to_string();
+            let _ = conn.execute("UPDATE media SET banner_path = ?2 WHERE anilist_id = ?1", params![id, s]);
+        }
+        if let Some(logo) = local.logo {
+            let s = logo.to_string_lossy().to_string();
+            let _ = conn.execute("UPDATE media SET logo_path = ?2 WHERE anilist_id = ?1", params![id, s]);
+        }
+    }
     let _ = app.emit("library-changed", ());
 
-    // 6. Artwork
+    // 7. Artwork (download remote covers, banners, logos and thumbs if missing locally)
     download_artwork(app, st, &owned).await?;
     progress(app, "done", 1, 1, "Library up to date");
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct LocalAssets {
+    poster: Option<PathBuf>,
+    backdrop: Option<PathBuf>,
+    logo: Option<PathBuf>,
+}
+
+fn scan_folder_assets(dirs: &[PathBuf]) -> LocalAssets {
+    let mut assets = LocalAssets::default();
+    let backdrop_names = ["fanart", "backdrop", "background", "art"];
+    let logo_names = ["clearlogo", "logo", "clearart"];
+    let poster_names = ["poster", "cover", "folder"];
+    let valid_exts = ["jpg", "jpeg", "png", "webp"];
+
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase()) else { continue };
+            let Some(ext) = path.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase()) else { continue };
+            if !valid_exts.contains(&ext.as_str()) {
+                continue;
+            }
+
+            if assets.backdrop.is_none() && backdrop_names.contains(&stem.as_str()) {
+                assets.backdrop = Some(path.clone());
+            }
+            if assets.logo.is_none() && logo_names.contains(&stem.as_str()) {
+                assets.logo = Some(path.clone());
+            }
+            if assets.poster.is_none() && poster_names.contains(&stem.as_str()) {
+                assets.poster = Some(path.clone());
+            }
+        }
+    }
+    assets
 }
 
 struct ImageJob {
@@ -523,14 +611,14 @@ async fn download_artwork(app: &AppHandle, st: &Arc<AppState>, owned: &[i64]) ->
     {
         let conn = st.db();
         for id in owned {
-            let row: Option<(Option<String>, Option<String>, Option<String>, Option<String>)> = conn
+            let row: Option<(Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> = conn
                 .query_row(
-                    "SELECT cover_url, cover_path, banner_url, banner_path FROM media WHERE anilist_id = ?1",
+                    "SELECT cover_url, cover_path, banner_url, banner_path, logo_url, logo_path FROM media WHERE anilist_id = ?1",
                     [id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
                 )
                 .optional()?;
-            let Some((cu, cp, bu, bp)) = row else { continue };
+            let Some((cu, cp, bu, bp, lu, lp)) = row else { continue };
             let missing = |p: &Option<String>| p.as_ref().map_or(true, |p| !Path::new(p).exists());
             if let (Some(u), true) = (cu, missing(&cp)) {
                 let dest = img_dir.join("covers").join(format!("{id}.{}", ext_from_url(&u)));
@@ -539,6 +627,12 @@ async fn download_artwork(app: &AppHandle, st: &Arc<AppState>, owned: &[i64]) ->
             if let (Some(u), true) = (bu, missing(&bp)) {
                 let dest = img_dir.join("banners").join(format!("{id}.{}", ext_from_url(&u)));
                 jobs.push(ImageJob { kind: "banner", id: *id, key: None, url: u, dest });
+            }
+            if let (Some(u), true) = (lu, missing(&lp)) {
+                if !u.trim().is_empty() {
+                    let dest = img_dir.join("logos").join(format!("{id}.{}", ext_from_url(&u)));
+                    jobs.push(ImageJob { kind: "logo", id: *id, key: None, url: u, dest });
+                }
             }
             let mut stmt = conn.prepare(
                 "SELECT ep_key, thumb_url, thumb_path FROM episodes WHERE anilist_id = ?1 AND thumb_url IS NOT NULL",
@@ -563,14 +657,20 @@ async fn download_artwork(app: &AppHandle, st: &Arc<AppState>, owned: &[i64]) ->
     let mut set = tokio::task::JoinSet::new();
     let mut iter = jobs.into_iter();
     let mut done = 0usize;
-    let mut since_emit = 0usize;
     loop {
         while set.len() < 6 {
             let Some(job) = iter.next() else { break };
             let http = st.providers.http.clone();
             set.spawn(async move {
                 let res: Result<()> = async {
-                    let bytes = http.get(&job.url).send().await?.error_for_status()?.bytes().await?;
+                    let bytes = http
+                        .get(&job.url)
+                        .timeout(std::time::Duration::from_secs(8))
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .bytes()
+                        .await?;
                     if let Some(parent) = job.dest.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
@@ -583,7 +683,6 @@ async fn download_artwork(app: &AppHandle, st: &Arc<AppState>, owned: &[i64]) ->
         }
         let Some(joined) = set.join_next().await else { break };
         done += 1;
-        since_emit += 1;
         let Ok((job, res)) = joined else { continue };
         match res {
             Ok(()) => {
@@ -592,6 +691,7 @@ async fn download_artwork(app: &AppHandle, st: &Arc<AppState>, owned: &[i64]) ->
                 match job.kind {
                     "cover" => conn.execute("UPDATE media SET cover_path = ?2 WHERE anilist_id = ?1", params![job.id, path])?,
                     "banner" => conn.execute("UPDATE media SET banner_path = ?2 WHERE anilist_id = ?1", params![job.id, path])?,
+                    "logo" => conn.execute("UPDATE media SET logo_path = ?2 WHERE anilist_id = ?1", params![job.id, path])?,
                     _ => conn.execute(
                         "UPDATE episodes SET thumb_path = ?3 WHERE anilist_id = ?1 AND ep_key = ?2",
                         params![job.id, job.key, path],
@@ -600,14 +700,10 @@ async fn download_artwork(app: &AppHandle, st: &Arc<AppState>, owned: &[i64]) ->
             }
             Err(e) => eprintln!("[kura] image {} failed: {e}", job.url),
         }
-        if done % 10 == 0 || done == total {
+        if done % 5 == 0 || done == total {
             progress(app, "artwork", done, total, "Downloading artwork…");
         }
-        if since_emit >= 40 {
-            since_emit = 0;
-            let _ = app.emit("library-changed", ());
-        }
     }
-    let _ = db::now();
+    let _ = app.emit("library-changed", ());
     Ok(())
 }

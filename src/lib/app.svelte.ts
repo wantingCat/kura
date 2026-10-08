@@ -60,6 +60,7 @@ class AppStore {
     subFallback: "eng",
   });
   autoUpdate = $state(true);
+  fanartApiKey = $state("");
   /** Latest playback event while a player is being tracked. */
   nowPlaying = $state<PlaybackEvent | null>(null);
   toasts = $state<Toast[]>([]);
@@ -108,6 +109,7 @@ class AppStore {
       }
       this.groupSeasons = prefs.group_seasons !== "0";
       this.autoUpdate = prefs.auto_update !== "0";
+      this.fanartApiKey = prefs.fanart_api_key ?? "";
       const num = (v: string | undefined, d: number) => (v !== undefined && !isNaN(Number(v)) ? Number(v) : d);
       this.playback = {
         player: (prefs.player as PlayerKind) ?? "",
@@ -189,6 +191,11 @@ class AppStore {
   async setAutoUpdate(on: boolean) {
     this.autoUpdate = on;
     await api.setPref("auto_update", on ? "1" : "0");
+  }
+
+  async setFanartApiKey(key: string) {
+    this.fanartApiKey = key.trim();
+    await api.setPref("fanart_api_key", this.fanartApiKey);
   }
 
   async setPlayback<K extends keyof PlaybackPrefs>(key: K, value: PlaybackPrefs[K]) {

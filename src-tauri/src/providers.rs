@@ -1,6 +1,6 @@
 //! Metadata providers: AniList (series), ani.zip (episodes), Jikan/MAL (episode fallback).
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -50,7 +50,7 @@ impl Providers {
     pub fn new() -> Self {
         let http = reqwest::Client::builder()
             .user_agent(concat!("Kura/", env!("CARGO_PKG_VERSION"), " (+https://github.com/kura-app/kura)"))
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(10))
             .build()
             .expect("http client");
         Self {
@@ -316,9 +316,24 @@ fn useful_title(t: Option<String>) -> Option<String> {
     })
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AniZipImages {
+    pub fanart: Option<String>,
+    pub clearlogo: Option<String>,
+    pub banner: Option<String>,
+    pub poster: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AniZipData {
+    pub episodes: Vec<EpisodeMeta>,
+    pub images: AniZipImages,
+    pub thetvdb_id: Option<i64>,
+}
+
 impl Providers {
-    /// Episodes from ani.zip, keyed to the AniList entry's own numbering.
-    pub async fn anizip_episodes(&self, anilist_id: i64) -> Result<Vec<EpisodeMeta>> {
+    /// Full data from ani.zip: episodes, high-resolution artworks (Fanart, ClearLogo, Banner) and TVDB mapping.
+    pub async fn anizip_data(&self, anilist_id: i64) -> Result<AniZipData> {
         self.anizip_rl.wait().await;
         let url = format!("https://api.ani.zip/mappings?anilist_id={anilist_id}");
         let resp = self.http.get(&url).send().await?;
@@ -326,10 +341,11 @@ impl Providers {
             bail!("ani.zip returned {}", resp.status());
         }
         let v: Value = resp.json().await?;
-        let eps = v.get("episodes").and_then(|e| e.as_object()).ok_or_else(|| anyhow!("ani.zip: no episodes"))?;
+        let eps = v.get("episodes").and_then(|e| e.as_object());
 
-        let mut out = Vec::new();
-        for (key, e) in eps {
+        let mut episodes = Vec::new();
+        if let Some(eps) = eps {
+            for (key, e) in eps {
             let is_special = key.starts_with('S');
             let number: i64 = key.trim_start_matches('S').parse().unwrap_or(0);
             if number <= 0 {
@@ -342,7 +358,7 @@ impl Providers {
                     s.lines().filter(|l| !l.trim_start().starts_with("Source:")).collect::<Vec<_>>().join("\n").trim().to_string()
                 })
             });
-            out.push(EpisodeMeta {
+            episodes.push(EpisodeMeta {
                 ep_key: key.clone(),
                 number,
                 is_special,
@@ -360,7 +376,69 @@ impl Providers {
                 recap: false,
             });
         }
-        Ok(out)
+        }
+
+        let mut images = AniZipImages::default();
+        if let Some(imgs) = v.get("images").and_then(|x| x.as_array()) {
+            for img in imgs {
+                let cover_type = img.get("coverType").and_then(|x| x.as_str()).unwrap_or("").to_ascii_lowercase();
+                let url = img.get("url").and_then(|x| x.as_str()).map(|s| s.to_string());
+                match cover_type.as_str() {
+                    "fanart" if images.fanart.is_none() => images.fanart = url,
+                    "banner" if images.banner.is_none() => images.banner = url,
+                    "poster" if images.poster.is_none() => images.poster = url,
+                    _ => {}
+                }
+            }
+        }
+
+        let thetvdb_id = v.get("mappings")
+            .and_then(|m| m.get("thetvdb_id"))
+            .and_then(|x| x.as_i64().or_else(|| x.as_str().and_then(|s| s.parse().ok())));
+
+        Ok(AniZipData { episodes, images, thetvdb_id })
+    }
+
+    /// Episodes from ani.zip, keyed to the AniList entry's own numbering.
+    pub async fn anizip_episodes(&self, anilist_id: i64) -> Result<Vec<EpisodeMeta>> {
+        let data = self.anizip_data(anilist_id).await?;
+        Ok(data.episodes)
+    }
+
+    /// High-resolution anime artwork from Fanart.tv using a user-provided API key.
+    pub async fn fanart_tv_images(&self, thetvdb_id: i64, api_key: &str) -> Result<AniZipImages> {
+        let url = format!("https://webservice.fanart.tv/v3/anime/{thetvdb_id}?api_key={api_key}");
+        let resp = self.http.get(&url).timeout(Duration::from_secs(6)).send().await?;
+        if !resp.status().is_success() {
+            bail!("Fanart.tv returned {}", resp.status());
+        }
+        let v: Value = resp.json().await?;
+        let mut images = AniZipImages::default();
+
+        // ClearLogo: check clearlogo or hdclearart array, prefer English ("en") or first item
+        let mut logo_candidates = Vec::new();
+        if let Some(logos) = v.get("clearlogo").and_then(|x| x.as_array()) {
+            logo_candidates.extend(logos.iter());
+        }
+        if let Some(logos) = v.get("hdclearart").and_then(|x| x.as_array()) {
+            logo_candidates.extend(logos.iter());
+        }
+        if !logo_candidates.is_empty() {
+            let en_logo = logo_candidates.iter().find(|l| l.get("lang").and_then(|x| x.as_str()) == Some("en"));
+            let picked = en_logo.or_else(|| logo_candidates.first());
+            if let Some(u) = picked.and_then(|l| l.get("url")).and_then(|u| u.as_str()) {
+                images.clearlogo = Some(u.to_string());
+            }
+        }
+
+        // Fanart / Backdrop: check showbackground array
+        if let Some(bgs) = v.get("showbackground").and_then(|x| x.as_array()) {
+            if let Some(u) = bgs.first().and_then(|b| b.get("url")).and_then(|u| u.as_str()) {
+                images.fanart = Some(u.to_string());
+            }
+        }
+
+        Ok(images)
     }
 
     /// Episode titles from Jikan (MyAnimeList). Used as a fallback.
@@ -370,7 +448,7 @@ impl Providers {
         loop {
             self.jikan_rl.wait().await;
             let url = format!("https://api.jikan.moe/v4/anime/{mal_id}/episodes?page={page}");
-            let resp = self.http.get(&url).send().await?;
+            let resp = self.http.get(&url).timeout(Duration::from_secs(5)).send().await?;
             if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;

@@ -8,8 +8,8 @@ This document serves as the master planning roadmap for Kura, organizing propose
 
 | Milestone | Target Focus | Status |
 | :--- | :--- | :--- |
-| **v0.3.2** | **Visual & Artwork Overhaul**: Manga Mode (Light Theme) + Priority Artwork Engine (ClearLogos & Fanart) | 📋 Ready to Plan |
-| **v0.3.3** | **Social & Real-Time Tracking**: Discord Rich Presence (RPC) + Live Folder Watcher | 💡 Planned |
+| **v0.3.2** | **Visual & Artwork Overhaul**: Manga Mode (Light Theme) + Priority Artwork Engine (ClearLogos & Fanart) | ✅ Completed |
+| **v0.3.3** | **Social & Real-Time Tracking**: Discord Rich Presence (RPC) + Live Folder Watcher | 📋 Ready to Plan |
 | **v0.4.0** | **Deeper Anime Knowledge**: Rich Cast, Voice Actors (Seiyuu), Character Portraits & Staff Guides | 💡 Planned |
 | **v0.5.0** | **Cloud & Account Integration**: AniList & MyAnimeList Two-Way Scrobbling / List Sync | 💡 Planned |
 | **v0.6.0** | **Japanese Immersion**: Native mpv + Floating Yomitan Subtitle HUD (Lightweight Memento Alternative) | 💡 Planned |
@@ -37,7 +37,7 @@ Transform Kura's visual identity from the current plum/coral "Comicbook Dark" mo
 ---
 
 ## 🖼️ Phase 2: Priority Artwork Engine (`Local > Fanart > AniList`)
-*Target: v0.3.2*
+*Target: v0.3.2* — **Completed**
 
 Eliminate missing or blurred backdrops and introduce transparent anime title logos (ClearLogos) across the app using a strict priority pipeline.
 
@@ -45,26 +45,29 @@ Eliminate missing or blurred backdrops and introduce transparent anime title log
 $$\mathbf{1.\ Local\ Folder\ Assets} \;\longrightarrow\; \mathbf{2.\ Fanart.tv\ /\ ani.zip\ Fanart} \;\longrightarrow\; \mathbf{3.\ AniList\ Default}$$
 
 ### Checklist
-- [ ] **Local Asset Scanner (`scan.rs`)**
-  - [ ] Scan anime folder for local backdrops: `fanart.jpg`, `fanart.png`, `backdrop.jpg`, `backdrop.png`, `background.jpg`, `art.jpg`.
-  - [ ] Scan anime folder for local transparent logos: `clearlogo.png`, `logo.png`, `clearart.png`.
-  - [ ] Scan anime folder for local posters: `poster.jpg`, `cover.jpg`, `folder.jpg`.
-  - [ ] Use local file paths directly when present, bypassing remote downloads.
-- [ ] **Zero-Config Built-in Fanart & ClearLogo Integration**
-  - [ ] Update `anizip_episodes` parser to extract the `images` array from `api.ani.zip/mappings`:
+- [x] **Local Asset Scanner (`scan.rs`)**
+  - [x] Scan anime folder for local backdrops: `fanart.jpg`, `fanart.png`, `backdrop.jpg`, `backdrop.png`, `background.jpg`, `art.jpg`.
+  - [x] Scan anime folder for local transparent logos: `clearlogo.png`, `logo.png`, `clearart.png`.
+  - [x] Scan anime folder for local posters: `poster.jpg`, `cover.jpg`, `folder.jpg`.
+  - [x] Use local file paths directly when present, bypassing remote downloads.
+- [x] **Zero-Config Built-in Fanart & ClearLogo Integration**
+  - [x] Update `anizip_episodes` parser to extract the `images` array from `api.ani.zip/mappings`:
     - `coverType: "Fanart"` $\to$ 1080p TheTVDB/Fanart widescreen background.
     - `coverType: "Clearlogo"` $\to$ Transparent PNG title logo.
     - `coverType: "Banner"` $\to$ Graphical banner.
-  - [ ] Update SQLite schema: add `logo_url` and `logo_path` columns to `media` table.
-  - [ ] Download and cache ClearLogos locally in `<app_data>/cache/images/logos/` for 100% offline usage.
-- [ ] **Fanart.tv API Key Support (Settings)**
-  - [ ] Add `fanart_api_key` preference in **Settings → Artwork & Metadata**.
-  - [ ] When a key is configured, query `https://webservice.fanart.tv/v3/tv/{thetvdb_id}?api_key=...` (or `/movies/{themoviedb_id}`) using mappings from ani.zip.
-  - [ ] Fetch community-curated HD ClearLogos (`hdtvlogo`), high-res posters, and backgrounds (`showbackground`).
-- [ ] **Cinematic Header with Floating ClearLogos (`anime/[id]/+page.svelte`)**
-  - [ ] Display transparent PNG title logo floating over the widescreen Fanart backdrop with drop shadow (`filter: drop-shadow(0 4px 14px rgba(0,0,0,0.7))`).
-  - [ ] Subtitle underneath with Japanese kanji/kana and romaji titles.
-  - [ ] Seamless fallback to styled typographic title if no ClearLogo exists for that title.
+  - [x] Update SQLite schema: add `logo_url` and `logo_path` columns to `media` table.
+  - [x] Download and cache ClearLogos locally in `<app_data>/cache/images/logos/` for 100% offline usage.
+- [x] **Fanart.tv API Key Support (Settings)**
+  - [x] Add `fanart_api_key` preference in **Settings → Artwork & Metadata**.
+  - [x] When a key is configured, query `https://webservice.fanart.tv/v3/tv/{thetvdb_id}?api_key=...` (or `/movies/{themoviedb_id}`) using mappings from ani.zip.
+  - [x] Fetch community-curated HD ClearLogos (`hdtvlogo`), high-res posters, and backgrounds (`showbackground`).
+- [x] **Cinematic Header with Floating ClearLogos (`anime/[id]/+page.svelte`)**
+  - [x] Display transparent PNG title logo floating over the widescreen Fanart backdrop with drop shadow (`filter: drop-shadow(0 4px 14px rgba(0,0,0,0.7))`).
+  - [x] Subtitle underneath with Japanese kanji/kana and romaji titles.
+  - [x] Seamless fallback to styled typographic title if no ClearLogo exists for that title.
+- [x] **Artwork & Metadata Rebuild Utility (`Settings → Artwork & Metadata`)**
+  - [x] One-click button to purge cached metadata, episode guides, and artwork while strictly preserving all watch states (`watch_state`), playback resume positions (`watch_progress`), track preferences (`media_track_prefs`), and libraries.
+  - [x] Automatically triggers background scan to fetch ani.zip / Fanart.tv ClearLogos and 1080p Fanarts for all owned anime.
 
 ---
 

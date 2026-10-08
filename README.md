@@ -5,7 +5,7 @@
   <br>
   <strong>A local-first, manga-styled desktop anime media library.</strong>
   <br>
-  <em>Current Release: <code>v0.3.1-alpha</code> · Built with AI assistance</em>
+  <em>Current Release: <code>v0.3.2-alpha</code> · Built with AI assistance</em>
 </p>
 
 ---
@@ -35,7 +35,12 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 
 ## ✨ Features
 
-### New in `v0.3.1-alpha`
+### New in `v0.3.2-alpha`
+- **Transparent ClearArt / Logos on Backdrops**: Displays high-resolution series typography wordmarks and ClearArt on the cinematic backdrop, powered by Fanart.tv and local folder artwork (`clearlogo.png` / `logo.png`).
+- **Safe Metadata & Artwork Rebuild Tool**: In Settings, easily wipe and reconstruct local artwork and metadata caches from scratch while strictly preserving 100% of your watch history, progress, track preferences, and library folders.
+- **Scanning Pipeline Overhaul & Stability**: Drastically improved scan reliability and concurrency, added strict external provider timeouts, eliminated main thread mutex contention, and streamlined franchise resolution.
+
+### Highlights from `v0.3.1-alpha`
 - **Plays in your own player**: [mpv](https://mpv.io), [VLC](https://www.videolan.org/vlc/), [MPC-HC / MPC-BE](https://github.com/clsid2/mpc-hc) and [Memento](https://github.com/ripose-jp/Memento) are detected automatically (or pick the program yourself). The system default player still works too.
 - **Progress & resume**: Kura follows playback, remembers where you stopped, and resumes from there next time. Episode lists show how far into each episode you are.
 - **Auto-marked watched**: An episode counts as watched once you pass 90% of it (adjustable in Settings), so skipping the ending still counts.

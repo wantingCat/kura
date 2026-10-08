@@ -157,14 +157,22 @@ CREATE TABLE IF NOT EXISTS media_track_prefs (
 );
 "#;
 
+/// v0.4: ClearLogos and priority artwork (logo_url, logo_path).
+const SCHEMA_V4: &str = r#"
+ALTER TABLE media ADD COLUMN logo_url TEXT;
+ALTER TABLE media ADD COLUMN logo_path TEXT;
+"#;
+
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA foreign_keys = ON;
-         PRAGMA synchronous = NORMAL;",
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;",
     )?;
     migrate(&conn)?;
+    let _ = conn.execute("UPDATE media SET logo_url = NULL, logo_path = NULL WHERE logo_url LIKE '%/icons/%'", []);
     Ok(conn)
 }
 
@@ -178,6 +186,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if version < 3 {
         conn.execute_batch(&format!("BEGIN; {SCHEMA_V3} PRAGMA user_version = 3; COMMIT;"))?;
+    }
+    if version < 4 {
+        conn.execute_batch(&format!("BEGIN; {SCHEMA_V4} PRAGMA user_version = 4; COMMIT;"))?;
     }
     Ok(())
 }

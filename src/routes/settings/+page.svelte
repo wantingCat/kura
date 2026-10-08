@@ -23,6 +23,47 @@
   let renameValue = $state("");
   let confirmDelete = $state<number | null>(null);
 
+  // Artwork & Metadata ------------------------------------------------------
+  let fanartKeyInput = $state(app.fanartApiKey);
+  let fanartSaved = $state(false);
+
+  $effect(() => {
+    fanartKeyInput = app.fanartApiKey;
+  });
+
+  async function saveFanartKey() {
+    await app.setFanartApiKey(fanartKeyInput);
+    fanartSaved = true;
+    setTimeout(() => (fanartSaved = false), 2000);
+  }
+
+  async function clearFanartKey() {
+    fanartKeyInput = "";
+    await app.setFanartApiKey("");
+    fanartSaved = true;
+    setTimeout(() => (fanartSaved = false), 2000);
+  }
+
+  let rebuilding = $state(false);
+  let rebuildMsg = $state<string | null>(null);
+
+  async function triggerRebuild() {
+    if (rebuilding || app.scanning) return;
+    rebuilding = true;
+    rebuildMsg = "Wiping cached metadata and starting fresh scan…";
+    try {
+      await api.rebuildMetadata();
+      app.toast("Library metadata rebuild initiated.", "info", 5000);
+      rebuildMsg = "Scan running in background. ClearLogos and fanart backdrops will populate automatically.";
+      setTimeout(() => (rebuildMsg = null), 8000);
+    } catch (e) {
+      app.toast(String(e), "error", 8000);
+      rebuildMsg = `Error: ${e}`;
+    } finally {
+      rebuilding = false;
+    }
+  }
+
   // Playback ----------------------------------------------------------------
   const PLAYERS: { kind: PlayerKind; name: string; blurb: string }[] = [
     { kind: "mpv", name: "mpv", blurb: "Full tracking + autoplay" },
@@ -32,7 +73,7 @@
     { kind: "system", name: "System default", blurb: "Opens normally, no tracking" },
   ];
   let detected = $state<DetectedPlayer[]>([]);
-  let version = $state("");
+  let version = $state("0.3.2");
   let threshold = $state(app.playback.threshold);
   $effect(() => {
     threshold = app.playback.threshold;
@@ -47,7 +88,7 @@
     try {
       version = await getVersion();
     } catch {
-      version = "";
+      version = "0.3.2";
     }
   });
 
@@ -308,6 +349,136 @@
             <small>Every season, movie and OVA gets its own card, like on AniList.</small>
           </span>
         </button>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2 class="section-title">Artwork & Metadata</h2>
+    <div class="card display">
+      <div class="opt-head">
+        <h3>Priority Artwork Pipeline</h3>
+        <p class="faint">Kura resolves posters, backdrops, and transparent ClearLogos using a three-tiered hierarchy.</p>
+      </div>
+
+      <div class="pipeline-tiers">
+        <div class="tier">
+          <div class="tier-num">1</div>
+          <div class="tier-content">
+            <div class="tier-title">
+              <strong>Local Folder Assets</strong>
+              <span class="badge badge-accent">Highest Priority</span>
+            </div>
+            <p class="faint">
+              Files placed inside your series folders take complete precedence and work 100% offline.
+            </p>
+            <div class="tier-tags">
+              <code>fanart.jpg</code>
+              <code>backdrop.png</code>
+              <code>clearlogo.png</code>
+              <code>logo.png</code>
+              <code>poster.jpg</code>
+              <code>cover.jpg</code>
+            </div>
+          </div>
+        </div>
+
+        <div class="tier">
+          <div class="tier-num">2</div>
+          <div class="tier-content">
+            <div class="tier-title">
+              <strong>Fanart.tv & ani.zip</strong>
+              <span class="badge badge-ok">High Definition</span>
+            </div>
+            <p class="faint">
+              1080p widescreen backdrops and transparent PNG ClearLogos matched via TheTVDB & ani.zip mappings.
+            </p>
+          </div>
+        </div>
+
+        <div class="tier">
+          <div class="tier-num">3</div>
+          <div class="tier-content">
+            <div class="tier-title">
+              <strong>AniList CDN</strong>
+              <span class="badge">Standard Fallback</span>
+            </div>
+            <p class="faint">
+              Standard covers and banners retrieved directly during initial catalog matching.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="opt-divider"></div>
+
+      <div class="opt-head">
+        <h3>Fanart.tv Personal API Key</h3>
+        <p class="faint">
+          Optional personal API key for high-rate ClearLogo and backdrop downloads. Without a key, Kura uses bundled ani.zip mappings.
+        </p>
+      </div>
+
+      <div class="field">
+        <div class="fanart-key-row">
+          <input
+            id="pref-fanart-key"
+            type="password"
+            class="input fanart-key-input"
+            placeholder="Enter Fanart.tv project API key…"
+            bind:value={fanartKeyInput}
+            onblur={saveFanartKey}
+          />
+          <button class="btn btn-sm" onclick={saveFanartKey} id="save-fanart-key">
+            {fanartSaved ? "Saved" : "Save key"}
+          </button>
+          {#if app.fanartApiKey}
+            <button class="btn btn-ghost btn-sm" onclick={clearFanartKey} id="clear-fanart-key">
+              Clear
+            </button>
+          {/if}
+        </div>
+        <div class="fanart-help">
+          <small class="faint">
+            Don't have one? Get a free personal project key from
+            <a
+              href="https://fanart.tv/get-an-api-key/"
+              target="_blank"
+              rel="noreferrer"
+              onclick={(e) => { e.preventDefault(); openUrl("https://fanart.tv/get-an-api-key/"); }}
+            >fanart.tv</a>.
+          </small>
+        </div>
+      </div>
+
+      <div class="opt-divider"></div>
+
+      <div class="opt-head">
+        <h3>Rebuild Metadata & Artwork</h3>
+        <p class="faint">
+          Re-downloads all series metadata, 1080p Fanart backdrops, transparent ClearLogos, and episode lists from scratch.
+          <strong>Your watch history, watched status, and playback progress are completely preserved.</strong>
+        </p>
+      </div>
+
+      <div class="rebuild-box">
+        <button
+          class="btn btn-primary"
+          onclick={triggerRebuild}
+          disabled={rebuilding || app.scanning}
+          id="btn-rebuild-metadata"
+        >
+          {#if rebuilding || app.scanning}
+            <div class="spinner"></div>
+            <span>Rebuilding library…</span>
+          {:else}
+            <Icon name="refresh" size={15} />
+            <span>Rebuild Metadata & Artwork</span>
+          {/if}
+        </button>
+        {#if rebuildMsg}
+          <span class="rebuild-note">{rebuildMsg}</span>
+        {/if}
       </div>
     </div>
   </section>
@@ -587,7 +758,7 @@
         <div class="about-title-block">
           <h3>
             Kura 蔵
-            <span class="badge badge-accent">v{version || "0.3.1-alpha"}</span>
+            <span class="badge badge-accent">v{version || "0.3.2"}</span>
           </h3>
           <p class="faint">A local-first, manga-styled desktop anime media library.</p>
         </div>
@@ -604,7 +775,7 @@
       <div class="about-grid">
         <div class="about-item">
           <strong>Metadata Providers</strong>
-          <small>AniList API · ani.zip · Jikan (MyAnimeList)</small>
+          <small>AniList API · ani.zip · Jikan (MyAnimeList) · Fanart.tv</small>
         </div>
         <div class="about-item">
           <strong>Player Integrations</strong>
@@ -1289,5 +1460,111 @@
   .field.disabled {
     opacity: 0.45;
     pointer-events: none;
+  }
+
+  /* Artwork pipeline & Fanart.tv settings ---------------------------------- */
+  .pipeline-tiers {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 14px;
+  }
+  .tier {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 12px 14px;
+    border-radius: var(--r-md);
+    background: var(--surface);
+    border: var(--bw) solid var(--line);
+  }
+  .tier-num {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--surface-3);
+    border: var(--bw) solid var(--line);
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--text);
+    flex: none;
+  }
+  .tier:first-child .tier-num {
+    background: var(--coral);
+    color: var(--on-coral);
+  }
+  .tier-content {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .tier-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .tier-title strong {
+    font-size: 14px;
+    font-family: var(--font-display);
+    color: var(--text);
+  }
+  .tier-content p {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.4;
+  }
+  .tier-tags {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .tier-tags code {
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    font-size: 11px;
+    font-family: monospace;
+    color: var(--text-2);
+  }
+  .fanart-key-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    max-width: 520px;
+    margin-top: 8px;
+  }
+  .fanart-key-input {
+    flex: 1;
+    min-width: 0;
+    font-family: monospace;
+    letter-spacing: 0.05em;
+  }
+  .fanart-help {
+    margin-top: 6px;
+  }
+  .fanart-help a {
+    color: var(--coral);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .rebuild-box {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+  }
+  .rebuild-note {
+    font-size: 13px;
+    color: var(--ok);
+    font-weight: 500;
   }
 </style>

@@ -170,6 +170,8 @@ pub struct MediaCard {
     cover_color: Option<String>,
     banner_url: Option<String>,
     banner_path: Option<String>,
+    logo_url: Option<String>,
+    logo_path: Option<String>,
     description: Option<String>,
     owned_count: i64,
     watched_count: i64,
@@ -196,7 +198,8 @@ pub fn get_library(st: St, library_id: Option<i64>) -> CmdResult<Vec<MediaCard>>
                     MIN(CASE WHEN g.manual = 1 THEN 1.0 ELSE COALESCE(g.confidence, 1.0) END) AS conf,
                     GROUP_CONCAT(DISTINCT f.library_id) AS libs,
                     (SELECT COUNT(*) FROM watch_state w WHERE w.anilist_id = m.anilist_id AND w.ep_key NOT LIKE 'S%') AS watched,
-                    (SELECT MAX(watched_at) FROM watch_state w WHERE w.anilist_id = m.anilist_id) AS last_watched
+                    (SELECT MAX(watched_at) FROM watch_state w WHERE w.anilist_id = m.anilist_id) AS last_watched,
+                    NULLIF(m.logo_url, ''), m.logo_path
              FROM media m
              JOIN local_files f ON f.anilist_id = m.anilist_id
              LEFT JOIN match_groups g ON g.id = f.group_id
@@ -234,6 +237,8 @@ pub fn get_library(st: St, library_id: Option<i64>) -> CmdResult<Vec<MediaCard>>
                 library_ids: libs.unwrap_or_default().split(',').filter_map(|s| s.parse().ok()).collect(),
                 watched_count: r.get(22)?,
                 last_watched_at: r.get(23)?,
+                logo_url: r.get(24)?,
+                logo_path: r.get(25)?,
                 franchise_id: 0,
                 franchise_index: 0,
                 franchise_size: 1,
@@ -424,6 +429,8 @@ pub struct MediaDetail {
     cover_color: Option<String>,
     banner_url: Option<String>,
     banner_path: Option<String>,
+    logo_url: Option<String>,
+    logo_path: Option<String>,
     average_score: Option<i64>,
     next_airing_episode: Option<i64>,
     next_airing_at: Option<i64>,
@@ -450,7 +457,7 @@ pub fn get_media_detail(st: St, anilist_id: i64) -> CmdResult<MediaDetail> {
             "SELECT anilist_id, id_mal, title_romaji, title_english, title_native, synonyms, format, status, episodes,
                     duration, season, season_year, start_date, end_date, description, genres, tags, studios, cover_url,
                     cover_path, cover_color, banner_url, banner_path, average_score, next_airing_episode, next_airing_at,
-                    episodes_source
+                    episodes_source, NULLIF(logo_url, ''), logo_path
              FROM media WHERE anilist_id = ?1",
             [anilist_id],
             |r| {
@@ -482,6 +489,8 @@ pub fn get_media_detail(st: St, anilist_id: i64) -> CmdResult<MediaDetail> {
                     next_airing_episode: r.get(24)?,
                     next_airing_at: r.get(25)?,
                     episodes_source: r.get(26)?,
+                    logo_url: r.get(27)?,
+                    logo_path: r.get(28)?,
                     episode_list: Vec::new(),
                     relations: Vec::new(),
                     extras: Vec::new(),
@@ -935,6 +944,8 @@ pub struct UpNextItem {
     cover_color: Option<String>,
     banner_url: Option<String>,
     banner_path: Option<String>,
+    logo_url: Option<String>,
+    logo_path: Option<String>,
     episode_title: Option<String>,
     thumb_url: Option<String>,
     thumb_path: Option<String>,
@@ -957,7 +968,8 @@ fn up_next_item(conn: &rusqlite::Connection, ep: &player::Ep, at: i64) -> Option
                 m.cover_color, m.banner_url, m.banner_path,
                 COALESCE(e.title_en, e.title_romaji, e.title_ja), e.thumb_url, e.thumb_path, e.runtime,
                 (SELECT COUNT(DISTINCT f.ep_key) FROM local_files f WHERE f.anilist_id = m.anilist_id AND f.ep_key NOT LIKE 'S%'),
-                (SELECT COUNT(*) FROM watch_state w WHERE w.anilist_id = m.anilist_id AND w.ep_key NOT LIKE 'S%')
+                (SELECT COUNT(*) FROM watch_state w WHERE w.anilist_id = m.anilist_id AND w.ep_key NOT LIKE 'S%'),
+                NULLIF(m.logo_url, ''), m.logo_path
          FROM media m LEFT JOIN episodes e ON e.anilist_id = m.anilist_id AND e.ep_key = ?2
          WHERE m.anilist_id = ?1",
         params![ep.anilist_id, ep.ep_key],
@@ -985,6 +997,8 @@ fn up_next_item(conn: &rusqlite::Connection, ep: &player::Ep, at: i64) -> Option
                 duration: dur,
                 owned_count: r.get(14)?,
                 watched_count: r.get(15)?,
+                logo_url: r.get(16)?,
+                logo_path: r.get(17)?,
                 at,
                 new_count: 0,
             })
@@ -1152,3 +1166,41 @@ pub fn set_media_track_pref(app: AppHandle, st: St, anilist_id: i64, pref: Optio
     let _ = app.emit("library-changed", ());
     Ok(())
 }
+
+/// Wipes cached metadata, episode guides, and downloaded artwork while strictly preserving:
+/// - watch_state (watched / unwatched history)
+/// - watch_progress (resume times and playback progress)
+/// - media_track_prefs (custom audio/subtitle language priorities)
+/// - libraries & library_folders (configured folders)
+/// - settings (user preferences, themes, fanart key)
+#[tauri::command]
+pub async fn rebuild_metadata(app: AppHandle, st: St<'_>) -> CmdResult<()> {
+    // 1. Clear cached media, episodes, media_relations
+    {
+        let conn = st.db();
+        conn.execute_batch(
+            "DELETE FROM episodes;
+             DELETE FROM media_relations;
+             DELETE FROM media;
+             UPDATE match_groups SET attempted = 0 WHERE manual = 0;
+             UPDATE local_files SET ep_key = NULL WHERE anilist_id IS NULL;",
+        )
+        .map_err(err)?;
+    }
+
+    // 2. Clean up cached remote images
+    let img_dir = st.data_dir.join("images");
+    for sub in ["covers", "banners", "logos", "thumbs"] {
+        let p = img_dir.join(sub);
+        if p.exists() {
+            let _ = std::fs::remove_dir_all(&p);
+            let _ = std::fs::create_dir_all(&p);
+        }
+    }
+
+    // 3. Emit library changed and spawn full scan
+    let _ = app.emit("library-changed", ());
+    scan::spawn_scan(app, st.inner().clone(), None);
+    Ok(())
+}
+
