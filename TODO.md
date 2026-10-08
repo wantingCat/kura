@@ -126,7 +126,7 @@ Deepen the anime experience with voice actor guides, character portraits, and pr
 
 ---
 
-## 🎌 Phase 5: Japanese Immersion & Yomitan Subtitle HUD
+## 🎌 Phase 6: Japanese Immersion & Yomitan Subtitle HUD
 *Target: v0.5.0*
 
 A blazing-fast, lightweight alternative to Memento. Combines native mpv 4K video playback with a transparent Tauri floating subtitle overlay for instant Yomitan dictionary lookups.
@@ -153,7 +153,7 @@ A blazing-fast, lightweight alternative to Memento. Combines native mpv 4K video
 
 ---
 
-## 🔄 Phase 6: AniList & MyAnimeList Account Sync
+## 🔄 Phase 7: AniList & MyAnimeList Account Sync
 *Target: v0.6.0*
 
 Two-way synchronization between your local Kura library and your online anime tracking profiles.
@@ -170,7 +170,7 @@ Two-way synchronization between your local Kura library and your online anime tr
 
 ---
 
-## ⚡ Phase 7: Library Power-User Tools & Backup
+## ⚡ Phase 8: Library Power-User Tools & Backup
 *Target: v1.0.0 (Beta)*
 
 - [ ] **Advanced Filtering & Library Search**
