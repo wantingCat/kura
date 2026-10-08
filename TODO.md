@@ -11,8 +11,8 @@ This document serves as the master planning roadmap for Kura, organizing propose
 | **v0.3.2** | **Visual & Artwork Overhaul**: Manga Mode (Light Theme) + Priority Artwork Engine (ClearLogos & Fanart) | 📋 Ready to Plan |
 | **v0.3.3** | **Social & Real-Time Tracking**: Discord Rich Presence (RPC) + Live Folder Watcher | 💡 Planned |
 | **v0.4.0** | **Deeper Anime Knowledge**: Rich Cast, Voice Actors (Seiyuu), Character Portraits & Staff Guides | 💡 Planned |
-| **v0.5.0** | **Japanese Immersion**: Native mpv + Floating Yomitan Subtitle HUD (Lightweight Memento Alternative) | 💡 Planned |
-| **v0.6.0** | **Cloud & Account Integration**: AniList & MyAnimeList Two-Way Scrobbling / List Sync | 💡 Planned |
+| **v0.5.0** | **Cloud & Account Integration**: AniList & MyAnimeList Two-Way Scrobbling / List Sync | 💡 Planned |
+| **v0.6.0** | **Japanese Immersion**: Native mpv + Floating Yomitan Subtitle HUD (Lightweight Memento Alternative) | 💡 Planned |
 | **v1.0.0 (Beta)** | **Library Power-User**: Advanced Filtering, Library Backup/Export, Performance Polish | 💡 Future |
 
 ---
@@ -126,8 +126,25 @@ Deepen the anime experience with voice actor guides, character portraits, and pr
 
 ---
 
-## 🎌 Phase 6: Japanese Immersion & Yomitan Subtitle HUD
+## 🔄 Phase 6: AniList & MyAnimeList Account Sync
 *Target: v0.5.0*
+
+Two-way synchronization between your local Kura library and your online anime tracking profiles.
+
+### Checklist
+- [ ] **OAuth2 Authentication**
+  - [ ] AniList OAuth2 login flow via secure local loopback redirect (`http://localhost:port/oauth/callback`).
+  - [ ] Secure token storage in SQLite settings.
+- [ ] **Two-Way Synchronization Engine**
+  - [ ] Import user's list on connect (Watching, Completed, Planning, Paused, Dropped).
+  - [ ] Auto-scrobble: when an episode reaches 90% in Kura, update episode progress on AniList.
+  - [ ] Safe merge rules: ensure local and remote never accidentally regress progress.
+  - [ ] Rate limit compliance (AniList 90 req/min).
+
+---
+
+## 🎌 Phase 7: Japanese Immersion & Yomitan Subtitle HUD
+*Target: v0.6.0*
 
 A blazing-fast, lightweight alternative to Memento. Combines native mpv 4K video playback with a transparent Tauri floating subtitle overlay for instant Yomitan dictionary lookups.
 
@@ -150,23 +167,6 @@ A blazing-fast, lightweight alternative to Memento. Combines native mpv 4K video
 - [ ] **Settings Integration**
   - [ ] "Japanese Immersion Mode" toggle under **Settings → Playback** (enabled when mpv is selected).
   - [ ] Dictionary management UI (install, delete, view active dictionaries).
-
----
-
-## 🔄 Phase 7: AniList & MyAnimeList Account Sync
-*Target: v0.6.0*
-
-Two-way synchronization between your local Kura library and your online anime tracking profiles.
-
-### Checklist
-- [ ] **OAuth2 Authentication**
-  - [ ] AniList OAuth2 login flow via secure local loopback redirect (`http://localhost:port/oauth/callback`).
-  - [ ] Secure token storage in SQLite settings.
-- [ ] **Two-Way Synchronization Engine**
-  - [ ] Import user's list on connect (Watching, Completed, Planning, Paused, Dropped).
-  - [ ] Auto-scrobble: when an episode reaches 90% in Kura, update episode progress on AniList.
-  - [ ] Safe merge rules: ensure local and remote never accidentally regress progress.
-  - [ ] Rate limit compliance (AniList 90 req/min).
 
 ---
 
