@@ -61,16 +61,21 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 
 ## 🗺️ Roadmap (Upcoming Features)
 
-- [ ] **AniList Account Integration**: OAuth login, list import, and safe two-way watch progress synchronization (ensures local and remote progress never accidentally regress).
 - [x] **External Player Integrations**: mpv, VLC, MPC-HC/BE and Memento, with watch-time and completion detection via player IPC.
-- [x] **Auto-Update**: Signed in-app updates from GitHub Releases.
-- [ ] **Folder Watcher / Auto-Rescan**: Automatic background scanning triggered when new episode downloads or torrents complete in monitored directories.
-- [ ] **Rich Cast & Staff Metadata**: Character voice actors (Japanese seiyuu & English cast with character portraits), director, series composition, music composers, and key studio staff on the anime detail page.
-- [x] **Subtitles & Audio Track Defaults**: Configurable default audio language (e.g. Japanese vs. English dub) and subtitle preferences automatically passed to players on launch.
-- [ ] **Advanced Filtering & Search**: Filter by genres, tags, studios, release seasons, voice actors, and airing status.
-- [ ] **Local Art & Poster Overrides**: Priority detection for local `poster.jpg`, `backdrop.jpg`, and season artwork from Jellyfin/Plex directories.
+- [x] **Subtitles & Audio Track Defaults**: Configurable default audio language (e.g. Japanese vs. English dub) and subtitle preferences automatically passed to players on launch, with per-show overrides.
+- [x] **Auto-Update**: Cryptographically signed in-app updates from GitHub Releases.
 - [x] **Cross-Platform Release Automation**: Automated CI/CD builds for Windows (`.exe`/`.msi`), macOS (`.dmg`), and Linux (`.deb`/`.rpm`/`.AppImage`) via GitHub Actions.
-- [ ] **Library Export / Backup**: Backup watch history and metadata cache to JSON or portable archives.
+- [ ] **Manga Mode (Light Theme)**: High-contrast sumi ink on warm manga paper with authentic Japanese vermilion stamp accents (`#e53935`).
+- [ ] **Priority Artwork Engine & ClearLogos**: Strict priority pipeline (`Local > Fanart.tv/ani.zip > AniList`) with official transparent anime title logos floating over 1080p backdrops.
+- [ ] **Discord Rich Presence (RPC)**: Live watching activity on your Discord profile with anime title, episode number/title, live remaining time bar, and cover thumbnails.
+- [ ] **Folder Watcher / Auto-Rescan**: Automatic background scanning triggered when new episode downloads complete in monitored directories.
+- [ ] **Japanese Immersion & Yomitan Subtitle HUD**: Lightweight, instant-load alternative to Memento — real-time mpv subtitle streaming + transparent overlay with hoverable Yomitan dictionary lookups (readings, pitch accent, definitions).
+- [ ] **Rich Cast & Staff Metadata**: Character voice actors (Japanese seiyuu & English cast with character portraits), director, series composition, music composers, and key studio staff on the anime detail page.
+- [ ] **AniList & MyAnimeList Account Sync**: OAuth2 login, list import, and safe two-way watch progress synchronization (ensures local and remote progress never accidentally regress).
+- [ ] **Advanced Filtering & Search**: Filter by genres, tags, studios, release seasons, voice actors, and airing status.
+- [ ] **Library Export / Backup**: Portable JSON backup for watch history, track preferences, and custom matches.
+
+> For the detailed phase-by-phase implementation specifications and engineering checklists, see **[TODO.md](TODO.md)**.
 
 ---
 
