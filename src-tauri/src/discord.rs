@@ -12,8 +12,6 @@
 
 use anyhow::{anyhow, Result};
 use serde_json::json;
-#[cfg(unix)]
-use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf};
 use tokio::sync::mpsc;
@@ -80,6 +78,7 @@ async fn connect_socket() -> Option<Box<dyn Io>> {
 
 #[cfg(unix)]
 async fn connect_socket() -> Option<Box<dyn Io>> {
+    use std::path::PathBuf;
     let mut candidates = Vec::new();
     if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
         let xdg = PathBuf::from(xdg);
