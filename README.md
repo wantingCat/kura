@@ -5,7 +5,7 @@
   <br>
   <strong>A local-first, manga-styled desktop anime media library.</strong>
   <br>
-  <em>Current Release: <code>v0.3.2-alpha</code> · Built with AI assistance</em>
+  <em>Current Release: <code>v0.3.3-alpha</code> · Built with AI assistance</em>
 </p>
 
 ---
@@ -35,7 +35,13 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 
 ## ✨ Features
 
-### New in `v0.3.2-alpha`
+### New in `v0.3.3-alpha`
+- **Live Folder Watcher & Background Rescan**: Automatically monitors all configured library roots in the background using native recursive filesystem events (`notify`). Features a 3-second debounce window with file write lock and size stability checks to safely ingest finished downloads without premature reading.
+- **Sub-10ms Targeted Ingestion**: Automatically matches and resolves new episodes of existing series instantly (< 10ms) without full scans or redundant API requests. Also auto-cleans deleted files and detects local artwork drops (`clearlogo.png`, `fanart.jpg`).
+- **Discord Rich Presence (RPC)**: Native Tokio async IPC client broadcasting Activity Type 3 ("Watching Kura") on your Discord profile, complete with anime title, episode number/title, live remaining time countdown bar, cover artwork, and interactive AniList/GitHub action buttons.
+- **Interactive Play Launch Indicators**: Clicking Play instantly transforms the button into a spinning loader (`Launching player…`) before seamlessly transitioning into an animated audio equalizer badge (`Now Playing · Ep X`) once playback starts.
+
+### Highlights from `v0.3.2-alpha`
 - **Transparent ClearArt / Logos on Backdrops**: Displays high-resolution series typography wordmarks and ClearArt on the cinematic backdrop, powered by Fanart.tv and local folder artwork (`clearlogo.png` / `logo.png`).
 - **Safe Metadata & Artwork Rebuild Tool**: In Settings, easily wipe and reconstruct local artwork and metadata caches from scratch while strictly preserving 100% of your watch history, progress, track preferences, and library folders.
 - **Scanning Pipeline Overhaul & Stability**: Drastically improved scan reliability and concurrency, added strict external provider timeouts, eliminated main thread mutex contention, and streamlined franchise resolution.
@@ -73,7 +79,7 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 - [x] **Manga Mode (Light Theme)**: High-contrast sumi ink on warm manga paper with authentic Japanese vermilion stamp accents (`#e53935`).
 - [x] **Priority Artwork Engine & ClearLogos**: Strict priority pipeline (`Local > Fanart.tv/ani.zip > AniList`) with official transparent anime title logos floating over 1080p backdrops.
 - [x] **Discord Rich Presence (RPC)**: Live watching activity on your Discord profile with anime title, episode number/title, live remaining time bar, and cover thumbnails.
-- [ ] **Folder Watcher / Auto-Rescan**: Automatic background scanning triggered when new episode downloads complete in monitored directories.
+- [x] **Folder Watcher / Auto-Rescan**: Automatic background scanning triggered when new episode downloads complete in monitored directories.
 - [ ] **Rich Cast & Staff Metadata**: Character voice actors (Japanese seiyuu & English cast with character portraits), director, series composition, music composers, and key studio staff on the anime detail page.
 - [ ] **AniList & MyAnimeList Account Sync**: OAuth2 login, list import, and safe two-way watch progress synchronization (ensures local and remote progress never accidentally regress).
 - [ ] **Japanese Immersion & Yomitan Subtitle HUD**: Lightweight, instant-load alternative to Memento — real-time mpv subtitle streaming + transparent overlay with hoverable Yomitan dictionary lookups (readings, pitch accent, definitions).

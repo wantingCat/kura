@@ -72,6 +72,7 @@ class AppStore {
     subFallback: "eng",
   });
   autoUpdate = $state(true);
+  folderWatcher = $state(true);
   fanartApiKey = $state("");
   discord = $state<DiscordPrefs>({
     enabled: true,
@@ -139,6 +140,7 @@ class AppStore {
       }
       this.groupSeasons = prefs.group_seasons !== "0";
       this.autoUpdate = prefs.auto_update !== "0";
+      this.folderWatcher = prefs.folder_watcher !== "0";
       this.fanartApiKey = prefs.fanart_api_key ?? "";
       const num = (v: string | undefined, d: number) => (v !== undefined && !isNaN(Number(v)) ? Number(v) : d);
       this.playback = {
@@ -227,6 +229,11 @@ class AppStore {
   async setAutoUpdate(on: boolean) {
     this.autoUpdate = on;
     await api.setPref("auto_update", on ? "1" : "0");
+  }
+
+  async setFolderWatcher(on: boolean) {
+    this.folderWatcher = on;
+    await api.setPref("folder_watcher", on ? "1" : "0");
   }
 
   async setFanartApiKey(key: string) {

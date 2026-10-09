@@ -20,10 +20,11 @@ pub struct AppState {
     /// Bumped on every play; a tracker stops once its session is no longer current.
     pub play_session: AtomicU64,
     pub discord: crate::discord::DiscordHandle,
+    pub watcher: crate::watcher::WatcherHandle,
 }
 
 impl AppState {
-    pub fn new(conn: Connection, data_dir: PathBuf) -> Self {
+    pub fn new(conn: Connection, data_dir: PathBuf, watcher: crate::watcher::WatcherHandle) -> Self {
         Self {
             db: Mutex::new(conn),
             providers: Providers::new(),
@@ -32,6 +33,7 @@ impl AppState {
             rescan_requested: AtomicBool::new(false),
             play_session: AtomicU64::new(0),
             discord: crate::discord::start_service(),
+            watcher,
         }
     }
 

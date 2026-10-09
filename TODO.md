@@ -9,7 +9,7 @@ This document serves as the master planning roadmap for Kura, organizing propose
 | Milestone | Target Focus | Status |
 | :--- | :--- | :--- |
 | **v0.3.2** | **Visual & Artwork Overhaul**: Manga Mode (Light Theme) + Priority Artwork Engine (ClearLogos & Fanart) | ✅ Completed |
-| **v0.3.3** | **Social & Real-Time Tracking**: Discord Rich Presence (RPC) + Live Folder Watcher | 📋 Ready to Plan |
+| **v0.3.3** | **Social & Real-Time Tracking**: Discord Rich Presence (RPC) + Live Folder Watcher | ✅ Completed |
 | **v0.4.0** | **Deeper Anime Knowledge**: Rich Cast, Voice Actors (Seiyuu), Character Portraits & Staff Guides | 💡 Planned |
 | **v0.5.0** | **Cloud & Account Integration**: AniList & MyAnimeList Two-Way Scrobbling / List Sync | 💡 Planned |
 | **v0.6.0** | **Japanese Immersion**: Native mpv + Floating Yomitan Subtitle HUD (Lightweight Memento Alternative) | 💡 Planned |
@@ -97,19 +97,19 @@ Show off what you are currently watching to friends on Discord with live episode
 ---
 
 ## 📂 Phase 4: Folder Watcher & Background Rescan
-*Target: v0.3.3*
+*Target: v0.3.3* — **Completed**
 
 Automatically detect new anime episodes and movies the moment they finish downloading.
 
 ### Checklist
-- [ ] **Filesystem Watcher (`notify` crate)**
-  - [ ] Watch all configured library folder roots recursively.
-  - [ ] Filter for media file extensions (`.mkv`, `.mp4`, `.avi`, `.webm`).
-  - [ ] Debounce events (wait 3-5 seconds after file lock releases to ensure download/copy is 100% finished).
-- [ ] **Targeted Background Ingestion**
-  - [ ] Ingest only the newly detected file instead of rescanning the entire library.
-  - [ ] Parse filename, match to existing series in SQLite, and download episode thumbnail.
-  - [ ] Emit Tauri event `library-changed` to automatically update the frontend without reloading.
+- [x] **Filesystem Watcher (`notify` crate)**
+  - [x] Watch all configured library folder roots recursively.
+  - [x] Filter for media file extensions (`.mkv`, `.mp4`, `.avi`, `.webm`).
+  - [x] Debounce events (wait 3-5 seconds after file lock releases to ensure download/copy is 100% finished).
+- [x] **Targeted Background Ingestion**
+  - [x] Ingest only the newly detected file instead of rescanning the entire library.
+  - [x] Parse filename, match to existing series in SQLite, and download episode thumbnail.
+  - [x] Emit Tauri event `library-changed` to automatically update the frontend without reloading.
 
 ---
 

@@ -73,7 +73,7 @@
     { kind: "system", name: "System default", blurb: "Opens normally, no tracking" },
   ];
   let detected = $state<DetectedPlayer[]>([]);
-  let version = $state("0.3.2");
+  let version = $state("0.3.3");
   let threshold = $state(app.playback.threshold);
   $effect(() => {
     threshold = app.playback.threshold;
@@ -88,7 +88,7 @@
     try {
       version = await getVersion();
     } catch {
-      version = "0.3.2";
+      version = "0.3.3";
     }
   });
 
@@ -262,6 +262,26 @@
         <p class="muted">No libraries yet.</p>
       {/if}
     {/each}
+
+    <div class="card playback watcher-card">
+      <div class="rows">
+        <div class="row">
+          <div class="row-text">
+            <strong>Live folder watcher (Auto-rescan)</strong>
+            <small>Automatically detect newly added, renamed, or deleted episodes and keep your library in sync without manual rescans.</small>
+          </div>
+          <button
+            class="switch"
+            class:on={app.folderWatcher}
+            role="switch"
+            aria-checked={app.folderWatcher}
+            aria-label="Live folder watcher"
+            onclick={() => app.setFolderWatcher(!app.folderWatcher)}
+            id="pref-folder-watcher"
+          ><span></span></button>
+        </div>
+      </div>
+    </div>
   </section>
 
   <section class="block">
@@ -815,7 +835,7 @@
         <div class="about-title-block">
           <h3>
             Kura 蔵
-            <span class="badge badge-accent">v{version || "0.3.2"}</span>
+            <span class="badge badge-accent">v{version || "0.3.3"}</span>
           </h3>
           <p class="faint">A local-first, manga-styled desktop anime media library.</p>
         </div>
@@ -860,7 +880,7 @@
       <div class="about-coming">
         <strong>Coming up in future releases:</strong>
         <p class="faint">
-          Automatic background folder watcher, 2-way AniList & MyAnimeList account sync, and rich cast/voice actors & staff metadata.
+          2-way AniList & MyAnimeList account sync, rich cast/voice actors & staff metadata, and Japanese immersion tools.
         </p>
       </div>
     </div>

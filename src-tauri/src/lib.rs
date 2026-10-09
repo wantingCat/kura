@@ -9,6 +9,7 @@ pub mod providers;
 pub mod scan;
 pub mod service;
 pub mod store;
+pub mod watcher;
 
 use std::sync::Arc;
 use tauri::Manager;
@@ -32,7 +33,8 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             let _ = app.asset_protocol_scope().allow_directory(&data_dir, true);
             let conn = db::open(&data_dir.join("kura.db"))?;
-            let state = Arc::new(service::AppState::new(conn, data_dir));
+            let (watcher, reload_rx) = watcher::WatcherHandle::new();
+            let state = Arc::new(service::AppState::new(conn, data_dir, watcher));
             app.manage(state.clone());
 
             // Development helper: seed a library from an env var (debug builds only).
@@ -61,8 +63,11 @@ pub fn run() {
                 .query_row("SELECT EXISTS(SELECT 1 FROM library_folders)", [], |r| r.get(0))
                 .unwrap_or(false);
             if has_folders {
-                scan::spawn_scan(app.handle().clone(), state, None);
+                scan::spawn_scan(app.handle().clone(), state.clone(), None);
             }
+
+            // Start background filesystem watcher for configured folders.
+            watcher::start(app.handle().clone(), state.clone(), reload_rx);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

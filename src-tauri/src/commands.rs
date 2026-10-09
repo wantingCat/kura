@@ -90,6 +90,7 @@ pub fn create_library(st: St, name: String, folders: Vec<String>) -> CmdResult<i
         conn.execute("INSERT OR IGNORE INTO library_folders (library_id, path) VALUES (?1, ?2)", params![id, f])
             .map_err(err)?;
     }
+    st.watcher.reload();
     Ok(id)
 }
 
@@ -102,6 +103,7 @@ pub fn rename_library(st: St, id: i64, name: String) -> CmdResult<()> {
 #[tauri::command]
 pub fn delete_library(app: AppHandle, st: St, id: i64) -> CmdResult<()> {
     st.db().execute("DELETE FROM libraries WHERE id = ?1", [id]).map_err(err)?;
+    st.watcher.reload();
     let _ = app.emit("library-changed", ());
     Ok(())
 }
@@ -111,6 +113,7 @@ pub fn add_folder(st: St, library_id: i64, path: String) -> CmdResult<()> {
     st.db()
         .execute("INSERT OR IGNORE INTO library_folders (library_id, path) VALUES (?1, ?2)", params![library_id, path])
         .map_err(err)?;
+    st.watcher.reload();
     Ok(())
 }
 
@@ -130,6 +133,7 @@ pub fn remove_folder(app: AppHandle, st: St, folder_id: i64) -> CmdResult<()> {
         .map_err(err)?;
         conn.execute("DELETE FROM match_groups WHERE id NOT IN (SELECT DISTINCT group_id FROM local_files WHERE group_id IS NOT NULL)", [])
             .map_err(err)?;
+        st.watcher.reload();
     }
     let _ = app.emit("library-changed", ());
     Ok(())
@@ -1155,7 +1159,11 @@ pub fn set_pref(st: St, key: String, value: String) -> CmdResult<()> {
     if key == "discord_rpc" && value == "0" {
         st.discord.clear();
     }
-    db::set_setting(&st.db(), &format!("pref.{key}"), &value).map_err(err)
+    db::set_setting(&st.db(), &format!("pref.{key}"), &value).map_err(err)?;
+    if key == "folder_watcher" {
+        st.watcher.reload();
+    }
+    Ok(())
 }
 
 #[tauri::command]

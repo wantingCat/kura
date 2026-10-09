@@ -64,19 +64,20 @@ struct Found {
     mtime: i64,
 }
 
-struct GroupInfo {
-    key: String,
-    folder_path: Option<String>,
-    display_name: String,
-    title_guess: String,
-    title_full: String,
-    year: Option<u32>,
-    season_hint: Option<u32>,
-    special_folder: bool,
-    extra_folder: bool,
+#[derive(Debug, Clone)]
+pub(crate) struct GroupInfo {
+    pub key: String,
+    pub folder_path: Option<String>,
+    pub display_name: String,
+    pub title_guess: String,
+    pub title_full: String,
+    pub year: Option<u32>,
+    pub season_hint: Option<u32>,
+    pub special_folder: bool,
+    pub extra_folder: bool,
 }
 
-fn compute_group(root: &Path, path: &Path, parsed: &Parsed) -> Option<GroupInfo> {
+pub(crate) fn compute_group(root: &Path, path: &Path, parsed: &Parsed) -> Option<GroupInfo> {
     let rel = path.strip_prefix(root).ok()?;
     let dirs: Vec<String> = rel
         .parent()
@@ -547,13 +548,13 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
 }
 
 #[derive(Debug, Default)]
-struct LocalAssets {
-    poster: Option<PathBuf>,
-    backdrop: Option<PathBuf>,
-    logo: Option<PathBuf>,
+pub(crate) struct LocalAssets {
+    pub poster: Option<PathBuf>,
+    pub backdrop: Option<PathBuf>,
+    pub logo: Option<PathBuf>,
 }
 
-fn scan_folder_assets(dirs: &[PathBuf]) -> LocalAssets {
+pub(crate) fn scan_folder_assets(dirs: &[PathBuf]) -> LocalAssets {
     let mut assets = LocalAssets::default();
     let backdrop_names = ["fanart", "backdrop", "background", "art"];
     let logo_names = ["clearlogo", "logo", "clearart"];
