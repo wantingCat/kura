@@ -19,6 +19,7 @@ pub struct AppState {
     pub rescan_requested: AtomicBool,
     /// Bumped on every play; a tracker stops once its session is no longer current.
     pub play_session: AtomicU64,
+    pub discord: crate::discord::DiscordHandle,
 }
 
 impl AppState {
@@ -30,6 +31,7 @@ impl AppState {
             scanning: AtomicBool::new(false),
             rescan_requested: AtomicBool::new(false),
             play_session: AtomicU64::new(0),
+            discord: crate::discord::start_service(),
         }
     }
 

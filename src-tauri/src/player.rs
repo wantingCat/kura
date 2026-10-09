@@ -655,6 +655,103 @@ fn ipc_address(tag: &str) -> String {
     }
 }
 
+pub fn sync_discord_activity(st: &AppState, ep: &Ep, pos: f64, dur: f64, is_playing: bool) {
+    let conn = st.db();
+    let rpc_enabled = db::get_setting(&conn, "pref.discord_rpc")
+        .ok()
+        .flatten()
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    if !rpc_enabled {
+        st.discord.clear();
+        return;
+    }
+
+    let client_id = db::get_setting(&conn, "pref.discord_client_id")
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::discord::DEFAULT_CLIENT_ID.to_string());
+
+    let spoiler_protection = db::get_setting(&conn, "pref.discord_spoilers")
+        .ok()
+        .flatten()
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    let show_buttons = db::get_setting(&conn, "pref.discord_buttons")
+        .ok()
+        .flatten()
+        .map(|v| v != "0")
+        .unwrap_or(true);
+
+    let media_info: Option<(Option<String>, Option<String>, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT title_english, title_romaji, title_native, cover_url FROM media WHERE anilist_id = ?1",
+            params![ep.anilist_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .unwrap_or(None);
+
+    let (title_en, title_ro, title_nat, cover_url) = media_info.unwrap_or((None, None, None, None));
+    let title = title_en.or(title_ro).or(title_nat).unwrap_or_else(|| "Anime".to_string());
+
+    let ep_info: Option<(Option<String>, Option<String>, Option<String>, i64, i64)> = conn
+        .query_row(
+            "SELECT title_en, title_romaji, title_ja, is_special, number FROM episodes WHERE anilist_id = ?1 AND ep_key = ?2",
+            params![ep.anilist_id, ep.ep_key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()
+        .unwrap_or(None);
+
+    let episode_text = if let Some((en, ro, ja, is_special, num)) = ep_info {
+        let ep_title = en.or(ro).or(ja);
+        let prefix = if is_special != 0 || ep.ep_key.starts_with('S') {
+            format!("Special {:02}", num)
+        } else {
+            format!("Episode {:02}", num)
+        };
+        if let Some(t) = ep_title.filter(|t| !t.trim().is_empty()) {
+            format!("{prefix} — {t}")
+        } else {
+            prefix
+        }
+    } else if ep.ep_key.starts_with("extra:") {
+        let name = ep.ep_key.strip_prefix("extra:").unwrap_or(&ep.ep_key);
+        format!("Extra — {name}")
+    } else if let Ok(num) = ep.ep_key.parse::<i64>() {
+        format!("Episode {:02}", num)
+    } else {
+        format!("Episode {}", ep.ep_key)
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    let (start_timestamp, end_timestamp) = if is_playing && dur > 0.0 {
+        let start = now - pos.max(0.0) as i64;
+        let end = now + (dur - pos).max(0.0) as i64;
+        (Some(start), Some(end))
+    } else if is_playing {
+        (Some(now), None)
+    } else {
+        (None, None)
+    };
+
+    st.discord.update(crate::discord::ActivityPayload {
+        client_id,
+        title,
+        episode_text,
+        cover_url,
+        anilist_id: Some(ep.anilist_id),
+        is_playing,
+        start_timestamp,
+        end_timestamp,
+        spoiler_protection,
+        show_buttons,
+    });
+}
+
 /// Start playing an episode with the configured player. Returns immediately; tracking runs in the background.
 pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
     let (p, start, track_prefs) = {
@@ -669,6 +766,7 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
 
     if p.kind == Kind::System {
         tauri_plugin_opener::open_path(&ep.path, None::<&str>).map_err(|e| anyhow!(e.to_string()))?;
+        sync_discord_activity(&st, &ep, 0.0, 0.0, true);
         emit(&app, "untracked", p.kind, &ep, 0.0, 0.0, None);
         return Ok(());
     }
@@ -841,6 +939,10 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
     let mut misses = 0;
     let mut ticks: u64 = 0;
     let mut loaded_at = std::time::Instant::now();
+    let mut last_discord_playing: Option<bool> = None;
+    let mut last_discord_sync = std::time::Instant::now();
+    let mut last_discord_pos: f64 = 0.0;
+    sync_discord_activity(&st, &ep, 0.0, 0.0, true);
     emit(&app, "tracking", p.kind, &ep, 0.0, 0.0, None);
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -866,6 +968,18 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
         if s.dur > 0.0 {
             pos = s.pos;
             dur = s.dur;
+        }
+
+        let playing = s.playing;
+        let playing_changed = last_discord_playing != Some(playing);
+        let seeked = (pos - (last_discord_pos + last_discord_sync.elapsed().as_secs_f64())).abs() > 8.0;
+        let periodic = last_discord_sync.elapsed() > Duration::from_secs(20);
+
+        if playing_changed || (playing && (seeked || periodic)) {
+            sync_discord_activity(&st, &ep, pos, dur, playing);
+            last_discord_playing = Some(playing);
+            last_discord_sync = std::time::Instant::now();
+            last_discord_pos = pos;
         }
 
         if !marked && reached(pos, dur, p.threshold) {
@@ -904,6 +1018,10 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
             ep = next;
             (pos, dur, marked) = (0.0, 0.0, false);
             loaded_at = std::time::Instant::now();
+            sync_discord_activity(&st, &ep, 0.0, 0.0, true);
+            last_discord_playing = Some(true);
+            last_discord_sync = std::time::Instant::now();
+            last_discord_pos = 0.0;
             let _ = app.emit("library-changed", ());
         }
     }
@@ -917,6 +1035,9 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
         }
     }
     let _ = child.try_wait();
+    if alive(&st) {
+        st.discord.clear();
+    }
     emit(&app, "stopped", p.kind, &ep, pos, dur, None);
     let _ = app.emit("library-changed", ());
 }

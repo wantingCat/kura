@@ -24,6 +24,18 @@ export interface PlaybackPrefs {
   subFallback: string;
 }
 
+export interface DiscordPrefs {
+  enabled: boolean;
+  spoilers: boolean;
+  buttons: boolean;
+  clientId: string;
+}
+
+export interface LaunchingEpisode {
+  anilistId: number;
+  epKey: string;
+}
+
 export type AppTheme = "comic" | "manga";
 
 export interface Toast {
@@ -61,11 +73,19 @@ class AppStore {
   });
   autoUpdate = $state(true);
   fanartApiKey = $state("");
+  discord = $state<DiscordPrefs>({
+    enabled: true,
+    spoilers: false,
+    buttons: true,
+    clientId: "",
+  });
+  launching = $state<LaunchingEpisode | null>(null);
   /** Latest playback event while a player is being tracked. */
   nowPlaying = $state<PlaybackEvent | null>(null);
   toasts = $state<Toast[]>([]);
 
   #refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  #launchTimer: ReturnType<typeof setTimeout> | null = null;
   #initialised = false;
   #toastId = 0;
 
@@ -93,10 +113,20 @@ class AppStore {
     });
     await events.onScanError((msg) => (this.lastError = msg));
     await events.onPlayback((p) => {
-      if (p.state === "tracking") this.nowPlaying = p;
-      else if (p.state === "stopped") this.nowPlaying = null;
-      else {
+      if (p.state === "tracking") {
+        this.nowPlaying = p;
+        if (this.launching?.anilistId === p.anilistId && this.launching?.epKey === p.epKey) {
+          this.launching = null;
+          if (this.#launchTimer) clearTimeout(this.#launchTimer);
+        }
+      } else if (p.state === "stopped") {
         this.nowPlaying = null;
+        if (this.launching?.anilistId === p.anilistId && this.launching?.epKey === p.epKey) {
+          this.launching = null;
+        }
+      } else {
+        this.nowPlaying = null;
+        this.launching = null;
         if (p.hint) this.toast(p.hint, "warn", 9000);
       }
     });
@@ -121,6 +151,12 @@ class AppStore {
         audioLang: prefs.audio_lang ?? "jpn",
         subLang: prefs.sub_lang ?? "jpn",
         subFallback: prefs.sub_fallback ?? "eng",
+      };
+      this.discord = {
+        enabled: prefs.discord_rpc !== "0",
+        spoilers: prefs.discord_spoilers === "1",
+        buttons: prefs.discord_buttons !== "0",
+        clientId: prefs.discord_client_id ?? "",
       };
     } catch {
       /* keep defaults */
@@ -215,13 +251,57 @@ class AppStore {
     await api.setPref(names[key], v);
   }
 
+  async setDiscord<K extends keyof DiscordPrefs>(key: K, value: DiscordPrefs[K]) {
+    this.discord[key] = value;
+    const names: Record<keyof DiscordPrefs, string> = {
+      enabled: "discord_rpc",
+      spoilers: "discord_spoilers",
+      buttons: "discord_buttons",
+      clientId: "discord_client_id",
+    };
+    const v = typeof value === "boolean" ? (value ? "1" : "0") : String(value);
+    await api.setPref(names[key], v);
+  }
+
   /** Play an episode with the configured player; errors become a toast. */
   async play(anilistId: number, epKey: string, path: string) {
+    if (this.#launchTimer) clearTimeout(this.#launchTimer);
+    this.launching = { anilistId, epKey };
+    this.#launchTimer = setTimeout(() => {
+      if (this.launching?.anilistId === anilistId && this.launching?.epKey === epKey) {
+        this.launching = null;
+      }
+    }, 12000);
+
     try {
       await api.playEpisode(anilistId, epKey, path);
     } catch (e) {
+      this.launching = null;
+      if (this.#launchTimer) clearTimeout(this.#launchTimer);
       this.toast(String(e), "error", 8000);
     }
+  }
+
+  isLaunching(anilistId?: number, epKey?: string): boolean {
+    if (!this.launching) return false;
+    if (anilistId !== undefined && epKey !== undefined) {
+      return this.launching.anilistId === anilistId && this.launching.epKey === epKey;
+    }
+    if (anilistId !== undefined) {
+      return this.launching.anilistId === anilistId;
+    }
+    return true;
+  }
+
+  isPlaying(anilistId?: number, epKey?: string): boolean {
+    if (!this.nowPlaying) return false;
+    if (anilistId !== undefined && epKey !== undefined) {
+      return this.nowPlaying.anilistId === anilistId && this.nowPlaying.epKey === epKey;
+    }
+    if (anilistId !== undefined) {
+      return this.nowPlaying.anilistId === anilistId;
+    }
+    return true;
   }
 
   toast(text: string, kind: Toast["kind"] = "info", ms = 5000) {

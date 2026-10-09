@@ -71,8 +71,8 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 - [x] **Auto-Update**: Cryptographically signed in-app updates from GitHub Releases.
 - [x] **Cross-Platform Release Automation**: Automated CI/CD builds for Windows (`.exe`/`.msi`), macOS (`.dmg`), and Linux (`.deb`/`.rpm`/`.AppImage`) via GitHub Actions.
 - [x] **Manga Mode (Light Theme)**: High-contrast sumi ink on warm manga paper with authentic Japanese vermilion stamp accents (`#e53935`).
-- [ ] **Priority Artwork Engine & ClearLogos**: Strict priority pipeline (`Local > Fanart.tv/ani.zip > AniList`) with official transparent anime title logos floating over 1080p backdrops.
-- [ ] **Discord Rich Presence (RPC)**: Live watching activity on your Discord profile with anime title, episode number/title, live remaining time bar, and cover thumbnails.
+- [x] **Priority Artwork Engine & ClearLogos**: Strict priority pipeline (`Local > Fanart.tv/ani.zip > AniList`) with official transparent anime title logos floating over 1080p backdrops.
+- [x] **Discord Rich Presence (RPC)**: Live watching activity on your Discord profile with anime title, episode number/title, live remaining time bar, and cover thumbnails.
 - [ ] **Folder Watcher / Auto-Rescan**: Automatic background scanning triggered when new episode downloads complete in monitored directories.
 - [ ] **Rich Cast & Staff Metadata**: Character voice actors (Japanese seiyuu & English cast with character portraits), director, series composition, music composers, and key studio staff on the anime detail page.
 - [ ] **AniList & MyAnimeList Account Sync**: OAuth2 login, list import, and safe two-way watch progress synchronization (ensures local and remote progress never accidentally regress).

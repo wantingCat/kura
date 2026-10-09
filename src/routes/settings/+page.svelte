@@ -707,6 +707,63 @@
   </section>
 
   <section class="block">
+    <h2 class="section-title">Discord Rich Presence</h2>
+    <div class="card playback">
+      <div class="rows">
+        <div class="row">
+          <div class="row-text">
+            <strong>Show activity on Discord</strong>
+            <small>Displays "Watching Kura" on your Discord profile with anime title, episode details, and a live progress bar.</small>
+          </div>
+          <button
+            class="switch"
+            class:on={app.discord.enabled}
+            role="switch"
+            aria-checked={app.discord.enabled}
+            aria-label="Show activity on Discord"
+            onclick={() => app.setDiscord("enabled", !app.discord.enabled)}
+            id="pref-discord-rpc"
+          ><span></span></button>
+        </div>
+
+        {#if app.discord.enabled}
+          <div class="row">
+            <div class="row-text">
+              <strong>Spoiler protection</strong>
+              <small>Hides episode titles on Discord, showing only the episode number (e.g. "Episode 04").</small>
+            </div>
+            <button
+              class="switch"
+              class:on={app.discord.spoilers}
+              role="switch"
+              aria-checked={app.discord.spoilers}
+              aria-label="Spoiler protection"
+              onclick={() => app.setDiscord("spoilers", !app.discord.spoilers)}
+              id="pref-discord-spoilers"
+            ><span></span></button>
+          </div>
+
+          <div class="row">
+            <div class="row-text">
+              <strong>Interactive profile buttons</strong>
+              <small>Include "View on AniList" and "Get Kura on GitHub" action buttons on your Discord activity card.</small>
+            </div>
+            <button
+              class="switch"
+              class:on={app.discord.buttons}
+              role="switch"
+              aria-checked={app.discord.buttons}
+              aria-label="Interactive profile buttons"
+              onclick={() => app.setDiscord("buttons", !app.discord.buttons)}
+              id="pref-discord-buttons"
+            ><span></span></button>
+          </div>
+        {/if}
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
     <h2 class="section-title">Updates</h2>
     <div class="card playback">
       <div class="rows">

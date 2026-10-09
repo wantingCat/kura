@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod db;
+pub mod discord;
 pub mod franchise;
 pub mod matcher;
 pub mod parser;

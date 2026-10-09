@@ -72,25 +72,27 @@ $$\mathbf{1.\ Local\ Folder\ Assets} \;\longrightarrow\; \mathbf{2.\ Fanart.tv\ 
 ---
 
 ## 🎮 Phase 3: Discord Rich Presence (RPC)
-*Target: v0.3.3*
+*Target: v0.3.3* — **Completed**
 
-Show off what you are currently watching to friends on Discord with live episode progress.
+Show off what you are currently watching to friends on Discord with live episode progress and Activity Type 3 ("Watching").
 
 ### Checklist
-- [ ] **Discord IPC Client in Rust (`src-tauri`)**
-  - [ ] Integrate lightweight Rust IPC client (`discord-rich-presence`) connecting to Discord's local socket (`\\.\pipe\discord-ipc-0` / `/tmp/discord-ipc-0`).
-  - [ ] Register Kura's Discord Application ID with default art assets (Kura logo, play/pause badges).
-- [ ] **Real-Time Playback Synchronization**
-  - [ ] Hook into `player.rs` event loop to update Discord presence on play, pause, seek, and finish.
-  - [ ] **Activity State**: Display anime title, episode number, and episode title.
-  - [ ] **Live Progress Bar**: Display remaining/elapsed time using Discord timestamp timestamps.
-  - [ ] **Artwork**: Display anime poster / cover art as large image with tooltip.
-  - [ ] **Action Button**: Optional "View on AniList" button linking to the series page.
-  - [ ] **Idle State**: Show "Browsing Library" or clear status when player closes.
-- [ ] **Privacy & Settings**
-  - [ ] Toggle in **Settings → Playback / Privacy**:
-    - *Enable Discord Rich Presence* (On/Off).
-    - *Spoiler Protection*: Option to hide episode title and number from Discord status.
+- [x] **Discord IPC Client in Rust (`src-tauri/src/discord.rs`)**
+  - [x] Native async Tokio client connecting to Discord's local socket (`\\.\pipe\discord-ipc-0..9` on Windows, `$XDG_RUNTIME_DIR/discord-ipc-0` / Flatpak paths on Linux, and `$TMPDIR` on macOS).
+  - [x] Configured default Kura Discord Application ID (`1558103009396002816`).
+  - [x] Emits Activity Type `3` so Discord displays **`WATCHING Kura`**.
+  - [x] Resilient background worker: auto-reconnects smoothly if Discord is opened after Kura or restarted.
+- [x] **Real-Time Playback Synchronization (`player.rs`)**
+  - [x] Hook into `player.rs` event loop to update Discord presence on play, pause, seek, and finish.
+  - [x] **Activity State**: Display anime title, episode number, and episode title.
+  - [x] **Live Progress Bar**: Interactive countdown timestamps (`start` and `end`) showing remaining/elapsed time.
+  - [x] **Artwork**: High-res anime poster fetched via AniList CDN URL with Kura logo badge.
+  - [x] **Action Buttons**: "View on AniList" (series page) and "Get Kura on GitHub" (repository download).
+  - [x] Clean exit: clears Discord presence immediately when player closes or stops.
+- [x] **Privacy & Settings (`Settings → Discord Rich Presence`)**
+  - [x] Toggle: *Show activity on Discord* (On/Off).
+  - [x] Toggle: *Spoiler Protection* (hides episode title, showing only episode number).
+  - [x] Toggle: *Interactive profile buttons* (toggle AniList and GitHub buttons).
 
 ---
 

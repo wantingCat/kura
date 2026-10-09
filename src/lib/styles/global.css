@@ -489,6 +489,47 @@ img {
   animation: spin 0.8s linear infinite;
   flex: none;
 }
+.spinner.spinner-sm {
+  width: 13px;
+  height: 13px;
+  border-width: 2px;
+}
+.spinner.spinner-xs {
+  width: 11px;
+  height: 11px;
+  border-width: 1.5px;
+}
+.btn-primary .spinner {
+  border-color: rgba(255, 255, 255, 0.35);
+  border-top-color: #ffffff;
+}
+.btn-primary.launching {
+  opacity: 0.85;
+  cursor: wait;
+}
+
+/* Animated 3-bar playing equalizer badge */
+.eq-bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 11px;
+  margin-right: 3px;
+  vertical-align: middle;
+}
+.eq-bar {
+  width: 2.5px;
+  background: currentColor;
+  border-radius: 1px;
+  animation: eq-pulse 0.7s ease-in-out infinite alternate;
+}
+.eq-bar:nth-child(1) { height: 40%; animation-delay: 0.1s; }
+.eq-bar:nth-child(2) { height: 95%; animation-delay: 0.35s; }
+.eq-bar:nth-child(3) { height: 60%; animation-delay: 0.2s; }
+@keyframes eq-pulse {
+  from { height: 25%; }
+  to { height: 100%; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *,

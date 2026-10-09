@@ -226,12 +226,27 @@
 
             <div class="actions">
               {#if nextUp}
-                <button class="btn btn-primary" onclick={() => play(nextUp!)} id="detail-play-next">
-                  <Icon name="play" size={15} fill />
-                  {#if nextUp.progressPos}
-                    Resume · {d.format === "MOVIE" ? "" : `Ep ${nextUp.number} · `}{clock(nextUp.progressPos)}
+                {@const isLaunchingNext = app.isLaunching(d.anilistId, nextUp.epKey)}
+                {@const isPlayingNext = app.isPlaying(d.anilistId, nextUp.epKey)}
+                <button
+                  class="btn btn-primary"
+                  class:launching={isLaunchingNext}
+                  disabled={isLaunchingNext}
+                  onclick={() => play(nextUp!)}
+                  id="detail-play-next"
+                >
+                  {#if isLaunchingNext}
+                    <span class="spinner"></span> Launching player…
+                  {:else if isPlayingNext}
+                    <span class="eq-bars"><span class="eq-bar"></span><span class="eq-bar"></span><span class="eq-bar"></span></span>
+                    Now Playing · {d.format === "MOVIE" ? "Movie" : `Ep ${nextUp.number}`}
                   {:else}
-                    {d.format === "MOVIE" ? "Play" : `${watched > 0 ? "Continue" : "Start"} · Ep ${nextUp.number}`}
+                    <Icon name="play" size={15} fill />
+                    {#if nextUp.progressPos}
+                      Resume · {d.format === "MOVIE" ? "" : `Ep ${nextUp.number} · `}{clock(nextUp.progressPos)}
+                    {:else}
+                      {d.format === "MOVIE" ? "Play" : `${watched > 0 ? "Continue" : "Start"} · Ep ${nextUp.number}`}
+                    {/if}
                   {/if}
                 </button>
               {/if}
@@ -322,6 +337,8 @@
                   {@const has = e.files.length > 0}
                   {@const isNext = nextUp?.epKey === e.epKey}
                   {@const thumb = img(e.thumbPath, e.thumbUrl) ?? (d ? img(d.bannerPath, d.bannerUrl) : null)}
+                  {@const isLaunchingThis = app.isLaunching(d?.anilistId, e.epKey)}
+                  {@const isPlayingThis = playingKey === e.epKey}
                   <li
                     class="ep"
                     class:missing={!has}
@@ -330,10 +347,14 @@
                     style:--i={Math.min(i, 30)}
                     id={`ep-${e.epKey}`}
                   >
-                    <button class="ep-thumb" onclick={() => play(e)} disabled={!has} aria-label={`Play ${epTitle(e)}`}>
+                    <button class="ep-thumb" onclick={() => play(e)} disabled={!has || isLaunchingThis} aria-label={`Play ${epTitle(e)}`}>
                       {#if thumb}<img src={thumb} alt="" loading="lazy" class:fallback={!e.thumbUrl} />{/if}
                       <span class="ep-num">{e.isSpecial ? "SP" : ""}{e.number}</span>
-                      {#if has}
+                      {#if isLaunchingThis}
+                        <span class="play-ov active"><span class="spinner spinner-sm"></span></span>
+                      {:else if isPlayingThis}
+                        <span class="play-ov active"><span class="eq-bars"><span class="eq-bar"></span><span class="eq-bar"></span><span class="eq-bar"></span></span></span>
+                      {:else if has}
                         <span class="play-ov"><Icon name="play" size={20} fill /></span>
                       {/if}
                       {#if e.watchedAt}<span class="seen"><Icon name="check" size={12} stroke={3} /></span>{/if}
@@ -345,8 +366,15 @@
                     <div class="ep-body">
                       <div class="ep-title-row">
                         <h3>{epTitle(e)}</h3>
-                        {#if playingKey === e.epKey}
-                          <span class="badge badge-ok">Playing</span>
+                        {#if isLaunchingThis}
+                          <span class="badge badge-accent launching-badge">
+                            <span class="spinner spinner-xs"></span> Launching…
+                          </span>
+                        {:else if isPlayingThis}
+                          <span class="badge badge-ok playing-badge">
+                            <span class="eq-bars"><span class="eq-bar"></span><span class="eq-bar"></span><span class="eq-bar"></span></span>
+                            Playing
+                          </span>
                         {:else if isNext}
                           <span class="badge badge-accent">Up next</span>
                         {/if}
@@ -427,13 +455,21 @@
                 <p class="hint faint">Openings, endings, trailers, and promotional material.</p>
                 <div class="extras-grid">
                   {#each d.extras as ex (ex.id)}
+                    {@const isLaunchingEx = app.isLaunching(d.anilistId, `extra:${ex.id}`)}
+                    {@const isPlayingEx = app.isPlaying(d.anilistId, `extra:${ex.id}`)}
                     <div class="extra-card" id={`extra-${ex.id}`}>
                       <div class="extra-thumb">
                         <span class="extra-kind-badge" class:badge-accent={ex.kind === 'opening' || ex.kind === 'ending'} class:badge-ok={ex.kind === 'trailer' || ex.kind === 'pv'}>
                           {extraBadge(ex.kind)}
                         </span>
-                        <button class="extra-play-btn" onclick={() => playExtra(ex)} title={`Play ${ex.title}`}>
-                          <Icon name="play" size={16} fill />
+                        <button class="extra-play-btn" onclick={() => playExtra(ex)} disabled={isLaunchingEx} title={`Play ${ex.title}`}>
+                          {#if isLaunchingEx}
+                            <span class="spinner spinner-xs"></span>
+                          {:else if isPlayingEx}
+                            <span class="eq-bars"><span class="eq-bar"></span><span class="eq-bar"></span><span class="eq-bar"></span></span>
+                          {:else}
+                            <Icon name="play" size={16} fill />
+                          {/if}
                         </button>
                       </div>
                       <div class="extra-body">
@@ -1059,6 +1095,33 @@
     background: color-mix(in srgb, var(--bg) 45%, transparent);
     opacity: 0;
     transition: opacity var(--t-fast) var(--ease);
+  }
+  .play-ov.active {
+    opacity: 1;
+    background: color-mix(in srgb, var(--bg) 60%, transparent);
+  }
+  .play-ov .spinner {
+    width: 26px;
+    height: 26px;
+    border-width: 2.5px;
+    border-color: rgba(255, 255, 255, 0.3);
+    border-top-color: var(--coral);
+  }
+  .play-ov .eq-bars {
+    background: var(--coral);
+    color: var(--on-coral);
+    padding: 7px 9px;
+    border-radius: 12px;
+    border: var(--bw) solid var(--line);
+    box-shadow: var(--sticker);
+    height: 12px;
+    gap: 2.5px;
+  }
+  .launching-badge,
+  .playing-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
   .play-ov :global(svg) {
     width: 44px;

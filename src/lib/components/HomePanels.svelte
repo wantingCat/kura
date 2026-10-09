@@ -63,6 +63,8 @@
 {#if featured || newItem || finish}
   <section class="panels" class:solo={!featured} class:no-side={!newItem && !finish} aria-label="Pick up where you left off">
     {#if featured}
+      {@const isLaunchingFeat = app.isLaunching(featured.anilistId, featured.epKey)}
+      {@const isPlayingFeat = app.isPlaying(featured.anilistId, featured.epKey)}
       {#key featured.anilistId + featured.epKey}
         <article class="panel main">
           <img class="mascot cat" src="/brand/cat.png" alt="" width="104" />
@@ -88,11 +90,20 @@
             <div class="actions">
               <button
                 class="btn btn-primary play"
+                class:launching={isLaunchingFeat}
+                disabled={isLaunchingFeat}
                 onclick={() => app.play(featured.anilistId, featured.epKey, featured.path)}
                 id="home-resume"
               >
-                <Icon name="play" size={16} fill />
-                {featured.position > 0 ? `Resume ${clock(featured.position)}` : `Play episode ${featured.number}`}
+                {#if isLaunchingFeat}
+                  <span class="spinner"></span> Launching player…
+                {:else if isPlayingFeat}
+                  <span class="eq-bars"><span class="eq-bar"></span><span class="eq-bar"></span><span class="eq-bar"></span></span>
+                  Now Playing · Ep {featured.number}
+                {:else}
+                  <Icon name="play" size={16} fill />
+                  {featured.position > 0 ? `Resume ${clock(featured.position)}` : `Play episode ${featured.number}`}
+                {/if}
               </button>
               <a class="btn" href={`/anime/${featured.anilistId}`} id="home-details">Details</a>
             </div>
@@ -116,6 +127,8 @@
     {#if newItem || finish}
       <div class="side">
         {#if newItem}
+          {@const isLaunchingNew = app.isLaunching(newItem.anilistId, newItem.epKey)}
+          {@const isPlayingNew = app.isPlaying(newItem.anilistId, newItem.epKey)}
           <article class="panel new">
             <span class="burst" aria-hidden="true"><span>NEW!</span></span>
             <a class="thumb" href={`/anime/${newItem.anilistId}`}>
@@ -129,10 +142,18 @@
               </p>
               <button
                 class="btn btn-sm"
+                class:launching={isLaunchingNew}
+                disabled={isLaunchingNew}
                 onclick={() => app.play(newItem.anilistId, newItem.epKey, newItem.path)}
                 id="home-play-new"
               >
-                <Icon name="play" size={13} fill /> Play
+                {#if isLaunchingNew}
+                  <span class="spinner spinner-xs"></span> Launching…
+                {:else if isPlayingNew}
+                  <span class="eq-bars"><span class="eq-bar"></span><span class="eq-bar"></span><span class="eq-bar"></span></span> Playing
+                {:else}
+                  <Icon name="play" size={13} fill /> Play
+                {/if}
               </button>
             </div>
           </article>

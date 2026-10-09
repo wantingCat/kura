@@ -1152,6 +1152,9 @@ pub fn get_prefs(st: St) -> CmdResult<HashMap<String, String>> {
 
 #[tauri::command]
 pub fn set_pref(st: St, key: String, value: String) -> CmdResult<()> {
+    if key == "discord_rpc" && value == "0" {
+        st.discord.clear();
+    }
     db::set_setting(&st.db(), &format!("pref.{key}"), &value).map_err(err)
 }
 
