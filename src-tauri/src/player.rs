@@ -186,7 +186,7 @@ pub fn prefs(conn: &Connection) -> Prefs {
         path: get("player_path").filter(|s| !s.trim().is_empty()),
         threshold: get("watched_threshold").and_then(|s| s.parse::<f64>().ok()).map(|v| (v / 100.0).clamp(0.5, 1.0)).unwrap_or(0.9),
         resume: get("resume").as_deref() != Some("0"),
-        autoplay: get("autoplay").as_deref() == Some("1"),
+        autoplay: get("autoplay").as_deref() != Some("0"),
         mpc_port: get("mpc_port").and_then(|s| s.parse().ok()).unwrap_or(13579),
     }
 }
@@ -469,7 +469,7 @@ fn mpc_var(html: &str, id: &str) -> Option<String> {
 
 impl Controller {
     /// `None` = player unreachable (closed, or control channel not available).
-    async fn status(&mut self) -> Option<Status> {
+    async fn status(&mut self, threshold: f64) -> Option<Status> {
         match self {
             Controller::Mpv(m) => {
                 let pos = m.prop("time-pos").await?;
@@ -509,7 +509,7 @@ impl Controller {
                     v.last_ratio = pos / dur;
                 }
                 // At the end of a single-item playlist VLC drops to "stopped".
-                let ended = v.seen_playing && state == "stopped" && v.last_ratio >= 0.97;
+                let ended = v.seen_playing && state == "stopped" && v.last_ratio >= threshold.min(0.90);
                 Some(Status { pos, dur, file, playing: state == "playing", ended })
             }
             Controller::Mpc(m) => {
@@ -529,7 +529,7 @@ impl Controller {
                 if dur > 0.0 && state != 0 {
                     m.last_ratio = pos / dur;
                 }
-                let ended = (dur > 0.0 && pos / dur >= 0.995) || (state == 0 && m.last_ratio >= 0.97);
+                let ended = (dur > 0.0 && pos / dur >= 0.995) || (state == 0 && m.last_ratio >= threshold.min(0.90));
                 Some(Status { pos, dur, file: mpc_var(&html, "filepath"), playing: state == 2, ended })
             }
         }
@@ -570,11 +570,20 @@ impl Controller {
                     }
                     _ => {}
                 }
-                m.call(serde_json::json!(["loadfile", path, "replace"])).await.is_some()
+                let ok = m.call(serde_json::json!(["loadfile", path, "replace"])).await.is_some();
+                let _ = m.call(serde_json::json!(["set_property", "pause", false])).await;
+                ok
             }
             Controller::Vlc(v) => {
                 v.seen_playing = false;
                 v.last_ratio = 0.0;
+                // Clear the finished item first so VLC does not accumulate stale items in the playlist
+                let _ = v
+                    .http
+                    .get(format!("{}/requests/status.json?command=pl_empty", v.base))
+                    .basic_auth("", Some(&v.password))
+                    .send()
+                    .await;
                 let Ok(url) = reqwest::Url::parse_with_params(
                     &format!("{}/requests/status.json", v.base),
                     &[("command", "in_play"), ("input", file_uri(path).as_str())],
@@ -582,6 +591,13 @@ impl Controller {
                     return false;
                 };
                 let ok = v.http.get(url).basic_auth("", Some(&v.password)).send().await.is_ok();
+                // Ensure VLC is unpaused / playing in case in_play only queued it
+                let _ = v
+                    .http
+                    .get(format!("{}/requests/status.json?command=pl_play", v.base))
+                    .basic_auth("", Some(&v.password))
+                    .send()
+                    .await;
                 if ok && start > 0.0 {
                     tokio::time::sleep(Duration::from_millis(800)).await;
                     let _ = v
@@ -895,12 +911,12 @@ async fn connect(p: &Pending) -> Option<Controller> {
         Pending::Vlc { base, password } => {
             let c = Vlc { http: http()?, base: base.clone(), password: password.clone(), seen_playing: false, last_ratio: 0.0 };
             let mut ctl = Controller::Vlc(c);
-            ctl.status().await.map(|_| ctl)
+            ctl.status(0.9).await.map(|_| ctl)
         }
         Pending::Mpc { base, exe } => {
             let c = Mpc { http: http()?, base: base.clone(), exe: exe.clone(), last_ratio: 0.0 };
             let mut ctl = Controller::Mpc(c);
-            ctl.status().await.map(|_| ctl)
+            ctl.status(0.9).await.map(|_| ctl)
         }
     }
 }
@@ -950,7 +966,7 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
             break;
         }
         ticks += 1;
-        let Some(s) = ctl.status().await else {
+        let Some(s) = ctl.status(p.threshold).await else {
             misses += 1;
             if misses >= 3 {
                 break; // player closed
@@ -993,7 +1009,7 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
             emit(&app, "tracking", p.kind, &ep, pos, dur, None);
         }
 
-        if s.ended {
+        if s.ended && loaded_at.elapsed() > Duration::from_secs(3) {
             if !marked && dur > 0.0 {
                 mark_watched(&st.db(), &ep);
                 let _ = app.emit("library-changed", ());
@@ -1178,5 +1194,25 @@ mod tests {
         let eff_reset = effective_track_prefs(&conn, 100);
         assert_eq!(eff_reset.audio.as_deref(), Some("eng"));
         assert_eq!(eff_reset.sub.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn player_prefs_defaults() {
+        let conn = mem_db();
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);").unwrap();
+        let p = prefs(&conn);
+        assert!(p.resume);
+        assert!(p.autoplay, "Autoplay should default to enabled");
+        assert_eq!(p.threshold, 0.9);
+
+        // Explicitly disabled
+        crate::db::set_setting(&conn, "pref.autoplay", "0").unwrap();
+        let p_off = prefs(&conn);
+        assert!(!p_off.autoplay);
+
+        // Explicitly enabled
+        crate::db::set_setting(&conn, "pref.autoplay", "1").unwrap();
+        let p_on = prefs(&conn);
+        assert!(p_on.autoplay);
     }
 }
