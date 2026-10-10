@@ -113,6 +113,23 @@ Automatically detect new anime episodes and movies the moment they finish downlo
 
 ---
 
+## 🎬 MPV Integration & Smart Auto-Installer
+*Target: v0.3.4* — **Completed**
+
+- [x] **Smart First-Launch MPV Detection & Auto-Installer**
+  - [x] On first launch, detect whether mpv is installed.
+  - [x] If missing, present a comic/manga styled modal explaining Kura's 10-bit playback, smart OP/ED skip, and immersion features.
+  - [x] One-click automated installation via `winget` (`shinchiro.mpv`) or Chocolatey (`mpvio`), with automatic fallback to the official `mpv.io` installation website.
+  - [x] Live installation progress spinner and automatic re-detection and configuration of `pref.player = "mpv"`.
+  - [x] Dedicated MPV recommendation banner in **Settings → Playback**.
+- [x] **Custom Kura MPV Theme & Lua Script (`kura-theme.lua`)**
+  - [x] Injects Kura's color palette (Coral `#F76D4D`, Cream `#F7EDE2`, Plum `#140C0D`) and modern bottombar seekbar.
+  - [x] **Now Playing Banner**: Manga-styled badge displaying series and episode title on launch.
+  - [x] **Smart OP/ED Skip (`Tab`)**: Floating on-screen prompt when inside opening/ending chapters with one-key skip (or +85s anime standard skip).
+  - [x] **Subtitle Sync Shortcuts (`z` / `x`)**: Instant on-the-fly timing adjustment with &plusmn;100ms ASS-rendered OSD feedback.
+
+---
+
 ## 🎭 Phase 5: Rich Cast, Voice Actors & Staff Metadata
 *Target: v0.4.0*
 

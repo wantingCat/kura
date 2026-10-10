@@ -923,6 +923,16 @@ pub fn detect_players() -> Vec<player::Detected> {
     player::detect_all()
 }
 
+#[tauri::command]
+pub fn check_mpv_status() -> player::MpvStatus {
+    player::check_mpv_status()
+}
+
+#[tauri::command]
+pub async fn install_mpv(app: AppHandle, st: St<'_>) -> CmdResult<player::InstallMpvResult> {
+    player::install_mpv(app, st.inner().clone()).await.map_err(err)
+}
+
 /// Play an episode with the configured external player, tracking progress where possible.
 #[tauri::command]
 pub fn play_episode(app: AppHandle, st: St, anilist_id: i64, ep_key: String, path: String) -> CmdResult<()> {

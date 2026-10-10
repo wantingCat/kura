@@ -237,6 +237,21 @@ export interface DetectedPlayer {
   path: string;
 }
 
+export interface MpvStatus {
+  installed: boolean;
+  path: string | null;
+  hasWinget: boolean;
+  hasChoco: boolean;
+  packageManager: string | null;
+}
+
+export interface InstallMpvResult {
+  success: boolean;
+  method: string;
+  message: string;
+  path: string | null;
+}
+
 export interface PlaybackEvent {
   state: "tracking" | "untracked" | "stopped";
   player: PlayerKind;
@@ -274,6 +289,8 @@ export const api = {
   getPrefs: () => invoke<Record<string, string>>("get_prefs"),
   setPref: (key: string, value: string) => invoke<void>("set_pref", { key, value }),
   detectPlayers: () => invoke<DetectedPlayer[]>("detect_players"),
+  checkMpvStatus: () => invoke<MpvStatus>("check_mpv_status"),
+  installMpv: () => invoke<InstallMpvResult>("install_mpv"),
   playEpisode: (anilistId: number, epKey: string, path: string) =>
     invoke<void>("play_episode", { anilistId, epKey, path }),
   getUpNext: (limit = 6) => invoke<UpNextItem[]>("get_up_next", { limit }),
@@ -292,6 +309,8 @@ export const events = {
   onScanError: (cb: (msg: string) => void): Promise<UnlistenFn> => listen<string>("scan-error", (e) => cb(e.payload)),
   onPlayback: (cb: (p: PlaybackEvent) => void): Promise<UnlistenFn> =>
     listen<PlaybackEvent>("playback", (e) => cb(e.payload)),
+  onMpvInstallProgress: (cb: (msg: string) => void): Promise<UnlistenFn> =>
+    listen<string>("mpv-install-progress", (e) => cb(e.payload)),
 };
 
 /** Prefer the locally cached image (works offline), fall back to the remote URL. */

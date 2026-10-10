@@ -8,6 +8,7 @@
   import { updater } from "$lib/updater.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import NewLibraryForm from "$lib/components/NewLibraryForm.svelte";
+  import { mpvModal } from "$lib/mpvModal.svelte";
   import {
     AUDIO_LANG_OPTIONS,
     SUB_LANG_OPTIONS,
@@ -100,9 +101,18 @@
   const auto = $derived(!app.playback.player);
 
   async function choose(k: PlayerKind) {
+    if (k === "mpv" && !found("mpv")) {
+      mpvModal.open();
+    }
     await app.setPlayback("player", k);
     await app.setPlayback("playerPath", "");
   }
+
+  $effect(() => {
+    if (!mpvModal.visible) {
+      api.detectPlayers().then((d) => (detected = d)).catch(() => {});
+    }
+  });
 
   // Audio & Subtitles -------------------------------------------------------
   const currentTrackPreset = $derived(
@@ -532,6 +542,21 @@
           </button>
         {/each}
       </div>
+
+      {#if !found("mpv")}
+        <div class="mpv-banner">
+          <div class="mpv-banner-left">
+            <span class="burst-mini" aria-hidden="true"><span>⚡</span></span>
+            <div>
+              <strong>MPV Player is recommended for Kura</strong>
+              <p class="faint">Unlocks 10-bit playback, smart OP/ED skip, Japanese subtitle immersion, and subtitle sync hotkeys.</p>
+            </div>
+          </div>
+          <button class="btn btn-sm btn-accent" onclick={() => mpvModal.open()} id="settings-install-mpv">
+            <Icon name="download" size={14} /> Install MPV
+          </button>
+        </div>
+      {/if}
 
       {#if effective !== "system"}
         <div class="field">
@@ -1236,6 +1261,44 @@
     margin-top: 6px;
     height: 20px;
     font-size: 10px;
+  }
+  .mpv-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-top: 14px;
+    padding: 12px 16px;
+    background: var(--surface-2);
+    border: var(--bw) solid var(--coral);
+    border-radius: var(--r-md);
+    box-shadow: var(--sticker);
+  }
+  .mpv-banner-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .mpv-banner-left strong {
+    font-size: 13.5px;
+    color: var(--text);
+  }
+  .mpv-banner-left p {
+    font-size: 12px;
+    margin-top: 2px;
+  }
+  .burst-mini {
+    width: 32px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    background: var(--amber);
+    clip-path: polygon(
+      50% 0%, 61% 15%, 79% 7%, 80% 26%, 98% 30%, 88% 46%, 100% 61%, 82% 69%, 85% 88%, 66% 85%, 55% 100%, 44% 86%,
+      26% 94%, 23% 75%, 4% 72%, 13% 55%, 0% 40%, 17% 31%, 13% 12%, 33% 14%
+    );
+    font-size: 13px;
+    flex-shrink: 0;
   }
   .field {
     margin-top: 18px;

@@ -91,21 +91,29 @@ fn known_locations(kind: Kind) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     let env = |k: &str| std::env::var(k).ok().map(PathBuf::from);
     if cfg!(windows) {
-        let roots: Vec<PathBuf> = [env("ProgramFiles"), env("ProgramFiles(x86)"), env("LOCALAPPDATA").map(|p| p.join("Programs"))]
-            .into_iter()
-            .flatten()
-            .collect();
+        let roots: Vec<PathBuf> = [
+            env("ProgramFiles"),
+            env("ProgramFiles(x86)"),
+            env("LOCALAPPDATA").map(|p| p.join("Programs")),
+            env("LOCALAPPDATA").map(|p| p.join(r"Microsoft\WinGet\Links")),
+            Some(PathBuf::from(r"C:\ProgramData\chocolatey\bin")),
+            Some(PathBuf::from(r"C:\tools")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         let sub: &[&str] = match kind {
-            Kind::Mpv => &["mpv", "mpv.net"],
-            Kind::Memento => &["Memento"],
-            Kind::Vlc => &["VideoLAN\\VLC"],
-            Kind::Mpc => &["MPC-HC", "MPC-HC x64", "MPC-BE x64", "MPC-BE", "K-Lite Codec Pack\\MPC-HC64"],
+            Kind::Mpv => &["mpv", "mpv.net", ""],
+            Kind::Memento => &["Memento", ""],
+            Kind::Vlc => &["VideoLAN\\VLC", ""],
+            Kind::Mpc => &["MPC-HC", "MPC-HC x64", "MPC-BE x64", "MPC-BE", "K-Lite Codec Pack\\MPC-HC64", ""],
             Kind::System => &[],
         };
         for r in &roots {
             for s in sub {
                 for exe in exe_names(kind) {
-                    out.push(r.join(s).join(exe));
+                    let candidate = if s.is_empty() { r.join(exe) } else { r.join(s).join(exe) };
+                    out.push(candidate);
                 }
             }
         }
@@ -159,6 +167,314 @@ pub fn detect_all() -> Vec<Detected> {
         .into_iter()
         .filter_map(|k| detect(k).map(|p| Detected { kind: k.id(), path: p.to_string_lossy().to_string() }))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// MPV Detection, Auto-Installer & Kura Theme Script
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MpvStatus {
+    pub installed: bool,
+    pub path: Option<String>,
+    pub has_winget: bool,
+    pub has_choco: bool,
+    pub package_manager: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallMpvResult {
+    pub success: bool,
+    pub method: String,
+    pub message: String,
+    pub path: Option<String>,
+}
+
+pub fn check_tool_exists(name: &str) -> bool {
+    if cfg!(windows) {
+        let exe = if name.ends_with(".exe") { name.to_string() } else { format!("{name}.exe") };
+        if on_path(&[&exe]).is_some() {
+            return true;
+        }
+        let env = |k: &str| std::env::var(k).ok().map(PathBuf::from);
+        if name == "winget" {
+            if let Some(local) = env("LOCALAPPDATA") {
+                if local.join(r"Microsoft\WindowsApps\winget.exe").is_file() {
+                    return true;
+                }
+            }
+        }
+        if name == "choco" {
+            if PathBuf::from(r"C:\ProgramData\chocolatey\bin\choco.exe").is_file() {
+                return true;
+            }
+        }
+        std::process::Command::new("where.exe")
+            .arg(name)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        std::process::Command::new("which")
+            .arg(name)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+
+pub fn check_mpv_status() -> MpvStatus {
+    let detected = detect(Kind::Mpv);
+    let has_winget = check_tool_exists("winget");
+    let has_choco = check_tool_exists("choco");
+    let package_manager = if has_winget {
+        Some("winget".to_string())
+    } else if has_choco {
+        Some("choco".to_string())
+    } else {
+        None
+    };
+
+    MpvStatus {
+        installed: detected.is_some(),
+        path: detected.map(|p| p.to_string_lossy().to_string()),
+        has_winget,
+        has_choco,
+        package_manager,
+    }
+}
+
+pub async fn install_mpv(app: AppHandle, st: Arc<AppState>) -> Result<InstallMpvResult> {
+    let status = check_mpv_status();
+    if status.installed {
+        return Ok(InstallMpvResult {
+            success: true,
+            method: "already_installed".to_string(),
+            message: "MPV is already installed.".to_string(),
+            path: status.path,
+        });
+    }
+
+    #[cfg(windows)]
+    {
+        if status.has_winget {
+            let _ = app.emit("mpv-install-progress", "Installing MPV via Windows Package Manager (winget)...");
+            let res = tokio::task::spawn_blocking(|| {
+                std::process::Command::new("winget")
+                    .args([
+                        "install",
+                        "--id",
+                        "shinchiro.mpv",
+                        "-e",
+                        "--accept-source-agreements",
+                        "--accept-package-agreements",
+                    ])
+                    .status()
+            })
+            .await;
+
+            if let Ok(Ok(exit)) = res {
+                if exit.success() {
+                    let _ = app.emit("mpv-install-progress", "Verifying MPV installation...");
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                    if let Some(p) = detect(Kind::Mpv) {
+                        let path_str = p.to_string_lossy().to_string();
+                        let conn = st.db();
+                        let _ = db::set_setting(&conn, "pref.player", "mpv");
+                        let _ = db::set_setting(&conn, "pref.player_path", &path_str);
+                        return Ok(InstallMpvResult {
+                            success: true,
+                            method: "winget".to_string(),
+                            message: "MPV successfully installed and configured!".to_string(),
+                            path: Some(path_str),
+                        });
+                    }
+                }
+            }
+        }
+
+        if status.has_choco {
+            let _ = app.emit("mpv-install-progress", "Installing MPV via Chocolatey...");
+            let res = tokio::task::spawn_blocking(|| {
+                std::process::Command::new("choco")
+                    .args(["install", "mpvio", "-y"])
+                    .status()
+            })
+            .await;
+
+            if let Ok(Ok(exit)) = res {
+                if exit.success() {
+                    let _ = app.emit("mpv-install-progress", "Verifying MPV installation...");
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                    if let Some(p) = detect(Kind::Mpv) {
+                        let path_str = p.to_string_lossy().to_string();
+                        let conn = st.db();
+                        let _ = db::set_setting(&conn, "pref.player", "mpv");
+                        let _ = db::set_setting(&conn, "pref.player_path", &path_str);
+                        return Ok(InstallMpvResult {
+                            success: true,
+                            method: "choco".to_string(),
+                            message: "MPV successfully installed via Chocolatey!".to_string(),
+                            path: Some(path_str),
+                        });
+                    }
+                }
+            }
+        }
+
+        let _ = app.emit("mpv-install-progress", "Opening MPV official download page...");
+        let _ = tauri_plugin_opener::open_url("https://mpv.io/installation/", None::<&str>);
+        Ok(InstallMpvResult {
+            success: false,
+            method: "website".to_string(),
+            message: "Opened MPV installation page in your default browser.".to_string(),
+            path: None,
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if check_tool_exists("brew") {
+            let _ = app.emit("mpv-install-progress", "Installing MPV via Homebrew...");
+            let res = tokio::task::spawn_blocking(|| {
+                std::process::Command::new("brew")
+                    .args(["install", "mpv"])
+                    .status()
+            })
+            .await;
+            if let Ok(Ok(exit)) = res {
+                if exit.success() {
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                    if let Some(p) = detect(Kind::Mpv) {
+                        let path_str = p.to_string_lossy().to_string();
+                        let conn = st.db();
+                        let _ = db::set_setting(&conn, "pref.player", "mpv");
+                        let _ = db::set_setting(&conn, "pref.player_path", &path_str);
+                        return Ok(InstallMpvResult {
+                            success: true,
+                            method: "brew".to_string(),
+                            message: "MPV successfully installed via Homebrew!".to_string(),
+                            path: Some(path_str),
+                        });
+                    }
+                }
+            }
+        }
+        let _ = tauri_plugin_opener::open_url("https://mpv.io/installation/", None::<&str>);
+        Ok(InstallMpvResult {
+            success: false,
+            method: "website".to_string(),
+            message: "Opened MPV installation page in your default browser.".to_string(),
+            path: None,
+        })
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = tauri_plugin_opener::open_url("https://mpv.io/installation/", None::<&str>);
+        Ok(InstallMpvResult {
+            success: false,
+            method: "website".to_string(),
+            message: "Opened MPV installation page in your default browser.".to_string(),
+            path: None,
+        })
+    }
+}
+
+pub fn ensure_kura_mpv_script(data_dir: &std::path::Path) -> Result<PathBuf> {
+    let dir = data_dir.join("scripts");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("kura-theme.lua");
+
+    const SCRIPT: &str = r#"-- Kura MPV Theme & Integration Script
+-- Provides Kura-styled OSD notifications, ASS overlays, OP/ED skipping, and subtitle adjustments.
+
+local mp = require 'mp'
+
+-- Palette (ASS Color format: &HBBGGRR& or &HAABBGGRR&)
+-- Coral: #F76D4D -> &H4D6DF7&
+-- Plum:  #140C0D -> &H0D0C14&
+-- Cream: #F7EDE2 -> &HE2EDF7&
+
+local function is_oped(title)
+    if not title or title == "" then return false end
+    local s = string.lower(title)
+    return string.find(s, "op") ~= nil or string.find(s, "opening") ~= nil or
+           string.find(s, "ed") ~= nil or string.find(s, "ending") ~= nil or
+           string.find(s, "ncop") ~= nil or string.find(s, "nced") ~= nil
+end
+
+-- 1. Styled "Now Playing" Banner on file start
+mp.register_event("file-loaded", function()
+    local title = mp.get_property("media-title", "")
+    if title ~= "" then
+        mp.osd_message("{\\an7\\pos(24,24)\\b1\\fs20\\bord2.5\\shad1.5\\3c&H0D0C14&\\c&H4D6DF7&}🌸 KURA {\\c&HE2EDF7&}• {\\fs18\\c&HE2EDF7&}" .. title, 3.2)
+    end
+end)
+
+-- 2. Subtitle Delay Shortcuts: 'z' (-100ms) and 'x' (+100ms)
+mp.add_forced_key_binding("z", "kura_sub_delay_down", function()
+    local d = mp.get_property_number("sub-delay", 0.0) - 0.1
+    mp.set_property_number("sub-delay", d)
+    local ms = math.floor(d * 1000 + 0.5)
+    mp.osd_message(string.format("{\\an8\\pos(0,40)\\b1\\fs22\\bord2.5\\shad1.5\\3c&H0D0C14&\\c&H4D6DF7&}💬 SUBTITLE DELAY: {\\c&HE2EDF7&}%+d ms", ms), 1.5)
+end)
+
+mp.add_forced_key_binding("x", "kura_sub_delay_up", function()
+    local d = mp.get_property_number("sub-delay", 0.0) + 0.1
+    mp.set_property_number("sub-delay", d)
+    local ms = math.floor(d * 1000 + 0.5)
+    mp.osd_message(string.format("{\\an8\\pos(0,40)\\b1\\fs22\\bord2.5\\shad1.5\\3c&H0D0C14&\\c&H4D6DF7&}💬 SUBTITLE DELAY: {\\c&HE2EDF7&}%+d ms", ms), 1.5)
+end)
+
+-- 3. Smart OP/ED Skip on 'Tab'
+mp.add_forced_key_binding("Tab", "kura_skip_oped", function()
+    local ch = mp.get_property_number("chapter", -1)
+    local ch_count = mp.get_property_number("chapters", 0)
+    local ch_title = mp.get_property("chapter-metadata/by-key/title", "")
+    
+    if ch >= 0 and ch < ch_count - 1 and is_oped(ch_title) then
+        mp.commandv("add", "chapter", 1)
+        mp.osd_message("{\\an8\\pos(0,40)\\b1\\fs22\\bord2.5\\shad1.5\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped {\\c&HE2EDF7&}" .. (ch_title ~= "" and ch_title or "Chapter"), 2.0)
+    else
+        mp.commandv("seek", 85, "relative", "exact")
+        mp.osd_message("{\\an8\\pos(0,40)\\b1\\fs22\\bord2.5\\shad1.5\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped OP/ED {\\c&HE2EDF7&}(+85s)", 2.0)
+    end
+end)
+
+-- 4. Floating On-Screen Skip Pill during OP/ED Chapters
+local skip_overlay = nil
+if mp.create_osd_overlay then
+    skip_overlay = mp.create_osd_overlay("ass-events")
+end
+
+local function check_chapter()
+    if not skip_overlay then return end
+    local ch_title = mp.get_property("chapter-metadata/by-key/title", "")
+    if is_oped(ch_title) then
+        local label = ch_title ~= "" and ch_title or "Opening/Ending"
+        skip_overlay.data = "{\\an9\\pos(1870,24)\\b1\\fs22\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}[ ⏭ Skip " .. label .. " (Tab) ]"
+        skip_overlay:update()
+    else
+        skip_overlay:remove()
+    end
+end
+
+mp.observe_property("chapter", "number", function()
+    check_chapter()
+end)
+"#;
+
+    std::fs::write(&path, SCRIPT)?;
+    Ok(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -855,6 +1171,31 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
                 }
                 SubArg::Default => {}
             }
+
+            // Kura custom styling & Lua integration
+            if let Ok(script_path) = ensure_kura_mpv_script(&st.data_dir) {
+                cmd.arg(format!("--scripts-add={}", script_path.display()));
+            }
+            cmd.args([
+                "--osd-font=sans-serif",
+                "--osd-font-size=28",
+                "--osd-color=#F7EDE2",
+                "--osd-border-color=#140C0D",
+                "--osd-border-size=2.4",
+                "--osd-shadow-offset=1.5",
+                "--osd-shadow-color=#140C0D",
+                "--osd-bar-align-y=0.92",
+                "--osd-bar-h=3.2",
+                "--osd-bar-w=65",
+                "--sub-font=sans-serif",
+                "--sub-color=#F7EDE2",
+                "--sub-border-color=#140C0D",
+                "--sub-border-size=2.5",
+                "--sub-shadow-offset=1.2",
+                "--sub-shadow-color=#140C0D",
+                "--script-opts-append=osc-layout=bottombar,osc-seekbarstyle=bar,osc-seekrangestyle=bar,osc-deadzonesize=0.5,osc-minmousemove=3",
+            ]);
+
             cmd.arg("--").arg(&ep.path);
             Pending::Mpv(addr)
         }
@@ -1214,5 +1555,25 @@ mod tests {
         crate::db::set_setting(&conn, "pref.autoplay", "1").unwrap();
         let p_on = prefs(&conn);
         assert!(p_on.autoplay);
+    }
+
+    #[test]
+    fn kura_mpv_script_generation() {
+        let temp = std::env::temp_dir().join(format!("kura_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let path = ensure_kura_mpv_script(&temp).expect("script created");
+        assert!(path.is_file());
+        let content = std::fs::read_to_string(&path).expect("read script");
+        assert!(content.contains("Kura MPV Theme"));
+        assert!(content.contains("kura_sub_delay_down"));
+        assert!(content.contains("kura_skip_oped"));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn mpv_status_check() {
+        let status = check_mpv_status();
+        // Should not panic, returns valid flags
+        println!("Detected mpv status: {:?}", status);
     }
 }

@@ -344,6 +344,21 @@ export function installMock() {
             { kind: "mpv", path: "C:\\Program Files\\mpv\\mpv.exe" },
             { kind: "vlc", path: "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe" },
           ];
+        case "check_mpv_status":
+          return {
+            installed: true,
+            path: "C:\\Program Files\\mpv\\mpv.exe",
+            hasWinget: true,
+            hasChoco: true,
+            packageManager: "winget",
+          };
+        case "install_mpv":
+          return {
+            success: true,
+            method: "winget",
+            message: "MPV successfully installed!",
+            path: "C:\\Program Files\\mpv\\mpv.exe",
+          };
         case "play_episode":
           setTimeout(
             () =>

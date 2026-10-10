@@ -8,6 +8,8 @@
   import TopBar from "$lib/components/TopBar.svelte";
   import UpdateBanner from "$lib/components/UpdateBanner.svelte";
   import Toasts from "$lib/components/Toasts.svelte";
+  import MpvInstallModal from "$lib/components/MpvInstallModal.svelte";
+  import { mpvModal } from "$lib/mpvModal.svelte";
 
   let { children } = $props();
   let main: HTMLElement | undefined = $state();
@@ -17,7 +19,8 @@
     if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) {
       (await import("$lib/dev/mock")).installMock();
     }
-    app.init();
+    await app.init();
+    mpvModal.checkInitialLaunch();
   });
 
   // Each page starts at the top (main is the scroll container, not the window).
@@ -35,6 +38,7 @@
     {@render children()}
   </main>
   <Toasts />
+  <MpvInstallModal />
 </div>
 
 <style>

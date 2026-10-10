@@ -91,6 +91,8 @@ pub fn run() {
             commands::get_prefs,
             commands::set_pref,
             commands::detect_players,
+            commands::check_mpv_status,
+            commands::install_mpv,
             commands::play_episode,
             commands::get_up_next,
             commands::get_new_episodes,
