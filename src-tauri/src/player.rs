@@ -97,13 +97,22 @@ fn known_locations(kind: Kind) -> Vec<PathBuf> {
             env("LOCALAPPDATA").map(|p| p.join("Programs")),
             env("LOCALAPPDATA").map(|p| p.join(r"Microsoft\WinGet\Links")),
             Some(PathBuf::from(r"C:\ProgramData\chocolatey\bin")),
+            Some(PathBuf::from(r"C:\ProgramData")),
             Some(PathBuf::from(r"C:\tools")),
         ]
         .into_iter()
         .flatten()
         .collect();
         let sub: &[&str] = match kind {
-            Kind::Mpv => &["mpv", "mpv.net", ""],
+            Kind::Mpv => &[
+                "mpv",
+                "mpv.net",
+                "",
+                r"chocolatey\lib\mpvio.install\tools",
+                r"chocolatey\lib\mpv.install\tools",
+                r"chocolatey\lib\mpvio\tools",
+                r"chocolatey\lib\mpv\tools",
+            ],
             Kind::Memento => &["Memento", ""],
             Kind::Vlc => &["VideoLAN\\VLC", ""],
             Kind::Mpc => &["MPC-HC", "MPC-HC x64", "MPC-BE x64", "MPC-BE", "K-Lite Codec Pack\\MPC-HC64", ""],
@@ -158,7 +167,40 @@ fn on_path(names: &[&str]) -> Option<PathBuf> {
     None
 }
 
+#[cfg(windows)]
+fn query_app_path(exe: &str) -> Option<PathBuf> {
+    use std::os::windows::process::CommandExt;
+    for root in &["HKLM", "HKCU"] {
+        let key = format!(r"{root}\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}");
+        let mut cmd = std::process::Command::new("reg");
+        cmd.args(["query", &key, "/ve"]);
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        if let Ok(output) = cmd.output() {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                for line in text.lines() {
+                    if let Some(pos) = line.find("REG_SZ") {
+                        let path_str = line[pos + 6..].trim();
+                        let p = PathBuf::from(path_str.trim_matches('"'));
+                        if p.is_file() {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn detect(kind: Kind) -> Option<PathBuf> {
+    #[cfg(windows)]
+    for exe in exe_names(kind) {
+        if let Some(p) = query_app_path(exe) {
+            return Some(p);
+        }
+    }
+
     known_locations(kind).into_iter().find(|p| p.is_file()).or_else(|| on_path(exe_names(kind)))
 }
 
