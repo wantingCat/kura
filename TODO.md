@@ -10,9 +10,9 @@ This document serves as the master planning roadmap for Kura, organizing propose
 | :--- | :--- | :--- |
 | **v0.3.2** | **Visual & Artwork Overhaul**: Manga Mode (Light Theme) + Priority Artwork Engine (ClearLogos & Fanart) | ✅ Completed |
 | **v0.3.3** | **Social & Real-Time Tracking**: Discord Rich Presence (RPC) + Live Folder Watcher | ✅ Completed |
-| **v0.4.0** | **Deeper Anime Knowledge**: Rich Cast, Voice Actors (Seiyuu), Character Portraits & Staff Guides | 💡 Planned |
+| **v0.4.0** | **Embedded Player Engine & Smart Skip**: In-App libmpv Player, Smart OP/ED Skip + Rich Cast & Voice Actors | 💡 Planned |
 | **v0.5.0** | **Cloud & Account Integration**: AniList & MyAnimeList Two-Way Scrobbling / List Sync | 💡 Planned |
-| **v0.6.0** | **Japanese Immersion**: Native mpv + Floating Yomitan Subtitle HUD (Lightweight Memento Alternative) | 💡 Planned |
+| **v0.6.0** | **Japanese Immersion**: Native In-Player Subtitle HUD & Yomitan Dictionary Integration (Direct in Embedded Player) | 💡 Planned |
 | **v1.0.0 (Beta)** | **Library Power-User**: Advanced Filtering, Library Backup/Export, Performance Polish | 💡 Future |
 
 ---
@@ -113,7 +113,39 @@ Automatically detect new anime episodes and movies the moment they finish downlo
 
 ---
 
-## 🎭 Phase 5: Rich Cast, Voice Actors & Staff Metadata
+## 🎬 Phase 5: Built-in Video Player Engine & Smart OP/ED Skip
+*Target: v0.4.0*
+
+Embed a hardware-accelerated video player directly inside Kura while preserving full freedom for users to pick external players (mpv, VLC, MPC-HC, or System Default) in Settings anytime. This also acts as the direct stepping stone making Japanese Immersion (Phase 8) far simpler, native, and robust.
+
+### Checklist
+- [ ] **Embedded `libmpv` Player Engine (In-App Player)**
+  - [ ] Cross-platform embedded player core in Rust (`libmpv` / native render surface) with full hardware decoding (DirectX / Vulkan / Metal).
+  - [ ] Full `libass` support for anime stylized typesetting, custom fonts, karaoke effects, and signs.
+  - [ ] Seamless in-app player view with theater mode and fullscreen support (`F` / double click).
+  - [ ] **Custom Kura Player UI (Svelte & CSS)**:
+    - [ ] Glassmorphic control bar: play/pause, seek scrubber with hover preview, volume, and playback speed (0.5x - 2.0x).
+    - [ ] Dynamic playlist / episode drawer (quick switch to previous/next episodes).
+    - [ ] Audio track switcher and Subtitle track selector honoring user's global and per-anime track defaults.
+  - [ ] **Player Preference in Settings**:
+    - [ ] Add "Embedded Player (Kura Internal)" as a first-class choice under **Settings → Playback**.
+    - [ ] Users can freely toggle between Embedded, mpv, VLC, MPC-HC, or System Default whenever they like.
+- [ ] **Smart Skip OP/ED Engine (Chapters & AniSkip)**
+  - [ ] **Offline-First Schema**: `CREATE TABLE skip_times (anilist_id INTEGER, ep_key TEXT, op_start REAL, op_end REAL, ed_start REAL, ed_end REAL, source TEXT, PRIMARY KEY (anilist_id, ep_key))`.
+  - [ ] **Tier 1 (File Chapters)**: Detect embedded MKV/MP4 chapter markers (`OP`, `Opening`, `ED`, `Ending`) on launch.
+  - [ ] **Tier 2 (Cached AniSkip)**: Pre-fetch and cache AniSkip timestamps (`api.aniskip.com`) during library scan for 100% offline usage.
+  - [ ] **Interactive On-Screen Skip Button**:
+    - [ ] Animated slide-in button: **`[ ⏭ Skip Opening (Tab) ]`** / **`[ ⏭ Skip Ending (Tab) ]`**.
+    - [ ] One-click or `Tab` keypress jumps to the end of the intro/outro.
+    - [ ] Optional setting toggle: *Auto-skip Openings & Endings* for users who prefer hands-free playback.
+  - [ ] For external players (mpv/VLC/MPC): support floating skip pill or mpv OSD script and hotkey.
+- [ ] **Stepping Stone to Japanese Immersion (Phase 8)**
+  - [ ] Direct access to rendered subtitle text streams without external window hooking.
+  - [ ] Clickable Japanese subtitle tokens directly in the DOM for instant Yomitan lookups.
+
+---
+
+## 🎭 Phase 6: Rich Cast, Voice Actors & Staff Metadata
 *Target: v0.4.0*
 
 Deepen the anime experience with voice actor guides, character portraits, and production credits.
@@ -131,7 +163,7 @@ Deepen the anime experience with voice actor guides, character portraits, and pr
 
 ---
 
-## 🔄 Phase 6: AniList & MyAnimeList Account Sync
+## 🔄 Phase 7: AniList & MyAnimeList Account Sync
 *Target: v0.5.0*
 
 Two-way synchronization between your local Kura library and your online anime tracking profiles.
@@ -148,20 +180,16 @@ Two-way synchronization between your local Kura library and your online anime tr
 
 ---
 
-## 🎌 Phase 7: Japanese Immersion & Yomitan Subtitle HUD
+## 🎌 Phase 8: Japanese Immersion & Yomitan Subtitle HUD
 *Target: v0.6.0*
 
-A blazing-fast, lightweight alternative to Memento. Combines native mpv 4K video playback with a transparent Tauri floating subtitle overlay for instant Yomitan dictionary lookups.
+A blazing-fast, native Japanese immersion environment. Render interactive Japanese subtitles directly in Kura's embedded player (with mpv fallback) for instant Yomitan dictionary lookups.
 
 ### Checklist
-- [ ] **mpv Real-Time Subtitle Streaming (`sub-text`)**
-  - [ ] Subscribe to mpv's `sub-text` property over the existing IPC socket in `player.rs`.
-  - [ ] Stream active Japanese subtitle strings, start/end timestamps, and track IDs to Kura in real-time.
-  - [ ] Hide mpv's internal text rendering when immersion overlay is active (`--sub-font-size=0`).
-- [ ] **Transparent Floating Subtitle HUD Window**
-  - [ ] Lightweight, borderless, transparent Tauri window snapped over the bottom of mpv (windowed or fullscreen).
+- [ ] **Native Subtitle Rendering with Interactive Tokens**
+  - [ ] Stream active Japanese subtitle strings, start/end timestamps, and track IDs to the player.
   - [ ] Crisp manga-styled Japanese subtitle rendering with customizable font size, outline, and position.
-  - [ ] Mouse-interactive words: automatically becomes hoverable when video is paused or mouse enters the HUD.
+  - [ ] Hoverable words and de-inflected tokens with instant visual feedback.
 - [ ] **Yomitan Dictionary Engine (Rust + SQLite)**
   - [ ] **Dictionary Importer**: Drag-and-drop standard Yomitan `.zip` archives (JMdict, KANJIDIC, Daijirin, etc.) in **Settings → Japanese Immersion**.
   - [ ] **Fast SQLite Index**: High-speed term lookup table indexing headwords, readings, definitions, and pitch accents (< 1ms query time).
@@ -170,12 +198,12 @@ A blazing-fast, lightweight alternative to Memento. Combines native mpv 4K video
   - [ ] Displays word reading (hiragana/katakana furigana), pitch accent markers, and concise definitions.
   - [ ] Lightweight, pure instant lookup — zero mining bloat, no Anki sync baggage, instant response.
 - [ ] **Settings Integration**
-  - [ ] "Japanese Immersion Mode" toggle under **Settings → Playback** (enabled when mpv is selected).
+  - [ ] "Japanese Immersion Mode" toggle under **Settings → Playback**.
   - [ ] Dictionary management UI (install, delete, view active dictionaries).
 
 ---
 
-## ⚡ Phase 8: Library Power-User Tools & Backup
+## ⚡ Phase 9: Library Power-User Tools & Backup
 *Target: v1.0.0 (Beta)*
 
 - [ ] **Advanced Filtering & Library Search**
