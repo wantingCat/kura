@@ -446,19 +446,135 @@ local mp = require 'mp'
 -- Plum:  #140C0D -> &H0D0C14&
 -- Cream: #F7EDE2 -> &HE2EDF7&
 
-local function is_oped(title)
+local skip_overlay = nil
+if mp.create_osd_overlay then
+    skip_overlay = mp.create_osd_overlay("ass-events")
+    skip_overlay.res_x = 1920
+    skip_overlay.res_y = 1080
+end
+
+local op_start = nil
+local op_end = nil
+local ed_start = nil
+local ed_end = nil
+local chapters_scanned = false
+local current_button = nil
+
+local function is_op(title)
     if not title or title == "" then return false end
-    local s = string.lower(title)
-    return string.find(s, "op") ~= nil or string.find(s, "opening") ~= nil or
-           string.find(s, "ed") ~= nil or string.find(s, "ending") ~= nil or
-           string.find(s, "ncop") ~= nil or string.find(s, "nced") ~= nil
+    local s = string.lower(title):gsub("^%s*(.-)%s*$", "%1")
+    if s == "op" or s == "ncop" or s == "opening" then return true end
+    if string.find(s, "^op[%s%d%-_]") or string.find(s, "[%s%-_%(%[]op[%s%d%-_%)%]]") or string.find(s, "[%s%-_%(%[]op$") then return true end
+    if string.find(s, "opening") or string.find(s, "ncop") or string.find(s, "theme song") then return true end
+    return false
+end
+
+local function is_ed(title)
+    if not title or title == "" then return false end
+    local s = string.lower(title):gsub("^%s*(.-)%s*$", "%1")
+    if s == "ed" or s == "nced" or s == "ending" then return true end
+    if string.find(s, "^ed[%s%d%-_]") or string.find(s, "[%s%-_%(%[]ed[%s%d%-_%)%]]") or string.find(s, "[%s%-_%(%[]ed$") then return true end
+    if string.find(s, "ending") or string.find(s, "nced") or string.find(s, "credits") or string.find(s, "credit") or string.find(s, "preview") or string.find(s, "pv") then return true end
+    return false
+end
+
+local function scan_chapters()
+    op_start = nil
+    op_end = nil
+    ed_start = nil
+    ed_end = nil
+
+    local ch_count = mp.get_property_number("chapters", 0)
+    local dur = mp.get_property_number("duration", 0.0)
+
+    for i = 0, ch_count - 1 do
+        local title = mp.get_property(string.format("chapter-list/%d/title", i), "")
+        local time = mp.get_property_number(string.format("chapter-list/%d/time", i), 0.0)
+        local next_time = nil
+        if i + 1 < ch_count then
+            next_time = mp.get_property_number(string.format("chapter-list/%d/time", i + 1), nil)
+        elseif dur > 0 then
+            next_time = dur
+        end
+
+        if is_op(title) and not op_start then
+            op_start = time
+            op_end = next_time
+        elseif is_ed(title) and not ed_start then
+            ed_start = time
+            ed_end = next_time
+        end
+    end
+
+    -- Fallback for anime episodes without named chapters:
+    -- Standard anime OP is around 10s-100s, ED is ~90s before end
+    if not op_start and dur > 300 then
+        op_start = 10.0
+        op_end = 100.0
+    end
+    if not ed_start and dur > 300 then
+        ed_start = dur - 105.0
+        ed_end = dur - 15.0
+    end
+
+    chapters_scanned = (ch_count > 0 or dur > 0)
+end
+
+local function show_button(label)
+    if not skip_overlay then return end
+    if current_button == label then return end
+    current_button = label
+    skip_overlay.data = string.format("{\\an3\\pos(1860,960)\\b1\\fs28\\bord3.5\\shad2.5\\3c&H0D0C14&\\c&H4D6DF7&}[ ⏭ SKIP %s {\\fs22\\c&HE2EDF7&}(Tab) ]", label:upper())
+    skip_overlay:update()
+end
+
+local function hide_button()
+    if not skip_overlay then return end
+    if current_button ~= nil then
+        current_button = nil
+        skip_overlay:remove()
+    end
+end
+
+local function update_state()
+    if not chapters_scanned then
+        scan_chapters()
+    end
+
+    local pos = mp.get_property_number("time-pos", 0.0)
+    if not pos then
+        hide_button()
+        return
+    end
+
+    -- 1. Currently inside Opening sequence (or near start if OP starts within first 25s)
+    if op_start and op_end and pos < op_end and (pos >= op_start or (op_start <= 25 and pos <= op_end)) then
+        show_button("Opening")
+        return
+    end
+
+    -- 2. Currently inside Ending sequence
+    if ed_start and ed_end and pos >= ed_start and pos < ed_end then
+        show_button("Ending")
+        return
+    end
+
+    -- 3. At the start of the episode (first 15s) before a delayed OP (cold open / prologue)
+    if op_start and op_start > 25 and pos >= 0 and pos <= 15 then
+        show_button("to Opening")
+        return
+    end
+
+    hide_button()
 end
 
 -- 1. Styled "Now Playing" Banner on file start
 mp.register_event("file-loaded", function()
+    scan_chapters()
+    update_state()
     local title = mp.get_property("media-title", "")
     if title ~= "" then
-        mp.osd_message("{\\an7\\pos(24,24)\\b1\\fs20\\bord2.5\\shad1.5\\3c&H0D0C14&\\c&H4D6DF7&}🌸 KURA {\\c&HE2EDF7&}• {\\fs18\\c&HE2EDF7&}" .. title, 3.2)
+        mp.osd_message("{\\an7\\pos(30,30)\\b1\\fs24\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}🌸 KURA {\\c&HE2EDF7&}• {\\fs20\\c&HE2EDF7&}" .. title, 3.5)
     end
 end)
 
@@ -467,52 +583,45 @@ mp.add_forced_key_binding("z", "kura_sub_delay_down", function()
     local d = mp.get_property_number("sub-delay", 0.0) - 0.1
     mp.set_property_number("sub-delay", d)
     local ms = math.floor(d * 1000 + 0.5)
-    mp.osd_message(string.format("{\\an8\\pos(0,40)\\b1\\fs22\\bord2.5\\shad1.5\\3c&H0D0C14&\\c&H4D6DF7&}💬 SUBTITLE DELAY: {\\c&HE2EDF7&}%+d ms", ms), 1.5)
+    mp.osd_message(string.format("{\\an8\\pos(0,40)\\b1\\fs24\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}💬 SUBTITLE DELAY: {\\c&HE2EDF7&}%+d ms", ms), 1.5)
 end)
 
 mp.add_forced_key_binding("x", "kura_sub_delay_up", function()
     local d = mp.get_property_number("sub-delay", 0.0) + 0.1
     mp.set_property_number("sub-delay", d)
     local ms = math.floor(d * 1000 + 0.5)
-    mp.osd_message(string.format("{\\an8\\pos(0,40)\\b1\\fs22\\bord2.5\\shad1.5\\3c&H0D0C14&\\c&H4D6DF7&}💬 SUBTITLE DELAY: {\\c&HE2EDF7&}%+d ms", ms), 1.5)
+    mp.osd_message(string.format("{\\an8\\pos(0,40)\\b1\\fs24\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}💬 SUBTITLE DELAY: {\\c&HE2EDF7&}%+d ms", ms), 1.5)
 end)
 
 -- 3. Smart OP/ED Skip on 'Tab'
-mp.add_forced_key_binding("Tab", "kura_skip_oped", function()
-    local ch = mp.get_property_number("chapter", -1)
-    local ch_count = mp.get_property_number("chapters", 0)
-    local ch_title = mp.get_property("chapter-metadata/by-key/title", "")
-    
-    if ch >= 0 and ch < ch_count - 1 and is_oped(ch_title) then
-        mp.commandv("add", "chapter", 1)
-        mp.osd_message("{\\an8\\pos(0,40)\\b1\\fs22\\bord2.5\\shad1.5\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped {\\c&HE2EDF7&}" .. (ch_title ~= "" and ch_title or "Chapter"), 2.0)
+local function trigger_skip()
+    local pos = mp.get_property_number("time-pos", 0.0)
+
+    -- If in Opening -> jump past OP
+    if op_start and op_end and pos < op_end and (pos >= (op_start - 2) or op_start <= 25) then
+        mp.commandv("seek", op_end + 0.5, "absolute", "exact")
+        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped Opening", 2.0)
+    -- If in Ending -> jump past ED
+    elseif ed_start and ed_end and pos >= (ed_start - 2) and pos < ed_end then
+        mp.commandv("seek", ed_end, "absolute", "exact")
+        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped Ending", 2.0)
+    -- If in cold open before OP -> jump to start of OP
+    elseif op_start and pos < op_start then
+        mp.commandv("seek", op_start + 0.2, "absolute", "exact")
+        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Jumped to Opening", 2.0)
     else
+        -- General anime song skip (+85s)
         mp.commandv("seek", 85, "relative", "exact")
-        mp.osd_message("{\\an8\\pos(0,40)\\b1\\fs22\\bord2.5\\shad1.5\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped OP/ED {\\c&HE2EDF7&}(+85s)", 2.0)
+        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped +85s", 2.0)
     end
-end)
-
--- 4. Floating On-Screen Skip Pill during OP/ED Chapters
-local skip_overlay = nil
-if mp.create_osd_overlay then
-    skip_overlay = mp.create_osd_overlay("ass-events")
+    update_state()
 end
 
-local function check_chapter()
-    if not skip_overlay then return end
-    local ch_title = mp.get_property("chapter-metadata/by-key/title", "")
-    if is_oped(ch_title) then
-        local label = ch_title ~= "" and ch_title or "Opening/Ending"
-        skip_overlay.data = "{\\an9\\pos(1870,24)\\b1\\fs22\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}[ ⏭ Skip " .. label .. " (Tab) ]"
-        skip_overlay:update()
-    else
-        skip_overlay:remove()
-    end
-end
+mp.add_forced_key_binding("Tab", "kura_skip_oped", trigger_skip)
 
-mp.observe_property("chapter", "number", function()
-    check_chapter()
-end)
+-- Continuously observe time-pos and chapter to toggle the skip button
+mp.observe_property("time-pos", "number", update_state)
+mp.observe_property("chapter", "number", update_state)
 "#;
 
     std::fs::write(&path, SCRIPT)?;
@@ -1216,7 +1325,7 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
 
             // Kura custom styling & Lua integration
             if let Ok(script_path) = ensure_kura_mpv_script(&st.data_dir) {
-                cmd.arg(format!("--scripts-add={}", script_path.display()));
+                cmd.arg(format!("--script={}", script_path.display()));
             }
             cmd.args([
                 "--osd-font=sans-serif",
@@ -1235,7 +1344,7 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
                 "--sub-border-size=2.5",
                 "--sub-shadow-offset=1.2",
                 "--sub-shadow-color=#140C0D",
-                "--script-opts-append=osc-layout=bottombar,osc-seekbarstyle=bar,osc-seekrangestyle=bar,osc-deadzonesize=0.5,osc-minmousemove=3",
+                "--script-opts=osc-layout=bottombar,osc-seekbarstyle=bar,osc-seekrangestyle=bar,osc-deadzonesize=0.5,osc-minmousemove=3",
             ]);
 
             cmd.arg("--").arg(&ep.path);
