@@ -10,6 +10,8 @@
   import Toasts from "$lib/components/Toasts.svelte";
   import MpvInstallModal from "$lib/components/MpvInstallModal.svelte";
   import { mpvModal } from "$lib/mpvModal.svelte";
+  import ChangelogModal from "$lib/components/ChangelogModal.svelte";
+  import { changelogModal } from "$lib/changelogModal.svelte";
 
   let { children } = $props();
   let main: HTMLElement | undefined = $state();
@@ -20,6 +22,7 @@
       (await import("$lib/dev/mock")).installMock();
     }
     await app.init();
+    await changelogModal.checkOnLaunch();
     mpvModal.checkInitialLaunch();
   });
 
@@ -39,6 +42,7 @@
   </main>
   <Toasts />
   <MpvInstallModal />
+  <ChangelogModal />
 </div>
 
 <style>

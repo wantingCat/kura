@@ -91,12 +91,15 @@ pub fn create_library(st: St, name: String, folders: Vec<String>) -> CmdResult<i
             .map_err(err)?;
     }
     st.watcher.reload();
+    drop(conn);
+    db::backup_user_data(&st.db(), &st.data_dir);
     Ok(id)
 }
 
 #[tauri::command]
 pub fn rename_library(st: St, id: i64, name: String) -> CmdResult<()> {
     st.db().execute("UPDATE libraries SET name = ?2 WHERE id = ?1", params![id, name.trim()]).map_err(err)?;
+    db::backup_user_data(&st.db(), &st.data_dir);
     Ok(())
 }
 
@@ -105,6 +108,7 @@ pub fn delete_library(app: AppHandle, st: St, id: i64) -> CmdResult<()> {
     st.db().execute("DELETE FROM libraries WHERE id = ?1", [id]).map_err(err)?;
     st.watcher.reload();
     let _ = app.emit("library-changed", ());
+    db::backup_user_data(&st.db(), &st.data_dir);
     Ok(())
 }
 
@@ -114,6 +118,7 @@ pub fn add_folder(st: St, library_id: i64, path: String) -> CmdResult<()> {
         .execute("INSERT OR IGNORE INTO library_folders (library_id, path) VALUES (?1, ?2)", params![library_id, path])
         .map_err(err)?;
     st.watcher.reload();
+    db::backup_user_data(&st.db(), &st.data_dir);
     Ok(())
 }
 
@@ -136,6 +141,8 @@ pub fn remove_folder(app: AppHandle, st: St, folder_id: i64) -> CmdResult<()> {
         st.watcher.reload();
     }
     let _ = app.emit("library-changed", ());
+    drop(conn);
+    db::backup_user_data(&st.db(), &st.data_dir);
     Ok(())
 }
 
@@ -1154,13 +1161,37 @@ pub fn get_new_episodes(st: St, limit: Option<usize>) -> CmdResult<Vec<UpNextIte
 #[tauri::command]
 pub fn get_prefs(st: St) -> CmdResult<HashMap<String, String>> {
     let conn = st.db();
+    let _ = db::seed_default_prefs_if_missing(&conn);
     let mut stmt = conn.prepare("SELECT key, value FROM settings WHERE key LIKE 'pref.%'").map_err(err)?;
-    let rows = stmt
+    let mut rows: HashMap<String, String> = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
         .map_err(err)?
         .flatten()
         .map(|(k, v)| (k.trim_start_matches("pref.").to_string(), v))
         .collect();
+
+    // Guarantee default values for all known preferences so nothing reverts on updates
+    let defaults = [
+        ("theme", "comic"),
+        ("player", "mpv"),
+        ("audio_lang", "jpn"),
+        ("sub_lang", "jpn"),
+        ("sub_fallback", "eng"),
+        ("watched_threshold", "90"),
+        ("resume", "1"),
+        ("autoplay", "1"),
+        ("group_seasons", "1"),
+        ("auto_update", "1"),
+        ("folder_watcher", "1"),
+        ("discord_rpc", "1"),
+        ("discord_spoilers", "0"),
+        ("discord_buttons", "1"),
+        ("mpc_port", "13579"),
+    ];
+    for (k, v) in defaults {
+        rows.entry(k.to_string()).or_insert_with(|| v.to_string());
+    }
+
     Ok(rows)
 }
 
@@ -1173,6 +1204,7 @@ pub fn set_pref(st: St, key: String, value: String) -> CmdResult<()> {
     if key == "folder_watcher" {
         st.watcher.reload();
     }
+    db::backup_user_data(&st.db(), &st.data_dir);
     Ok(())
 }
 

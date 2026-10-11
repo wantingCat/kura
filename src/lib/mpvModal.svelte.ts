@@ -22,9 +22,14 @@ class MpvModalState {
     this.progressMessage = null;
   }
 
-  dismissPermanently() {
+  async dismissPermanently() {
+    try {
+      await api.setPref("mpv_prompt_dismissed", "1");
+    } catch {}
     if (typeof localStorage !== "undefined") {
-      localStorage.setItem("kura_mpv_prompt_dismissed", "true");
+      try {
+        localStorage.setItem("kura_mpv_prompt_dismissed", "true");
+      } catch {}
     }
     this.close();
   }
@@ -40,9 +45,18 @@ class MpvModalState {
   }
 
   async checkInitialLaunch() {
+    // Check local storage fast-path
     if (typeof localStorage !== "undefined" && localStorage.getItem("kura_mpv_prompt_dismissed") === "true") {
       return;
     }
+    // Check persistent database preferences
+    try {
+      const prefs = await api.getPrefs();
+      if (prefs.mpv_prompt_dismissed === "1") {
+        return;
+      }
+    } catch {}
+
     try {
       const s = await api.checkMpvStatus();
       this.status = s;

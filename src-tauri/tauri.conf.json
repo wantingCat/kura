@@ -53,6 +53,7 @@
         "installMode": "currentUser"
       },
       "wix": {
+        "upgradeCode": "92E2D647-73B8-43C4-9721-6A26A2DBA8BC",
         "bannerPath": "installer/wix-banner.bmp",
         "dialogImagePath": "installer/wix-dialog.bmp"
       }

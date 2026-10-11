@@ -3,7 +3,8 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE libraries (
@@ -173,7 +174,204 @@ pub fn open(path: &Path) -> Result<Connection> {
     )?;
     migrate(&conn)?;
     let _ = conn.execute("UPDATE media SET logo_url = NULL, logo_path = NULL WHERE logo_url LIKE '%/icons/%'", []);
+
+    // Check if user data needs to be restored from persistent backup
+    let data_dir = path.parent().unwrap_or(Path::new("."));
+    let restored = restore_user_data_if_needed(&conn, data_dir).unwrap_or(false);
+    let _ = seed_default_prefs_if_missing(&conn);
+    if !restored {
+        backup_user_data(&conn, data_dir);
+    }
+
     Ok(conn)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupLibrary {
+    pub name: String,
+    pub kind: String,
+    pub folders: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserDataBackup {
+    pub version: u32,
+    pub updated_at: i64,
+    pub settings: HashMap<String, String>,
+    pub libraries: Vec<BackupLibrary>,
+}
+
+fn get_backup_paths(data_dir: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![data_dir.join("kura_backup.json")];
+
+    #[cfg(windows)]
+    {
+        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+            paths.push(PathBuf::from(user_profile).join(".kura").join("kura_backup.json"));
+        }
+        if let Some(app_data) = std::env::var_os("APPDATA") {
+            paths.push(PathBuf::from(app_data).join("Kura").join("kura_backup.json"));
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            paths.push(PathBuf::from(home).join(".kura").join("kura_backup.json"));
+            paths.push(PathBuf::from(home).join(".config").join("kura").join("kura_backup.json"));
+        }
+    }
+
+    paths
+}
+
+pub fn backup_user_data(conn: &Connection, data_dir: &Path) {
+    let _ = (|| -> Result<()> {
+        let mut settings_stmt = conn.prepare("SELECT key, value FROM settings")?;
+        let settings_map: HashMap<String, String> = settings_stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .flatten()
+            .collect();
+
+        let mut lib_stmt = conn.prepare("SELECT id, name, kind FROM libraries")?;
+        let mut libraries = Vec::new();
+        let lib_rows = lib_stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        for lib_res in lib_rows.flatten() {
+            let (lib_id, name, kind) = lib_res;
+            let mut folder_stmt =
+                conn.prepare("SELECT path FROM library_folders WHERE library_id = ?1")?;
+            let folders: Vec<String> = folder_stmt
+                .query_map([lib_id], |r| r.get(0))?
+                .flatten()
+                .collect();
+            libraries.push(BackupLibrary {
+                name,
+                kind,
+                folders,
+            });
+        }
+
+        // Never overwrite a good backup with an empty database
+        if settings_map.is_empty() && libraries.is_empty() {
+            return Ok(());
+        }
+
+        let backup = UserDataBackup {
+            version: 1,
+            updated_at: now(),
+            settings: settings_map,
+            libraries,
+        };
+
+        let json = serde_json::to_string_pretty(&backup)?;
+        let backup_paths = get_backup_paths(data_dir);
+        for path in backup_paths {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, &json);
+        }
+        Ok(())
+    })();
+}
+
+pub fn restore_user_data_if_needed(conn: &Connection, data_dir: &Path) -> Result<bool> {
+    let settings_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM settings WHERE key LIKE 'pref.%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let libraries_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM libraries", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    // If we already have preferences and libraries, nothing to restore.
+    if settings_count > 0 && libraries_count > 0 {
+        return Ok(false);
+    }
+
+    let backup_paths = get_backup_paths(data_dir);
+    for path in backup_paths {
+        if path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(backup) = serde_json::from_str::<UserDataBackup>(&content) {
+                    let mut restored_something = false;
+
+                    // Restore settings if empty
+                    if settings_count == 0 && !backup.settings.is_empty() {
+                        for (k, v) in &backup.settings {
+                            let _ = conn.execute(
+                                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                                params![k, v],
+                            );
+                        }
+                        restored_something = true;
+                    }
+
+                    // Restore libraries if empty
+                    if libraries_count == 0 && !backup.libraries.is_empty() {
+                        for lib in &backup.libraries {
+                            let _ = conn.execute(
+                                "INSERT INTO libraries (name, kind, created_at) VALUES (?1, ?2, ?3)",
+                                params![lib.name, lib.kind, now()],
+                            );
+                            let lib_id = conn.last_insert_rowid();
+                            for folder in &lib.folders {
+                                let _ = conn.execute(
+                                    "INSERT OR IGNORE INTO library_folders (library_id, path) VALUES (?1, ?2)",
+                                    params![lib_id, folder],
+                                );
+                            }
+                        }
+                        restored_something = true;
+                    }
+
+                    if restored_something {
+                        eprintln!("[kura] restored user data from backup: {:?}", path);
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+pub fn seed_default_prefs_if_missing(conn: &Connection) -> Result<()> {
+    let defaults = [
+        ("pref.theme", "comic"),
+        ("pref.player", "mpv"),
+        ("pref.audio_lang", "jpn"),
+        ("pref.sub_lang", "jpn"),
+        ("pref.sub_fallback", "eng"),
+        ("pref.watched_threshold", "90"),
+        ("pref.resume", "1"),
+        ("pref.autoplay", "1"),
+        ("pref.group_seasons", "1"),
+        ("pref.auto_update", "1"),
+        ("pref.folder_watcher", "1"),
+        ("pref.discord_rpc", "1"),
+        ("pref.discord_spoilers", "0"),
+        ("pref.discord_buttons", "1"),
+        ("pref.mpc_port", "13579"),
+    ];
+
+    for (k, v) in defaults {
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key, value) VALUES (?1, ?2)",
+            params![k, v],
+        )?;
+    }
+    Ok(())
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
@@ -336,4 +534,67 @@ pub fn set_media_track_pref(conn: &Connection, anilist_id: i64, pref: Option<Med
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_seed_defaults_preserves_custom_and_adds_missing() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+
+        // Simulate user having custom dark theme and custom threshold
+        set_setting(&conn, "pref.theme", "manga").unwrap();
+        set_setting(&conn, "pref.watched_threshold", "85").unwrap();
+
+        seed_default_prefs_if_missing(&conn).unwrap();
+
+        // Custom prefs must be preserved
+        assert_eq!(get_setting(&conn, "pref.theme").unwrap(), Some("manga".into()));
+        assert_eq!(get_setting(&conn, "pref.watched_threshold").unwrap(), Some("85".into()));
+
+        // Default prefs must be populated
+        assert_eq!(get_setting(&conn, "pref.player").unwrap(), Some("mpv".into()));
+        assert_eq!(get_setting(&conn, "pref.audio_lang").unwrap(), Some("jpn".into()));
+    }
+
+    #[test]
+    fn test_backup_and_restore_user_data() {
+        let temp_dir = std::env::temp_dir().join(format!("kura_test_{}", now()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. Initial db with user libraries & prefs
+        let conn1 = Connection::open_in_memory().unwrap();
+        conn1.execute_batch(SCHEMA_V1).unwrap();
+        set_setting(&conn1, "pref.player", "mpv").unwrap();
+        set_setting(&conn1, "pref.theme", "manga").unwrap();
+        conn1.execute("INSERT INTO libraries (id, name, kind, created_at) VALUES (1, 'Anime', 'anime', ?1)", [now()]).unwrap();
+        conn1.execute("INSERT INTO library_folders (library_id, path) VALUES (1, 'C:\\AnimeFolder')", []).unwrap();
+
+        // Trigger backup
+        backup_user_data(&conn1, &temp_dir);
+
+        let backup_file = temp_dir.join("kura_backup.json");
+        assert!(backup_file.is_file(), "Backup file should be created");
+
+        // 2. New blank database (simulating upgrade or wiped db)
+        let conn2 = Connection::open_in_memory().unwrap();
+        conn2.execute_batch(SCHEMA_V1).unwrap();
+
+        let restored = restore_user_data_if_needed(&conn2, &temp_dir).unwrap();
+        assert!(restored, "Should restore from backup");
+
+        assert_eq!(get_setting(&conn2, "pref.player").unwrap(), Some("mpv".into()));
+        assert_eq!(get_setting(&conn2, "pref.theme").unwrap(), Some("manga".into()));
+
+        let lib_name: String = conn2.query_row("SELECT name FROM libraries WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(lib_name, "Anime");
+
+        let folder_path: String = conn2.query_row("SELECT path FROM library_folders WHERE library_id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(folder_path, "C:\\AnimeFolder");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

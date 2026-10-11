@@ -9,6 +9,7 @@
   import Icon from "$lib/components/Icon.svelte";
   import NewLibraryForm from "$lib/components/NewLibraryForm.svelte";
   import { mpvModal } from "$lib/mpvModal.svelte";
+  import { changelogModal } from "$lib/changelogModal.svelte";
   import {
     AUDIO_LANG_OPTIONS,
     SUB_LANG_OPTIONS,
@@ -838,15 +839,25 @@
               {:else}Updates come from the GitHub releases page.{/if}
             </small>
           </div>
-          <button
-            class="btn btn-sm"
-            onclick={() => ((updater.dismissed = false), updater.check({ silent: false }))}
-            disabled={updater.status === "checking" || updater.status === "downloading"}
-            id="update-check"
-          >
-            {#if updater.status === "checking"}<span class="spinner"></span>{:else}<Icon name="refresh" size={14} />{/if}
-            Check now
-          </button>
+          <div class="row-actions">
+            <button
+              class="btn btn-sm btn-ghost"
+              onclick={() => changelogModal.open()}
+              id="view-changelog"
+              title="View What's New changelog"
+            >
+              <Icon name="sparkles" size={14} /> What's New
+            </button>
+            <button
+              class="btn btn-sm"
+              onclick={() => ((updater.dismissed = false), updater.check({ silent: false }))}
+              disabled={updater.status === "checking" || updater.status === "downloading"}
+              id="update-check"
+            >
+              {#if updater.status === "checking"}<span class="spinner"></span>{:else}<Icon name="refresh" size={14} />{/if}
+              Check now
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -1369,6 +1380,12 @@
     gap: 20px;
     padding: 14px 0;
     border-top: 1.5px solid var(--border);
+  }
+  .row-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
   }
   .rows .row:first-child {
     border-top: none;

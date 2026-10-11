@@ -134,7 +134,7 @@ class AppStore {
     this.scanning = await api.isScanning();
     try {
       const prefs = await api.getPrefs();
-      if (prefs.theme === "manga" || prefs.theme === "comic") {
+      if (prefs.theme === "comic" || prefs.theme === "manga") {
         this.theme = prefs.theme;
         this.applyTheme(this.theme);
       }
