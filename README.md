@@ -5,7 +5,7 @@
   <br>
   <strong>A local-first, manga-styled desktop anime media library.</strong>
   <br>
-  <em>Current Release: <code>v0.3.3-alpha</code> · Built with AI assistance</em>
+  <em>Current Release: <code>v0.3.4-alpha</code> · Built with AI assistance</em>
 </p>
 
 ---
@@ -35,11 +35,17 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 
 ## ✨ Features
 
-### New in `v0.3.3-alpha`
+### New in `v0.3.4-alpha`
+- **Interactive Clickable Skip Button in MPV**: Floating on-screen `[ ⏭ SKIP OPENING (Click or Tab) ]` overlay rendered directly on MPV with real-time mouse hover tracking, glowing coral aesthetics, and click-to-skip.
+- **Frame-Accurate AniSkip API Integration**: Synchronizes with the AniSkip database to identify OP and ED timestamps down to the millisecond, paired with intelligent duration verification ($85\text{s}-95\text{s}$) to avoid false-positive chapter skips on cold opens and prologues.
+- **What's New Changelog Popup**: First-launch version detection presenting an in-app changelog modal on updates, with past release history tabs and a manual "What's New" button in Settings.
+- **Settings & Library Persistence Across Upgrades**: Fixed WiX `upgradeCode` and implemented automated JSON backups (`kura_backup.json`) that preserve your settings, libraries, and theme across every update or reinstall.
+- **First-Launch MPV Assistant**: Detects player readiness on initial launch and offers automated one-click installation via Winget or Chocolatey.
+
+### Highlights from `v0.3.3-alpha`
 - **Live Folder Watcher & Background Rescan**: Automatically monitors all configured library roots in the background using native recursive filesystem events (`notify`). Features a 3-second debounce window with file write lock and size stability checks to safely ingest finished downloads without premature reading.
 - **Sub-10ms Targeted Ingestion**: Automatically matches and resolves new episodes of existing series instantly (< 10ms) without full scans or redundant API requests. Also auto-cleans deleted files and detects local artwork drops (`clearlogo.png`, `fanart.jpg`).
 - **Discord Rich Presence (RPC)**: Native Tokio async IPC client broadcasting Activity Type 3 ("Watching Kura") on your Discord profile, complete with anime title, episode number/title, live remaining time countdown bar, cover artwork, and interactive AniList/GitHub action buttons.
-- **Interactive Play Launch Indicators**: Clicking Play instantly transforms the button into a spinning loader (`Launching player…`) before seamlessly transitioning into an animated audio equalizer badge (`Now Playing · Ep X`) once playback starts.
 
 ### Highlights from `v0.3.2-alpha`
 - **Transparent ClearArt / Logos on Backdrops**: Displays high-resolution series typography wordmarks and ClearArt on the cinematic backdrop, powered by Fanart.tv and local folder artwork (`clearlogo.png` / `logo.png`).

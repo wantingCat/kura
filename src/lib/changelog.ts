@@ -16,12 +16,12 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
-    version: "0.3.3",
-    title: "The Immersion, Skip Overlay & Precision Update",
+    version: "0.3.4",
+    title: "Interactive Skip Overlay & Settings Persistence",
     date: "October 2026",
-    badge: "Current",
+    badge: "Latest",
     summary:
-      "Direct interactive Skip OP/ED button in MPV, frame-accurate AniSkip integration, smart cold open detection, live folder watcher, and bulletproof settings persistence.",
+      "Direct interactive Skip OP/ED button in MPV with mouse click & hover tracking, frame-accurate AniSkip API integration, smart cold open detection, What's New popup, and bulletproof settings persistence.",
     items: [
       {
         type: "new",
@@ -33,19 +33,11 @@ export const CHANGELOG: ChangelogRelease[] = [
       },
       {
         type: "new",
-        text: "Automatic Settings & Library Persistence: your preferences, libraries, and theme are now preserved across app updates and reinstalls.",
+        text: "Automatic Settings & Library Persistence: fixed WiX upgrade GUID and added automated JSON backups so your settings, libraries, and theme survive all updates.",
       },
       {
         type: "new",
         text: "What's New changelog popup on new version launches, accessible anytime from Settings.",
-      },
-      {
-        type: "new",
-        text: "Live folder watcher (auto-rescan) with recursive file-lock debounce that auto-ingests newly downloaded or renamed episodes in real time.",
-      },
-      {
-        type: "new",
-        text: "Discord Rich Presence (RPC) showing your anime title, episode number, cover art, and elapsed time.",
       },
       {
         type: "improvement",
@@ -62,6 +54,27 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         type: "fix",
         text: "Fixed chapter scan fallback so non-opening scenes aren't skipped.",
+      },
+    ],
+  },
+  {
+    version: "0.3.3",
+    title: "Social & Real-Time Tracking",
+    date: "October 2026",
+    summary:
+      "Discord Rich Presence (RPC), background live folder watcher with debounced file locks, and targeted sub-10ms episode ingestion.",
+    items: [
+      {
+        type: "new",
+        text: "Discord Rich Presence (RPC) showing your anime title, episode number, cover art, and elapsed time.",
+      },
+      {
+        type: "new",
+        text: "Live folder watcher (auto-rescan) with recursive file-lock debounce that auto-ingests newly downloaded or renamed episodes in real time.",
+      },
+      {
+        type: "improvement",
+        text: "Interactive Play launch indicators transitioning from loader to animated equalizer badge.",
       },
     ],
   },

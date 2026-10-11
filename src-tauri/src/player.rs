@@ -989,7 +989,7 @@ pub async fn fetch_aniskip(client: &reqwest::Client, mal_id: i64, ep_num: i64) -
     let url = format!("https://api.aniskip.com/v2/skip-times/{mal_id}/{ep_num}?types=op&types=ed&episodeLength=0");
     let resp = client
         .get(&url)
-        .header("User-Agent", "Kura/0.3.3")
+        .header("User-Agent", "Kura/0.3.4")
         .timeout(Duration::from_millis(2000))
         .send()
         .await

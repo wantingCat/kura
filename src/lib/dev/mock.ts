@@ -375,7 +375,7 @@ export function installMock() {
           );
           return null;
         case "plugin:app|version":
-          return "0.3.3";
+          return "0.3.4";
         default:
           console.info("[preview] ignored command", cmd, a);
           return null;
