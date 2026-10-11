@@ -437,7 +437,7 @@ pub fn ensure_kura_mpv_script(data_dir: &std::path::Path) -> Result<PathBuf> {
     let path = dir.join("kura-theme.lua");
 
     const SCRIPT: &str = r#"-- Kura MPV Theme & Integration Script
--- Provides Kura-styled OSD notifications, ASS overlays, OP/ED skipping, and subtitle adjustments.
+-- Provides Kura-styled OSD notifications, clickable ASS skip button, OP/ED skipping, and subtitle adjustments.
 
 local mp = require 'mp'
 
@@ -445,6 +445,7 @@ local mp = require 'mp'
 -- Coral: #F76D4D -> &H4D6DF7&
 -- Plum:  #140C0D -> &H0D0C14&
 -- Cream: #F7EDE2 -> &HE2EDF7&
+-- White: #FFFFFF -> &HFFFFFF&
 
 local skip_overlay = nil
 if mp.create_osd_overlay then
@@ -457,28 +458,44 @@ local op_start = nil
 local op_end = nil
 local ed_start = nil
 local ed_end = nil
+local aniskip_received = false
 local chapters_scanned = false
 local current_button = nil
+local is_hovered = false
+local mouse_bound = false
+
+local update_state = nil
+
+local function is_intro(title)
+    if not title or title == "" then return false end
+    local s = string.lower(title):gsub("^%s*(.-)%s*$", "%1")
+    return s == "intro" or s == "prologue" or s == "avant" or s == "アバン" or
+           string.find(s, "prologue") ~= nil or string.find(s, "cold open") ~= nil
+end
 
 local function is_op(title)
     if not title or title == "" then return false end
     local s = string.lower(title):gsub("^%s*(.-)%s*$", "%1")
-    if s == "op" or s == "ncop" or s == "opening" then return true end
+    if is_intro(s) then return false end
+    if s == "op" or s == "ncop" or s == "opening" or s == "オープニング" then return true end
     if string.find(s, "^op[%s%d%-_]") or string.find(s, "[%s%-_%(%[]op[%s%d%-_%)%]]") or string.find(s, "[%s%-_%(%[]op$") then return true end
-    if string.find(s, "opening") or string.find(s, "ncop") or string.find(s, "theme song") then return true end
+    if string.find(s, "opening") or string.find(s, "ncop") or string.find(s, "theme song") or string.find(s, "オープニング") then return true end
     return false
 end
 
 local function is_ed(title)
     if not title or title == "" then return false end
     local s = string.lower(title):gsub("^%s*(.-)%s*$", "%1")
-    if s == "ed" or s == "nced" or s == "ending" then return true end
+    if is_intro(s) then return false end
+    if s == "ed" or s == "nced" or s == "ending" or s == "エンディング" then return true end
     if string.find(s, "^ed[%s%d%-_]") or string.find(s, "[%s%-_%(%[]ed[%s%d%-_%)%]]") or string.find(s, "[%s%-_%(%[]ed$") then return true end
-    if string.find(s, "ending") or string.find(s, "nced") or string.find(s, "credits") or string.find(s, "credit") or string.find(s, "preview") or string.find(s, "pv") then return true end
+    if string.find(s, "ending") or string.find(s, "nced") or string.find(s, "credits") or string.find(s, "credit") or string.find(s, "preview") or string.find(s, "pv") or string.find(s, "エンディング") then return true end
     return false
 end
 
 local function scan_chapters()
+    if aniskip_received then return end
+
     op_start = nil
     op_end = nil
     ed_start = nil
@@ -487,6 +504,7 @@ local function scan_chapters()
     local ch_count = mp.get_property_number("chapters", 0)
     local dur = mp.get_property_number("duration", 0.0)
 
+    -- Phase 1: Named Chapter Recognition
     for i = 0, ch_count - 1 do
         local title = mp.get_property(string.format("chapter-list/%d/title", i), "")
         local time = mp.get_property_number(string.format("chapter-list/%d/time", i), 0.0)
@@ -506,38 +524,184 @@ local function scan_chapters()
         end
     end
 
-    -- Fallback for anime episodes without named chapters:
-    -- Standard anime OP is around 10s-100s, ED is ~90s before end
-    if not op_start and dur > 300 then
-        op_start = 10.0
-        op_end = 100.0
-    end
-    if not ed_start and dur > 300 then
-        ed_start = dur - 105.0
-        ed_end = dur - 15.0
+    -- Phase 2: Strict 90-Second Rule for Generic Chapters ("Chapter 1", "Chapter 2", etc.)
+    -- Anime OP and ED songs are standard ~90 seconds (85s to 95s).
+    if (not op_start or not ed_start) and ch_count > 0 then
+        for i = 0, ch_count - 1 do
+            local title = mp.get_property(string.format("chapter-list/%d/title", i), "")
+            if not is_intro(title) then
+                local time = mp.get_property_number(string.format("chapter-list/%d/time", i), 0.0)
+                local next_time = nil
+                if i + 1 < ch_count then
+                    next_time = mp.get_property_number(string.format("chapter-list/%d/time", i + 1), nil)
+                elseif dur > 0 then
+                    next_time = dur
+                end
+
+                if next_time then
+                    local ch_len = next_time - time
+                    if ch_len >= 85 and ch_len <= 95 then
+                        if not op_start and time < (dur * 0.5) then
+                            op_start = time
+                            op_end = next_time
+                        elseif not ed_start and time >= (dur * 0.5) then
+                            ed_start = time
+                            ed_end = next_time
+                        end
+                    end
+                end
+            end
+        end
     end
 
     chapters_scanned = (ch_count > 0 or dur > 0)
 end
 
+-- IPC Script Message from Kura (AniSkip frame-perfect timestamps)
+mp.register_script_message("kura-skip-times", function(op_s, op_e, ed_s, ed_e)
+    local s_op = tonumber(op_s)
+    local e_op = tonumber(op_e)
+    local s_ed = tonumber(ed_s)
+    local e_ed = tonumber(ed_e)
+
+    if s_op and e_op and e_op > s_op then
+        op_start = s_op
+        op_end = e_op
+    end
+    if s_ed and e_ed and e_ed > s_ed then
+        ed_start = s_ed
+        ed_end = e_ed
+    end
+
+    aniskip_received = true
+    if update_state then
+        update_state()
+    end
+end)
+
+local function render_button()
+    if not skip_overlay or not current_button then return end
+
+    if is_hovered then
+        skip_overlay.data = string.format(
+            "{\\an3\\pos(1860,960)\\b1\\fs28\\bord4\\shad3\\3c&H4D6DF7&\\c&HFFFFFF&}[ ⏭ SKIP %s {\\fs22\\c&HFFFFFF&}(Click or Tab) ]",
+            current_button:upper()
+        )
+    else
+        skip_overlay.data = string.format(
+            "{\\an3\\pos(1860,960)\\b1\\fs28\\bord3.5\\shad2.5\\3c&H0D0C14&\\c&H4D6DF7&}[ ⏭ SKIP %s {\\fs22\\c&HE2EDF7&}(Tab) ]",
+            current_button:upper()
+        )
+    end
+    skip_overlay:update()
+end
+
 local function show_button(label)
     if not skip_overlay then return end
-    if current_button == label then return end
+    if current_button == label and not is_hovered then return end
     current_button = label
-    skip_overlay.data = string.format("{\\an3\\pos(1860,960)\\b1\\fs28\\bord3.5\\shad2.5\\3c&H0D0C14&\\c&H4D6DF7&}[ ⏭ SKIP %s {\\fs22\\c&HE2EDF7&}(Tab) ]", label:upper())
-    skip_overlay:update()
+    render_button()
 end
 
 local function hide_button()
     if not skip_overlay then return end
     if current_button ~= nil then
         current_button = nil
+        is_hovered = false
+        if mouse_bound then
+            mp.remove_key_binding("kura_skip_click")
+            mouse_bound = false
+        end
         skip_overlay:remove()
     end
 end
 
-local function update_state()
-    if not chapters_scanned then
+local function trigger_skip()
+    local pos = mp.get_property_number("time-pos", 0.0)
+
+    -- If inside or near Opening -> jump past OP
+    if op_start and op_end and pos < op_end and (pos >= (op_start - 2) or op_start <= 25) then
+        mp.commandv("seek", op_end + 0.5, "absolute", "exact")
+        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped Opening", 2.0)
+    -- If in Ending -> jump past ED
+    elseif ed_start and ed_end and pos >= (ed_start - 2) and pos < ed_end then
+        mp.commandv("seek", ed_end, "absolute", "exact")
+        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped Ending", 2.0)
+    -- If in cold open before OP -> jump directly to start of OP
+    elseif op_start and pos < op_start then
+        mp.commandv("seek", op_start + 0.2, "absolute", "exact")
+        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Jumped to Opening", 2.0)
+    else
+        -- General anime song skip (+85s)
+        mp.commandv("seek", 85, "relative", "exact")
+        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped +85s", 2.0)
+    end
+
+    hide_button()
+    if update_state then
+        update_state()
+    end
+end
+
+local function on_click()
+    trigger_skip()
+end
+
+local function check_mouse()
+    if not current_button then
+        if mouse_bound then
+            mp.remove_key_binding("kura_skip_click")
+            mouse_bound = false
+            is_hovered = false
+        end
+        return
+    end
+
+    local m = mp.get_property_native("mouse-pos")
+    local d = mp.get_property_native("osd-dimensions")
+    if not m or not d or not m.hover or d.w == 0 or d.h == 0 then
+        if is_hovered then
+            is_hovered = false
+            render_button()
+            if mouse_bound then
+                mp.remove_key_binding("kura_skip_click")
+                mouse_bound = false
+            end
+        end
+        return
+    end
+
+    local vid_w = d.w - d.ml - d.mr
+    local vid_h = d.h - d.mt - d.mb
+    if vid_w <= 0 or vid_h <= 0 then return end
+
+    local vx = ((m.x - d.ml) / vid_w) * 1920
+    local vy = ((m.y - d.mt) / vid_h) * 1080
+
+    -- Button bounding box at \an3\pos(1860, 960)
+    local in_box = (vx >= 1400 and vx <= 1880 and vy >= 890 and vy <= 975)
+
+    if in_box then
+        if not is_hovered then
+            is_hovered = true
+            render_button()
+            mp.add_forced_key_binding("MBTN_LEFT", "kura_skip_click", on_click)
+            mouse_bound = true
+        end
+    else
+        if is_hovered then
+            is_hovered = false
+            render_button()
+            if mouse_bound then
+                mp.remove_key_binding("kura_skip_click")
+                mouse_bound = false
+            end
+        end
+    end
+end
+
+update_state = function()
+    if not aniskip_received and not chapters_scanned then
         scan_chapters()
     end
 
@@ -559,7 +723,7 @@ local function update_state()
         return
     end
 
-    -- 3. At the start of the episode (first 15s) before a delayed OP (cold open / prologue)
+    -- 3. At the start of the episode (first 15s) when there is a delayed OP (cold open / prologue)
     if op_start and op_start > 25 and pos >= 0 and pos <= 15 then
         show_button("to Opening")
         return
@@ -570,6 +734,8 @@ end
 
 -- 1. Styled "Now Playing" Banner on file start
 mp.register_event("file-loaded", function()
+    aniskip_received = false
+    chapters_scanned = false
     scan_chapters()
     update_state()
     local title = mp.get_property("media-title", "")
@@ -594,34 +760,12 @@ mp.add_forced_key_binding("x", "kura_sub_delay_up", function()
 end)
 
 -- 3. Smart OP/ED Skip on 'Tab'
-local function trigger_skip()
-    local pos = mp.get_property_number("time-pos", 0.0)
-
-    -- If in Opening -> jump past OP
-    if op_start and op_end and pos < op_end and (pos >= (op_start - 2) or op_start <= 25) then
-        mp.commandv("seek", op_end + 0.5, "absolute", "exact")
-        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped Opening", 2.0)
-    -- If in Ending -> jump past ED
-    elseif ed_start and ed_end and pos >= (ed_start - 2) and pos < ed_end then
-        mp.commandv("seek", ed_end, "absolute", "exact")
-        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped Ending", 2.0)
-    -- If in cold open before OP -> jump to start of OP
-    elseif op_start and pos < op_start then
-        mp.commandv("seek", op_start + 0.2, "absolute", "exact")
-        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Jumped to Opening", 2.0)
-    else
-        -- General anime song skip (+85s)
-        mp.commandv("seek", 85, "relative", "exact")
-        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped +85s", 2.0)
-    end
-    update_state()
-end
-
 mp.add_forced_key_binding("Tab", "kura_skip_oped", trigger_skip)
 
--- Continuously observe time-pos and chapter to toggle the skip button
+-- Continuously observe time-pos, chapter, and mouse-pos
 mp.observe_property("time-pos", "number", update_state)
 mp.observe_property("chapter", "number", update_state)
+mp.observe_property("mouse-pos", "native", check_mouse)
 "#;
 
     std::fs::write(&path, SCRIPT)?;
@@ -833,6 +977,53 @@ struct Status {
     ended: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct AniSkipTimes {
+    pub op_start: Option<f64>,
+    pub op_end: Option<f64>,
+    pub ed_start: Option<f64>,
+    pub ed_end: Option<f64>,
+}
+
+pub async fn fetch_aniskip(client: &reqwest::Client, mal_id: i64, ep_num: i64) -> Option<AniSkipTimes> {
+    let url = format!("https://api.aniskip.com/v2/skip-times/{mal_id}/{ep_num}?types=op&types=ed&episodeLength=0");
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "Kura/0.3.3")
+        .timeout(Duration::from_millis(2000))
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let val: serde_json::Value = resp.json().await.ok()?;
+    if !val.get("found").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return None;
+    }
+
+    let results = val.get("results")?.as_array()?;
+    let mut skip = AniSkipTimes::default();
+
+    for item in results {
+        let skip_type = item.get("skipType").and_then(|s| s.as_str()).unwrap_or("");
+        let start = item.get("interval").and_then(|i| i.get("startTime")).and_then(|s| s.as_f64());
+        let end = item.get("interval").and_then(|i| i.get("endTime")).and_then(|e| e.as_f64());
+
+        if skip_type == "op" {
+            skip.op_start = start;
+            skip.op_end = end;
+        } else if skip_type == "ed" {
+            skip.ed_start = start;
+            skip.ed_end = end;
+        }
+    }
+
+    Some(skip)
+}
+
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
@@ -874,6 +1065,23 @@ impl Mpv {
         } else {
             Some(serde_json::Value::Null) // property unavailable (e.g. nothing loaded yet) — still connected
         }
+    }
+
+    async fn send_skip_times(&mut self, skip: AniSkipTimes) -> Option<()> {
+        let op_s = skip.op_start.map(|v| v.to_string()).unwrap_or_default();
+        let op_e = skip.op_end.map(|v| v.to_string()).unwrap_or_default();
+        let ed_s = skip.ed_start.map(|v| v.to_string()).unwrap_or_default();
+        let ed_e = skip.ed_end.map(|v| v.to_string()).unwrap_or_default();
+
+        self.call(serde_json::json!([
+            "script-message",
+            "kura-skip-times",
+            op_s,
+            op_e,
+            ed_s,
+            ed_e
+        ])).await?;
+        Some(())
     }
 }
 
@@ -1413,6 +1621,24 @@ async fn connect(p: &Pending) -> Option<Controller> {
     }
 }
 
+async fn sync_aniskip_to_player(ctl: &mut Controller, st: &AppState, ep: &Ep) {
+    if let Controller::Mpv(ref mut mpv) = ctl {
+        let http_client = reqwest::Client::builder().no_proxy().build().ok();
+        let mal_id: Option<i64> = st.db().query_row(
+            "SELECT id_mal FROM media WHERE anilist_id = ?1",
+            [ep.anilist_id],
+            |r| r.get(0),
+        ).ok().flatten();
+        let ep_num: Option<i64> = ep.ep_key.parse().ok();
+
+        if let (Some(ref client), Some(mid), Some(enum_val)) = (http_client.as_ref(), mal_id, ep_num) {
+            if let Some(skip) = fetch_aniskip(client, mid, enum_val).await {
+                let _ = mpv.send_skip_times(skip).await;
+            }
+        }
+    }
+}
+
 async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending: Pending, mut child: std::process::Child, session: u64) {
     let alive = |st: &AppState| st.play_session.load(Ordering::SeqCst) == session;
 
@@ -1440,6 +1666,9 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
         emit(&app, "untracked", p.kind, &ep, 0.0, 0.0, hint);
         return;
     };
+
+    // Dispatch AniSkip frame-perfect skip times to MPV
+    sync_aniskip_to_player(&mut ctl, &st, &ep).await;
 
     // 2. Poll.
     let (mut pos, mut dur) = (0.0_f64, 0.0_f64);
@@ -1524,6 +1753,7 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
                 break;
             }
             ep = next;
+            sync_aniskip_to_player(&mut ctl, &st, &ep).await;
             (pos, dur, marked) = (0.0, 0.0, false);
             loaded_at = std::time::Instant::now();
             sync_discord_activity(&st, &ep, 0.0, 0.0, true);
@@ -1726,5 +1956,17 @@ mod tests {
         let status = check_mpv_status();
         // Should not panic, returns valid flags
         println!("Detected mpv status: {:?}", status);
+    }
+
+    #[tokio::test]
+    async fn aniskip_fetch() {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        // Trapped in a Dating Sim S01E01 (MAL ID: 50461)
+        if let Some(skip) = fetch_aniskip(&client, 50461, 1).await {
+            assert!(skip.op_start.is_some());
+            assert!(skip.op_end.is_some());
+            let op_len = skip.op_end.unwrap() - skip.op_start.unwrap();
+            assert!((op_len - 90.0).abs() < 2.0);
+        }
     }
 }
