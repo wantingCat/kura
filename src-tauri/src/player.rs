@@ -94,8 +94,10 @@ fn known_locations(kind: Kind) -> Vec<PathBuf> {
         let roots: Vec<PathBuf> = [
             env("ProgramFiles"),
             env("ProgramFiles(x86)"),
+            env("ProgramW6432"),
             env("LOCALAPPDATA").map(|p| p.join("Programs")),
             env("LOCALAPPDATA").map(|p| p.join(r"Microsoft\WinGet\Links")),
+            env("ProgramFiles").map(|p| p.join(r"WinGet\Links")),
             Some(PathBuf::from(r"C:\ProgramData\chocolatey\bin")),
             Some(PathBuf::from(r"C:\ProgramData")),
             Some(PathBuf::from(r"C:\tools")),
@@ -106,6 +108,9 @@ fn known_locations(kind: Kind) -> Vec<PathBuf> {
         let sub: &[&str] = match kind {
             Kind::Mpv => &[
                 "mpv",
+                // winget `shinchiro.mpv` (Inno installer) uses this folder name.
+                "MPV Player",
+                "mpv-x86_64",
                 "mpv.net",
                 "",
                 r"chocolatey\lib\mpvio.install\tools",
@@ -139,6 +144,39 @@ fn known_locations(kind: Kind) -> Vec<PathBuf> {
                 }
             }
         }
+        // winget portable packages: <root>\WinGet\Packages\<Id>_<Source>\[subdir\]exe
+        let pkg_roots = [
+            env("LOCALAPPDATA").map(|p| p.join(r"Microsoft\WinGet\Packages")),
+            env("ProgramFiles").map(|p| p.join(r"WinGet\Packages")),
+        ];
+        for root in pkg_roots.into_iter().flatten() {
+            let Ok(entries) = std::fs::read_dir(&root) else { continue };
+            for e in entries.flatten() {
+                let dir = e.path();
+                let name = e.file_name().to_string_lossy().to_lowercase();
+                let wanted = match kind {
+                    Kind::Mpv => name.contains("mpv"),
+                    Kind::Vlc => name.contains("vlc"),
+                    Kind::Mpc => name.contains("mpc-"),
+                    Kind::Memento => name.contains("memento"),
+                    Kind::System => false,
+                };
+                if !wanted {
+                    continue;
+                }
+                for exe in exe_names(kind) {
+                    out.push(dir.join(exe));
+                    // One level of nesting (zip archives often contain a top folder).
+                    if let Ok(inner) = std::fs::read_dir(&dir) {
+                        for i in inner.flatten() {
+                            if i.path().is_dir() {
+                                out.push(i.path().join(exe));
+                            }
+                        }
+                    }
+                }
+            }
+        }
     } else if cfg!(target_os = "macos") {
         match kind {
             Kind::Mpv => {
@@ -154,9 +192,31 @@ fn known_locations(kind: Kind) -> Vec<PathBuf> {
     out
 }
 
+/// Directories on PATH. On Windows this also re-reads the *current* user and
+/// machine PATH from the registry: installers (winget, choco, scoop) update the
+/// registry, but Kura's own process PATH is a snapshot from when it (or Explorer)
+/// started, so newly installed players would otherwise stay invisible.
+fn path_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    #[cfg(windows)]
+    for raw in win::registry_path_values() {
+        for part in raw.split(';') {
+            let expanded = win::expand_env(part.trim());
+            if !expanded.is_empty() {
+                let p = PathBuf::from(expanded);
+                if !dirs.contains(&p) {
+                    dirs.push(p);
+                }
+            }
+        }
+    }
+    dirs
+}
+
 fn on_path(names: &[&str]) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
+    for dir in path_dirs() {
         for n in names {
             let p = dir.join(n);
             if p.is_file() {
@@ -168,40 +228,217 @@ fn on_path(names: &[&str]) -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
-fn query_app_path(exe: &str) -> Option<PathBuf> {
-    use std::os::windows::process::CommandExt;
-    for root in &["HKLM", "HKCU"] {
-        let key = format!(r"{root}\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}");
-        let mut cmd = std::process::Command::new("reg");
-        cmd.args(["query", &key, "/ve"]);
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        if let Ok(output) = cmd.output() {
-            if output.status.success() {
-                let text = String::from_utf8_lossy(&output.stdout);
-                for line in text.lines() {
-                    if let Some(pos) = line.find("REG_SZ") {
-                        let path_str = line[pos + 6..].trim();
-                        let p = PathBuf::from(path_str.trim_matches('"'));
-                        if p.is_file() {
+mod win {
+    use std::path::{Path, PathBuf};
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
+    use winreg::RegKey;
+
+    /// Expand `%VAR%` references (REG_EXPAND_SZ values are returned unexpanded).
+    pub fn expand_env(s: &str) -> String {
+        let mut out = String::new();
+        let mut rest = s;
+        while let Some(start) = rest.find('%') {
+            out.push_str(&rest[..start]);
+            let after = &rest[start + 1..];
+            match after.find('%') {
+                Some(end) => {
+                    let var = &after[..end];
+                    match std::env::var(var) {
+                        Ok(v) => out.push_str(&v),
+                        Err(_) => {
+                            out.push('%');
+                            out.push_str(var);
+                            out.push('%');
+                        }
+                    }
+                    rest = &after[end + 1..];
+                }
+                None => {
+                    out.push_str(&rest[start..]);
+                    rest = "";
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    pub fn registry_path_values() -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(k) = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Environment") {
+            if let Ok(v) = k.get_value::<String, _>("Path") {
+                out.push(v);
+            }
+        }
+        if let Ok(k) = RegKey::predef(HKEY_LOCAL_MACHINE)
+            .open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
+        {
+            if let Ok(v) = k.get_value::<String, _>("Path") {
+                out.push(v);
+            }
+        }
+        out
+    }
+
+    /// Turn a registry value like `"C:\x\mpv.exe",0` or `C:\x\mpv.exe "%1"` into a path.
+    fn exe_from_command(raw: &str) -> Option<PathBuf> {
+        let raw = expand_env(raw.trim());
+        let s = if let Some(stripped) = raw.strip_prefix('"') {
+            stripped.split('"').next()?.to_string()
+        } else {
+            let lower = raw.to_lowercase();
+            let end = lower.find(".exe").map(|i| i + 4).unwrap_or(raw.len());
+            raw[..end].to_string()
+        };
+        let s = s.split(',').next().unwrap_or(&s).trim().to_string();
+        (!s.is_empty()).then(|| PathBuf::from(s))
+    }
+
+    const VIEWS: [u32; 2] = [KEY_WOW64_64KEY, KEY_WOW64_32KEY];
+
+    /// `App Paths\<exe>` default value (HKLM + HKCU, both registry views).
+    pub fn app_path(exe: &str) -> Option<PathBuf> {
+        let sub = format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}");
+        for hive in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+            for view in VIEWS {
+                let Ok(k) = RegKey::predef(hive).open_subkey_with_flags(&sub, KEY_READ | view) else { continue };
+                if let Ok(v) = k.get_value::<String, _>("") {
+                    if let Some(p) = exe_from_command(&v).filter(|p| p.is_file()) {
+                        return Some(p);
+                    }
+                }
+                if let Ok(dir) = k.get_value::<String, _>("Path") {
+                    let p = Path::new(&expand_env(&dir)).join(exe);
+                    if p.is_file() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Scan installed-programs entries (what "Apps & features" shows) for a
+    /// matching DisplayName and resolve its InstallLocation / DisplayIcon.
+    pub fn uninstall_entries(name_hint: &str, exes: &[&str]) -> Option<PathBuf> {
+        let hint = name_hint.to_lowercase();
+        let sub = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
+        for hive in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+            for view in VIEWS {
+                let Ok(root) = RegKey::predef(hive).open_subkey_with_flags(sub, KEY_READ | view) else { continue };
+                for key_name in root.enum_keys().flatten() {
+                    let Ok(app) = root.open_subkey_with_flags(&key_name, KEY_READ | view) else { continue };
+                    let display: String = app.get_value("DisplayName").unwrap_or_default();
+                    // First word only: "MPV Player", "mpv.net", "VLC media player", "MPC-HC"…
+                    // but not "Memento - An mpv-based video player".
+                    let first_word = |s: &str| {
+                        s.to_lowercase()
+                            .split(|c: char| !c.is_alphanumeric())
+                            .find(|w| !w.is_empty())
+                            .map(str::to_string)
+                    };
+                    let matches = first_word(&display).as_deref() == Some(hint.as_str())
+                        || (display.is_empty() && first_word(&key_name).as_deref() == Some(hint.as_str()));
+                    if !matches {
+                        continue;
+                    }
+                    if let Ok(loc) = app.get_value::<String, _>("InstallLocation") {
+                        let dir = PathBuf::from(expand_env(loc.trim().trim_matches('"')));
+                        for exe in exes {
+                            let p = dir.join(exe);
+                            if p.is_file() {
+                                return Some(p);
+                            }
+                        }
+                    }
+                    for value in ["DisplayIcon", "UninstallString"] {
+                        let Ok(v) = app.get_value::<String, _>(value) else { continue };
+                        let Some(p) = exe_from_command(&v) else { continue };
+                        let fname = p.file_name().map(|f| f.to_string_lossy().to_lowercase()).unwrap_or_default();
+                        if exes.iter().any(|e| e.eq_ignore_ascii_case(&fname)) && p.is_file() {
                             return Some(p);
+                        }
+                        // e.g. UninstallString points at unins000.exe in the app folder.
+                        if let Some(dir) = p.parent() {
+                            for exe in exes {
+                                let c = dir.join(exe);
+                                if c.is_file() {
+                                    return Some(c);
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+        None
     }
-    None
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn parses_registry_commands() {
+            assert_eq!(
+                exe_from_command(r#""C:\Program Files\MPV Player\mpv.exe",0"#),
+                Some(PathBuf::from(r"C:\Program Files\MPV Player\mpv.exe"))
+            );
+            assert_eq!(
+                exe_from_command(r#"C:\Program Files\MPV Player\mpv.exe "%1""#),
+                Some(PathBuf::from(r"C:\Program Files\MPV Player\mpv.exe"))
+            );
+            assert_eq!(
+                exe_from_command(r#""C:\Program Files\MPV Player\unins000.exe""#),
+                Some(PathBuf::from(r"C:\Program Files\MPV Player\unins000.exe"))
+            );
+        }
+
+        #[test]
+        fn expands_env_vars() {
+            std::env::set_var("KURA_TEST_DIR", r"C:\kura");
+            assert_eq!(expand_env(r"%KURA_TEST_DIR%\bin"), r"C:\kura\bin");
+            assert_eq!(expand_env(r"%NOPE_NOT_SET%\x"), r"%NOPE_NOT_SET%\x");
+            assert_eq!(expand_env("plain"), "plain");
+        }
+    }
 }
 
 pub fn detect(kind: Kind) -> Option<PathBuf> {
+    let exes = exe_names(kind);
+    if exes.is_empty() {
+        return None;
+    }
+
     #[cfg(windows)]
-    for exe in exe_names(kind) {
-        if let Some(p) = query_app_path(exe) {
+    for exe in exes {
+        if let Some(p) = win::app_path(exe) {
             return Some(p);
         }
     }
 
-    known_locations(kind).into_iter().find(|p| p.is_file()).or_else(|| on_path(exe_names(kind)))
+    if let Some(p) = known_locations(kind).into_iter().find(|p| p.is_file()) {
+        return Some(p);
+    }
+    if let Some(p) = on_path(exes) {
+        return Some(p);
+    }
+
+    // Last resort: whatever "Apps & features" knows about (any installer, any folder).
+    #[cfg(windows)]
+    {
+        let hint = match kind {
+            Kind::Mpv => "mpv",
+            Kind::Vlc => "vlc",
+            Kind::Mpc => "mpc",
+            Kind::Memento => "memento",
+            Kind::System => return None,
+        };
+        if let Some(p) = win::uninstall_entries(hint, exes) {
+            return Some(p);
+        }
+    }
+    None
 }
 
 pub fn detect_all() -> Vec<Detected> {
@@ -316,6 +553,8 @@ pub async fn install_mpv(app: AppHandle, st: Arc<AppState>) -> Result<InstallMpv
                         "--id",
                         "shinchiro.mpv",
                         "-e",
+                        "--source",
+                        "winget",
                         "--accept-source-agreements",
                         "--accept-package-agreements",
                     ])
@@ -323,8 +562,10 @@ pub async fn install_mpv(app: AppHandle, st: Arc<AppState>) -> Result<InstallMpv
             })
             .await;
 
-            if let Ok(Ok(exit)) = res {
-                if exit.success() {
+            // Re-detect even on a non-zero exit: winget reports "already installed"
+            // / "no upgrade available" as errors, but mpv is there all the same.
+            if matches!(res, Ok(Ok(_))) {
+                {
                     let _ = app.emit("mpv-install-progress", "Verifying MPV installation...");
                     tokio::time::sleep(Duration::from_millis(1500)).await;
                     if let Some(p) = detect(Kind::Mpv) {
@@ -352,8 +593,8 @@ pub async fn install_mpv(app: AppHandle, st: Arc<AppState>) -> Result<InstallMpv
             })
             .await;
 
-            if let Ok(Ok(exit)) = res {
-                if exit.success() {
+            if matches!(res, Ok(Ok(_))) {
+                {
                     let _ = app.emit("mpv-install-progress", "Verifying MPV installation...");
                     tokio::time::sleep(Duration::from_millis(1500)).await;
                     if let Some(p) = detect(Kind::Mpv) {
