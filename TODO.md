@@ -13,7 +13,7 @@ This document serves as the master planning roadmap for Kura, organizing propose
 | **v0.3.4** | **Playback & Immersion**: Interactive MPV Skip OP/ED Overlay, AniSkip, Changelog Popup & Settings Persistence | ✅ Completed |
 | **v0.3.5** | **Bug Fix**: Reliable MPV detection after winget install (registry, WinGet folders, fresh PATH) | ✅ Completed |
 | **v0.3.6** | **Bug Fix**: Skip button no longer triggers on prologues (length-matched AniSkip, stricter chapter detection) + redesigned skip button & styled MPV messages | ✅ Completed |
-| **v0.4.0** | **Foundations**: Settings Overhaul (sidebar + search), Full Backup & Restore, Diagnostics, CI Checks, Advanced Filtering | 💡 Planned |
+| **v0.4.0** | **Foundations**: Settings Overhaul (sidebar + search), Full Backup & Restore, Diagnostics, CI Checks, Advanced Filtering, Visual Bug Sweep | 💡 Planned |
 | **v0.5.0** | **Sync & Airing**: AniList Two-Way Sync + Seasonal Airing Calendar & Countdown | 💡 Planned |
 | **v0.6.0** | **Subtitles & Cast**: Jimaku.cc Japanese Subtitle Fetcher + Smart Subtitle Matcher + Characters, Seiyuu & Staff | 💡 Planned |
 | **v0.7.0** | **Watch Analytics**: Watch-Time & Immersion Hours Tracker + Yearly Activity Heatmap | 💡 Planned |
@@ -168,6 +168,13 @@ Groundwork that makes every later feature easier to ship, support and debug.
   - [ ] Filter by genres, tags, studios, format (TV, Movie, OVA, Special), airing status and watch status.
   - [ ] Quick filter pills on the library home page.
   - [ ] Multi-criteria sorting (Score, Date Added, Release Year, Title, Progress).
+- [ ] **Visual Bug Sweep & Layout Hardening**
+  - [ ] **Long episode titles break the badge row**: `Up next` / `Playing` / `Launching…` / `Filler` / `Recap` badges get squashed or wrap under the title. Keep badges on one line (`flex-shrink: 0`, `white-space: nowrap`) and clamp the title to 2 lines with ellipsis + full title on hover.
+  - [ ] Same treatment for long series titles on library cards, the Continue Watching hero, search results and the now-playing toast.
+  - [ ] Long Japanese titles, romaji with no spaces and very long file names: add `overflow-wrap: anywhere` where text can't break naturally.
+  - [ ] Check both themes (Comic / Manga) and narrow window widths (~900px) for overlapping or clipped elements.
+  - [ ] Stress-test fixture: a dev mock series with extreme titles, 100+ episodes, missing artwork and missing metadata, to catch these regressions early.
+  - [ ] Collect any other visual glitches reported before v0.4.0 here.
 
 ---
 
