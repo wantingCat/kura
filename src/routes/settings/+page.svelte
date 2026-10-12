@@ -75,7 +75,7 @@
     { kind: "system", name: "System default", blurb: "Opens normally, no tracking" },
   ];
   let detected = $state<DetectedPlayer[]>([]);
-  let version = $state("0.3.4");
+  let version = $state("0.3.5");
   let threshold = $state(app.playback.threshold);
   $effect(() => {
     threshold = app.playback.threshold;
@@ -90,7 +90,7 @@
     try {
       version = await getVersion();
     } catch {
-      version = "0.3.4";
+      version = "0.3.5";
     }
   });
 
@@ -871,7 +871,7 @@
         <div class="about-title-block">
           <h3>
             Kura 蔵
-            <span class="badge badge-accent">v{version || "0.3.4"}</span>
+            <span class="badge badge-accent">v{version || "0.3.5"}</span>
           </h3>
           <p class="faint">A local-first, manga-styled desktop anime media library.</p>
         </div>

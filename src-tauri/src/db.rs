@@ -216,9 +216,9 @@ fn get_backup_paths(data_dir: &Path) -> Vec<PathBuf> {
 
     #[cfg(not(windows))]
     {
-        if let Some(home) = std::env::var_os("HOME") {
-            paths.push(PathBuf::from(home).join(".kura").join("kura_backup.json"));
-            paths.push(PathBuf::from(home).join(".config").join("kura").join("kura_backup.json"));
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            paths.push(home.join(".kura").join("kura_backup.json"));
+            paths.push(home.join(".config").join("kura").join("kura_backup.json"));
         }
     }
 

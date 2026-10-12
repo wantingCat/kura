@@ -197,6 +197,7 @@ fn known_locations(kind: Kind) -> Vec<PathBuf> {
 /// registry, but Kura's own process PATH is a snapshot from when it (or Explorer)
 /// started, so newly installed players would otherwise stay invisible.
 fn path_dirs() -> Vec<PathBuf> {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
@@ -662,6 +663,8 @@ pub async fn install_mpv(app: AppHandle, st: Arc<AppState>) -> Result<InstallMpv
 
     #[cfg(not(any(windows, target_os = "macos")))]
     {
+        // No package-manager install on Linux (distro-specific); just point to mpv.io.
+        let _ = (&app, &st);
         let _ = tauri_plugin_opener::open_url("https://mpv.io/installation/", None::<&str>);
         Ok(InstallMpvResult {
             success: false,
@@ -1230,7 +1233,7 @@ pub async fn fetch_aniskip(client: &reqwest::Client, mal_id: i64, ep_num: i64) -
     let url = format!("https://api.aniskip.com/v2/skip-times/{mal_id}/{ep_num}?types=op&types=ed&episodeLength=0");
     let resp = client
         .get(&url)
-        .header("User-Agent", "Kura/0.3.4")
+        .header("User-Agent", "Kura/0.3.5")
         .timeout(Duration::from_millis(2000))
         .send()
         .await

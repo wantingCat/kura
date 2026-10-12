@@ -11,6 +11,7 @@ This document serves as the master planning roadmap for Kura, organizing propose
 | **v0.3.2** | **Visual & Artwork Overhaul**: Manga Mode (Light Theme) + Priority Artwork Engine (ClearLogos & Fanart) | ✅ Completed |
 | **v0.3.3** | **Social & Real-Time Tracking**: Discord Rich Presence (RPC) + Live Folder Watcher | ✅ Completed |
 | **v0.3.4** | **Playback & Immersion**: Interactive MPV Skip OP/ED Overlay, AniSkip, Changelog Popup & Settings Persistence | ✅ Completed |
+| **v0.3.5** | **Bug Fix**: Reliable MPV detection after winget install (registry, WinGet folders, fresh PATH) | ✅ Completed |
 | **v0.4.0** | **Anime Knowledge & Airing**: Rich Cast, Seiyuu Guides + Seasonal Airing Calendar & Countdown | 💡 Planned |
 | **v0.5.0** | **Cloud Sync & Subtitles**: AniList / MAL Two-Way Sync + Jimaku.cc Japanese Subtitle Fetcher | 💡 Planned |
 | **v0.6.0** | **Immersion & Analytics**: Yomitan Subtitle HUD + Immersion Hours Tracker & Watch Stats | 💡 Planned |

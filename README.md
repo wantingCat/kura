@@ -5,7 +5,7 @@
   <br>
   <strong>A local-first, manga-styled desktop anime media library.</strong>
   <br>
-  <em>Current Release: <code>v0.3.4-alpha</code> · Built with AI assistance</em>
+  <em>Current Release: <code>v0.3.5-alpha</code> · Built with AI assistance</em>
 </p>
 
 ---
@@ -34,6 +34,10 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 ---
 
 ## ✨ Features
+
+### Fixed in `v0.3.5-alpha`
+- **macOS & Linux builds restored**: v0.3.4 failed to compile on non-Windows platforms; downloads for all platforms are back.
+- **MPV detection after winget install**: MPV installed through Kura's built-in installer (now `C:\Program Files\MPV Player`) is detected immediately, along with players found via the Windows installed-apps list, WinGet package folders and the up-to-date registry PATH.
 
 ### New in `v0.3.4-alpha`
 - **Interactive Clickable Skip Button in MPV**: Floating on-screen `[ ⏭ SKIP OPENING (Click or Tab) ]` overlay rendered directly on MPV with real-time mouse hover tracking, glowing coral aesthetics, and click-to-skip.

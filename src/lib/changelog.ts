@@ -16,10 +16,38 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.3.5",
+    title: "MPV Detection Fix",
+    date: "October 2026",
+    badge: "Latest",
+    summary: "A small bug-fix release: Kura reliably finds MPV after installing it with the built-in installer, and macOS and Linux builds are back.",
+    items: [
+      {
+        type: "fix",
+        text: "macOS and Linux downloads are available again (v0.3.4 failed to build on those platforms).",
+      },
+      {
+        type: "fix",
+        text: "MPV installed through the built-in winget installer is now detected (it installs to \"C:\\Program Files\\MPV Player\", which Kura wasn't checking).",
+      },
+      {
+        type: "fix",
+        text: "Newly installed players are found without logging out: Kura now reads the up-to-date PATH from the registry instead of the copy it started with.",
+      },
+      {
+        type: "improvement",
+        text: "Player detection also checks Windows' installed-apps list and WinGet package folders, so MPV, VLC and MPC are found whichever installer you used.",
+      },
+      {
+        type: "fix",
+        text: "The installer no longer sends you to the MPV website when winget reports MPV as \"already installed\".",
+      },
+    ],
+  },
+  {
     version: "0.3.4",
     title: "Interactive Skip Overlay & Settings Persistence",
     date: "October 2026",
-    badge: "Latest",
     summary:
       "Direct interactive Skip OP/ED button in MPV with mouse click & hover tracking, frame-accurate AniSkip API integration, smart cold open detection, What's New popup, and bulletproof settings persistence.",
     items: [
