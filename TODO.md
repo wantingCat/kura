@@ -15,7 +15,7 @@ This document serves as the master planning roadmap for Kura, organizing propose
 | **v0.3.6** | **Bug Fix**: Skip button no longer triggers on prologues (length-matched AniSkip, stricter chapter detection) + redesigned skip button & styled MPV messages | ✅ Completed |
 | **v0.4.0** | **Foundations**: Settings Overhaul (sidebar + search), Full Backup & Restore, Diagnostics, CI Checks, Advanced Filtering | 💡 Planned |
 | **v0.5.0** | **Sync & Airing**: AniList Two-Way Sync + Seasonal Airing Calendar & Countdown | 💡 Planned |
-| **v0.6.0** | **Subtitles & Cast**: Jimaku.cc Japanese Subtitle Fetcher + Characters, Seiyuu & Staff | 💡 Planned |
+| **v0.6.0** | **Subtitles & Cast**: Jimaku.cc Japanese Subtitle Fetcher + Smart Subtitle Matcher + Characters, Seiyuu & Staff | 💡 Planned |
 | **v0.7.0** | **Watch Analytics**: Watch-Time & Immersion Hours Tracker + Yearly Activity Heatmap | 💡 Planned |
 | **v0.8.0** | **Social & Music**: Syncplay Auto-Install & Launcher + AnimeThemes OP/ED Drawer + Linux/macOS Polish | 💡 Planned |
 | **v1.0.0 (Beta)** | **Polish & Trust**: Performance, Windows Code Signing, Japanese UI Language | 💡 Future |
@@ -192,7 +192,7 @@ Groundwork that makes every later feature easier to ship, support and debug.
 
 ---
 
-## 💬 Phase 7: Jimaku Subtitle Fetcher & Characters / Staff
+## 💬 Phase 7: Jimaku Subtitle Fetcher, Subtitle Matcher & Characters / Staff
 *Target: v0.6.0*
 
 ### Feasibility notes (checked against the Jimaku API)
@@ -209,6 +209,16 @@ Groundwork that makes every later feature easier to ship, support and debug.
   - [ ] Save next to the video (`<video>.ja.ass`) or into Kura's cache, then load into a running mpv via IPC `sub-add`.
   - [ ] Optional **auto-fetch** for series marked "Japanese subs" when a new episode is detected.
   - [ ] Timing fixes use the existing `z` / `x` delay shortcuts; audio-based auto-sync (`alass`) is a stretch goal only if users ask for it.
+- [ ] **Smart Subtitle Matcher** (Rust port of the Jellyfin Anime Subtitle Renamer v3 script)
+  - [ ] **Why**: mpv only auto-loads subtitles whose name starts with the video's name, so files like `薬屋のひとりごと.S02E25.猫猫と毛毛.WEBRip.Netflix.ja[cc].srt` are ignored.
+  - [ ] **Episode number styles** (mixed freely in one folder): `S01E01`, absolute `S02E25` (= S02E01), bare `25.srt` / `25.ja.srt`, `#08`, `E08`, `Show - 01` / `Show – 12 END`.
+  - [ ] **Uses Kura's own data**: match against each episode's known season/episode from the library (no `SxxExx` video names required), and resolve absolute numbers automatically from the stored `absolute_number` (ani.zip) instead of asking for "first absolute episode".
+  - [ ] **Language detection**: `ja` / `jpn` / `jp` / `japanese` / `日本語`, `en` / `eng`, `zh` / `chs` / `cht` / `sc` / `tc`, `ko`, `de`, `fr`, `es`; preserve `[cc]` / SDH as `.cc`; fallback language dropdown ("apply to all undetected").
+  - [ ] **Preview dialog**: every match (`source → target`), plus a skipped list with the reason (no episode number, ambiguous, absolute number before season start, target exists).
+  - [ ] **Two modes**: *Link without renaming* (default, stored in SQLite, passed to mpv as `--sub-files` at launch) or *Rename for Jellyfin/Plex* (`<video>.ja.cc.srt`). Never overwrite, never touch video files.
+  - [ ] Entry points: **"Match subtitles"** button on the series page, and used automatically to split **Jimaku season packs** into per-episode subtitles.
+  - [ ] Port fixes: dash pattern must not read `- 1080p` as episode 1080 (`(?![\dp])`); `cc` detection limited to tag positions (`[cc]`, `.cc.`, `SDH`) instead of any word "cc".
+  - [ ] Unit tests using the script's examples (Apothecary Diaries absolute `S02E25`, Azumanga Daioh `#08`, bare `25.ja.srt`, mixed folders).
 - [ ] **Characters, Seiyuu & Staff**
   - [ ] AniList `characters(sort: [ROLE, RELEVANCE])` with Japanese voice actors, plus key `staff` (Director, Series Composition, Music, Character Design, Original Creator).
   - [ ] Cached locally in SQLite for offline viewing.
