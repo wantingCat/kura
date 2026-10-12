@@ -16,10 +16,38 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.3.6",
+    title: "Smarter Skip Button",
+    date: "October 2026",
+    badge: "Latest",
+    summary: "A bug-fix release: the skip button no longer mistakes prologues for openings, and it got a proper redesign.",
+    items: [
+      {
+        type: "fix",
+        text: "The Skip Opening button no longer appears during prologues and cold opens, and pressing it can't skip the prologue anymore.",
+      },
+      {
+        type: "fix",
+        text: "AniSkip timestamps are matched to your file's exact length, so TV and Blu-ray versions with different prologue lengths no longer get the wrong skip times.",
+      },
+      {
+        type: "fix",
+        text: "Better detection of openings from chapters: prologue, recap and teaser chapters are ignored, and implausibly short or long \"openings\" are rejected.",
+      },
+      {
+        type: "improvement",
+        text: "Redesigned skip button: a rounded Kura-styled pill with a TAB key hint that turns coral on hover, and stays crisp at any window size.",
+      },
+      {
+        type: "fix",
+        text: "Kura's messages inside MPV (now playing, subtitle delay, skipped) show properly styled text instead of raw formatting codes.",
+      },
+    ],
+  },
+  {
     version: "0.3.5",
     title: "MPV Detection Fix",
     date: "October 2026",
-    badge: "Latest",
     summary: "A small bug-fix release: Kura reliably finds MPV after installing it with the built-in installer, and macOS and Linux builds are back.",
     items: [
       {

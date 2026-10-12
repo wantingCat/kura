@@ -5,7 +5,7 @@
   <br>
   <strong>A local-first, manga-styled desktop anime media library.</strong>
   <br>
-  <em>Current Release: <code>v0.3.5-alpha</code> · Built with AI assistance</em>
+  <em>Current Release: <code>v0.3.6-alpha</code> · Built with AI assistance</em>
 </p>
 
 ---
@@ -34,6 +34,11 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 ---
 
 ## ✨ Features
+
+### Fixed in `v0.3.6-alpha`
+- **Skip button no longer triggers on prologues**: the Skip Opening button only appears inside the actual opening/ending; AniSkip timestamps are matched to your file's exact length (TV vs. Blu-ray cuts), and prologue/recap chapters are ignored.
+- **Redesigned skip button**: a rounded Kura-styled pill with a `TAB` key hint and coral hover state.
+- **Styled MPV messages**: the now-playing banner, subtitle delay and skip notices render properly instead of showing raw formatting codes.
 
 ### Fixed in `v0.3.5-alpha`
 - **macOS & Linux builds restored**: v0.3.4 failed to compile on non-Windows platforms; downloads for all platforms are back.

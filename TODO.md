@@ -12,12 +12,13 @@ This document serves as the master planning roadmap for Kura, organizing propose
 | **v0.3.3** | **Social & Real-Time Tracking**: Discord Rich Presence (RPC) + Live Folder Watcher | ✅ Completed |
 | **v0.3.4** | **Playback & Immersion**: Interactive MPV Skip OP/ED Overlay, AniSkip, Changelog Popup & Settings Persistence | ✅ Completed |
 | **v0.3.5** | **Bug Fix**: Reliable MPV detection after winget install (registry, WinGet folders, fresh PATH) | ✅ Completed |
-| **v0.4.0** | **Anime Knowledge & Airing**: Rich Cast, Seiyuu Guides + Seasonal Airing Calendar & Countdown | 💡 Planned |
-| **v0.5.0** | **Cloud Sync & Subtitles**: AniList / MAL Two-Way Sync + Jimaku.cc Japanese Subtitle Fetcher | 💡 Planned |
-| **v0.6.0** | **Immersion & Analytics**: Yomitan Subtitle HUD + Immersion Hours Tracker & Watch Stats | 💡 Planned |
-| **v0.7.0** | **Automation & Social**: Smart RSS Watchlist Downloader (qBittorrent) + SyncPlay Watch Party | 💡 Planned |
-| **v0.8.0** | **Media Creativity & Music**: Manga Screenshot & Comic Strip Generator + AnimeThemes OP/ED Jukebox | 💡 Planned |
-| **v1.0.0 (Beta)** | **Library Power-User**: Advanced Filtering, Portable Backup/Restore, Performance Polish | 💡 Future |
+| **v0.3.6** | **Bug Fix**: Skip button no longer triggers on prologues (length-matched AniSkip, stricter chapter detection) + redesigned skip button & styled MPV messages | ✅ Completed |
+| **v0.4.0** | **Foundations**: Settings Overhaul (sidebar + search), Full Backup & Restore, Diagnostics, CI Checks, Advanced Filtering | 💡 Planned |
+| **v0.5.0** | **Sync & Airing**: AniList Two-Way Sync + Seasonal Airing Calendar & Countdown | 💡 Planned |
+| **v0.6.0** | **Subtitles & Cast**: Jimaku.cc Japanese Subtitle Fetcher + Characters, Seiyuu & Staff | 💡 Planned |
+| **v0.7.0** | **Watch Analytics**: Watch-Time & Immersion Hours Tracker + Yearly Activity Heatmap | 💡 Planned |
+| **v0.8.0** | **Social & Music**: Syncplay Auto-Install & Launcher + AnimeThemes OP/ED Drawer + Linux/macOS Polish | 💡 Planned |
+| **v1.0.0 (Beta)** | **Polish & Trust**: Performance, Windows Code Signing, Japanese UI Language | 💡 Future |
 
 ---
 
@@ -141,122 +142,128 @@ Automatically detect new anime episodes and movies the moment they finish downlo
 
 ---
 
-## 🎭 Phase 5: Rich Cast, Voice Actors & Seasonal Airing Calendar
+## 🧱 Phase 5: Foundations — Settings, Backup, Diagnostics & Filtering
 *Target: v0.4.0*
 
-Deepen the anime experience with voice actor guides, character portraits, and an interactive seasonal broadcast calendar.
+Groundwork that makes every later feature easier to ship, support and debug.
 
 ### Checklist
-- [ ] **AniList GraphQL Expansion**
-  - [ ] Query `characters(sort: [ROLE, RELEVANCE])` with character name, role (`MAIN`, `SUPPORTING`), image, and voice actors (`voiceActors(language: JAPANESE)`).
-  - [ ] Query `staff` for Director, Series Composition, Music Composer, Character Designer, and Original Author.
-  - [ ] Cache character and voice actor data locally in SQLite.
-- [ ] **Anime Details UI**
-  - [ ] Add a **Characters & Cast** tab / drawer on anime detail pages.
-  - [ ] Character cards with portrait, character name, Japanese voice actor (seiyuu), and English dub VA toggle.
-  - [ ] **Staff Credits Row**: Director, Studio, and Composer badges.
-  - [ ] Clickable voice actors / staff showing other anime in your library they worked on.
-- [ ] **Seasonal Airing Calendar & Simulcast Countdown**
-  - [ ] **Weekly Broadcast Grid (Mon – Sun)**: Interactive weekly calendar showing when currently airing series release in your local timezone.
-  - [ ] **Library Highlighting**: Visual indicators distinguishing shows already tracked in your library vs. new seasonal discoveries.
-  - [ ] **Episode Countdown Timers**: Live countdown display (*"Episode 7 airs in 3 hours 15 mins"*) powered by AniList's next-airing schedule API.
-  - [ ] **Airing Desktop Notifications**: Optional native notification when a tracked show finishes airing or when the folder watcher detects its file drop.
-
----
-
-## 🔄 Phase 6: Cloud Sync & Japanese Subtitle Auto-Fetcher
-*Target: v0.5.0*
-
-Two-way synchronization with AniList/MAL plus automatic Japanese subtitle fetching and audio auto-sync.
-
-### Checklist
-- [ ] **OAuth2 Authentication**
-  - [ ] AniList OAuth2 login flow via secure local loopback redirect (`http://localhost:port/oauth/callback`).
-  - [ ] Secure token storage in SQLite settings.
-- [ ] **Two-Way Synchronization Engine**
-  - [ ] Import user's list on connect (Watching, Completed, Planning, Paused, Dropped).
-  - [ ] Auto-scrobble: when an episode reaches 90% in Kura, update episode progress on AniList.
-  - [ ] Safe merge rules: ensure local and remote never accidentally regress progress.
-  - [ ] Rate limit compliance (AniList 90 req/min).
-- [ ] **Japanese Subtitle Auto-Fetcher & Syncer (Jimaku.cc & Kitsunekko)**
-  - [ ] Direct [Jimaku.cc](https://jimaku.cc) API integration: query and match Japanese subtitles by AniList/MAL ID and episode number.
-  - [ ] Kitsunekko & OpenSubtitles fallback for older series, movies, and specials.
-  - [ ] **One-Click Subtitle Drop**: Preview and save matching `.ass` / `.srt` Japanese subtitles directly alongside media files or into Kura's cache.
-  - [ ] **Audio-Based Auto-Sync (`alass` / `ffsubsync`)**: One-click timing alignment that synchronizes subtitle timestamps to the audio waveform automatically.
-
----
-
-## 🎌 Phase 7: Japanese Immersion HUD & Watch-Time Analytics
-*Target: v0.6.0*
-
-A blazing-fast native alternative to Memento paired with offline Japanese immersion hours tracking and analytics.
-
-### Checklist
-- [ ] **mpv Real-Time Subtitle Streaming (`sub-text`)**
-  - [ ] Subscribe to mpv's `sub-text` property over the existing IPC socket in `player.rs`.
-  - [ ] Stream active Japanese subtitle strings, start/end timestamps, and track IDs to Kura in real-time.
-  - [ ] Hide mpv's internal text rendering when immersion overlay is active (`--sub-font-size=0`).
-- [ ] **Transparent Floating Subtitle HUD Window**
-  - [ ] Lightweight, borderless, transparent Tauri window snapped over the bottom of mpv (windowed or fullscreen).
-  - [ ] Crisp manga-styled Japanese subtitle rendering with customizable font size, outline, and position.
-  - [ ] Mouse-interactive words: automatically becomes hoverable when video is paused or mouse enters the HUD.
-- [ ] **Yomitan Dictionary Engine (Rust + SQLite)**
-  - [ ] **Dictionary Importer**: Drag-and-drop standard Yomitan `.zip` archives (JMdict, KANJIDIC, Daijirin, etc.) in **Settings → Japanese Immersion**.
-  - [ ] **Fast SQLite Index**: High-speed term lookup table indexing headwords, readings, definitions, and pitch accents (< 1ms query time).
-  - [ ] **Deinflection Engine**: Break down conjugated verbs and adjectives (e.g. `食べられなかった` → `食べる`).
-- [ ] **Manga-Styled Yomitan Popover Card**
-  - [ ] Displays word reading (hiragana/katakana furigana), pitch accent markers, and concise definitions.
-  - [ ] Lightweight, pure instant lookup — zero mining bloat, no Anki sync baggage, instant response.
-- [ ] **Immersion Hours & Analytics ("Kura Wrapped")**
-  - [ ] **Japanese Immersion Hours Counter**: Track total hours watched specifically with Japanese audio + Japanese subtitles.
-  - [ ] **Watch Time Statistics**: Total days, hours, and episodes watched across your entire library.
-  - [ ] **GitHub-Style Yearly Activity Heatmap**: Visualize daily watch streaks, activity frequency, and consistency.
-  - [ ] **Studio & Genre Breakdown**: Comic-styled breakdown charts of top studios (*ufotable, Kyoto Animation, MAPPA*) and genres.
-  - [ ] **Exportable "Manga Stats Card"**: Generate a stylish shareable graphic summarizing your monthly or yearly anime stats.
-
----
-
-## 🚀 Phase 8: Smart RSS Watchlist Downloader & SyncPlay
-*Target: v0.7.0*
-
-End-to-end automated episode acquisition combined with synchronized watch party rooms.
-
-### Checklist
-- [ ] **Smart RSS Watchlist Downloader (qBittorrent / Transmission / Deluge)**
-  - [ ] **Auto-Watch Tag**: Mark airing shows to automatically fetch new episodes the moment they are released.
-  - [ ] **RSS Feed Monitor**: Monitor anime RSS feeds (Nyaa / Tokyo Toshokan) for preferred fansub release groups (`[SubsPlease]`, `[Erai-raws]`, `[Judas]`, etc.).
-  - [ ] **Torrent Client WebUI API**: Send magnet links / `.torrent` files directly to local client (qBittorrent, Transmission, or Deluge) via API.
-  - [ ] **Zero-Touch Pipeline**: RSS auto-downloads episode $\to$ Folder Watcher detects completion $\to$ AniList matches $\to$ Discord RPC tracks $\to$ Instant playback.
-- [ ] **SyncPlay / Watch Together**
-  - [ ] **Built-in SyncPlay Room Launcher**: Start or join a synchronized MPV playback room directly from Kura with custom nickname and room name.
-  - [ ] **Lockstep Sync**: Synchronized playback, pause, and seek locked in frame-accurate sync with friends across the internet.
-  - [ ] **In-App Room Controls**: Nickname, room name, server selection, and participant status badge.
-
----
-
-## 🎨 Phase 9: Manga Panel Screenshot Maker & AnimeThemes Jukebox
-*Target: v0.8.0*
-
-Creative media capture and a dedicated anime music jukebox.
-
-### Checklist
-- [ ] **Manga Panel Screenshot & Comic Strip Generator**
-  - [ ] **Clean Subtitle-Free Frame Grab**: Press a shortcut in MPV to save clean lossless 1080p/4K PNG screenshots without on-screen clutter via MPV IPC (`screenshot-to-file`).
-  - [ ] **Manga Comic Strip Creator**: Select 2 to 4 frame grabs from an episode and lay them out into a comic strip with authentic halftone screentone patterns, black gutters, and dialogue speech bubbles.
-  - [ ] **Clip & GIF Exporter**: Trim 3 to 10-second video moments right from the episode details drawer into lightweight animated WebP / GIF stickers.
-- [ ] **Clean OP/ED Jukebox & Anime Radio (AnimeThemes.moe)**
-  - [ ] **Theme Songs Drawer**: Browse and stream clean creditless NCOP and NCED videos powered by the [AnimeThemes.moe](https://animethemes.moe) API.
-  - [ ] **Top-Bar Mini OST Player / Radio**: Subtle background audio player shuffling theme songs from all anime in your collection while browsing.
-
----
-
-## ⚡ Phase 10: Library Power-User Tools & Portable Backup
-*Target: v1.0.0 (Beta)*
-
+- [ ] **Settings Overhaul**
+  - [ ] Replace the single long page with a **left sidebar of categories**: General, Library, Playback, Subtitles, Artwork & Metadata, Integrations (Discord / AniList / Jimaku), Backup, Updates, About & Diagnostics.
+  - [ ] **Settings search bar** that filters every option by label/keyword and jumps to it.
+  - [ ] Each category is its own component so new options don't bloat one file.
+  - [ ] Remember the last opened category.
+- [ ] **Full Backup & Restore** (extends the existing `kura_backup.json`)
+  - [ ] Include **watch history** (`watch_state`), resume positions (`watch_progress`), manual match overrides and track preferences (`media_track_prefs`) — not just settings and libraries.
+  - [ ] Debounced auto-backup after watch progress changes (not on every tick).
+  - [ ] One-click **Export** to a chosen `.json` file and **Import** with a confirmation preview ("312 episodes, 4 libraries").
+  - [ ] Versioned backup format so older backups still import after schema changes.
+- [ ] **Diagnostics**
+  - [ ] Rolling log file in the app data dir (`kura.log`, size-capped).
+  - [ ] **"Copy diagnostics"** button: app version, OS, detected players + paths, library count, last errors — paste-ready for GitHub issues.
+  - [ ] **Player detection list**: show every mpv / VLC / Syncplay path Kura found and where it found it (registry, PATH, WinGet, etc.), plus a "Re-detect" button.
+- [ ] **CI Checks**
+  - [ ] GitHub Actions workflow running `cargo check` + `cargo test` on Windows, Ubuntu and macOS, plus `npm run check`, on every push/PR — so Linux/macOS breakages are caught before a release tag.
 - [ ] **Advanced Filtering & Library Search**
-  - [ ] Filter library by genres, tags, studios, format (TV, Movie, OVA, Special), airing status, and voice actors.
+  - [ ] Filter by genres, tags, studios, format (TV, Movie, OVA, Special), airing status and watch status.
   - [ ] Quick filter pills on the library home page.
   - [ ] Multi-criteria sorting (Score, Date Added, Release Year, Title, Progress).
-- [ ] **Library Export & Portable Backup**
-  - [ ] One-click export of watch history, manual match overrides, and track preferences to a single `.json` file.
-  - [ ] One-click restore option in Settings.
+
+---
+
+## 🔄 Phase 6: AniList Two-Way Sync & Seasonal Airing Calendar
+*Target: v0.5.0*
+
+### Checklist
+- [ ] **AniList Login**
+  - [ ] AniList OAuth2 (implicit grant) via local loopback redirect (`http://localhost:port/oauth/callback`).
+  - [ ] Token stored in SQLite settings; "Disconnect" button in **Settings → Integrations**.
+- [ ] **Two-Way Synchronization Engine**
+  - [ ] Import the user's list on connect (Watching, Completed, Planning, Paused, Dropped).
+  - [ ] Auto-scrobble: when an episode reaches 90% in Kura, update progress on AniList.
+  - [ ] Safe merge rules: never regress progress on either side.
+  - [ ] Offline queue: scrobbles made offline are sent when back online.
+  - [ ] Rate limit compliance (AniList 90 req/min).
+- [ ] **Seasonal Airing Calendar & Countdown**
+  - [ ] **Weekly Broadcast Grid (Mon – Sun)** in your local timezone.
+  - [ ] **Library Highlighting**: shows already in your library vs. new seasonal discoveries.
+  - [ ] **Episode Countdown**: *"Episode 7 airs in 3h 15m"* via AniList's `nextAiringEpisode`.
+  - [ ] **Desktop Notifications** (optional): when a tracked show airs or the folder watcher picks up its file.
+
+---
+
+## 💬 Phase 7: Jimaku Subtitle Fetcher & Characters / Staff
+*Target: v0.6.0*
+
+### Feasibility notes (checked against the Jimaku API)
+- Jimaku has an official REST API: `GET /api/entries/search?anilist_id=…` → `GET /api/entries/{id}/files?episode=N`. Kura already stores AniList IDs, so matching is direct — no fuzzy title search needed.
+- **Requires a free Jimaku account + API key** (sent in the `Authorization` header) → add a key field in **Settings → Integrations**, same pattern as the Fanart.tv key.
+- Rate limited per IP (~25 requests per window, `429` + `x-ratelimit-reset-after`) → cache results per series and back off.
+- Episode filtering is best-effort (filename based) and some uploads are `.zip` / `.rar` packs → always show a picker; extract `.zip` in Rust, skip `.rar` with a "download manually" link.
+- Should set a descriptive `User-Agent` (`Kura/x.y.z`).
+
+### Checklist
+- [ ] **Jimaku Subtitle Fetcher**
+  - [ ] "Find Japanese subtitles" button on the episode row and in the player menu.
+  - [ ] Picker listing matching files (name, size, date), best match first.
+  - [ ] Save next to the video (`<video>.ja.ass`) or into Kura's cache, then load into a running mpv via IPC `sub-add`.
+  - [ ] Optional **auto-fetch** for series marked "Japanese subs" when a new episode is detected.
+  - [ ] Timing fixes use the existing `z` / `x` delay shortcuts; audio-based auto-sync (`alass`) is a stretch goal only if users ask for it.
+- [ ] **Characters, Seiyuu & Staff**
+  - [ ] AniList `characters(sort: [ROLE, RELEVANCE])` with Japanese voice actors, plus key `staff` (Director, Series Composition, Music, Character Design, Original Creator).
+  - [ ] Cached locally in SQLite for offline viewing.
+  - [ ] **Characters & Cast** tab on anime detail pages; staff credit badges.
+  - [ ] Click a voice actor / staff member to see other anime **in your library** they worked on.
+
+---
+
+## 📊 Phase 8: Watch-Time & Immersion Analytics
+*Target: v0.7.0*
+
+### Checklist
+- [ ] **Viewing Sessions Table**: new SQLite table recording start/end, episode, audio language and subtitle language for each play session (needed for accurate stats).
+- [ ] **Watch Time Statistics**: total hours, days and episodes watched.
+- [ ] **Japanese Immersion Hours**: time watched with Japanese audio, split by Japanese subs / no subs / other subs.
+- [ ] **GitHub-Style Yearly Activity Heatmap**: daily watch streaks and consistency.
+- [ ] **Studio & Genre Breakdown**: comic-styled charts of top studios and genres.
+
+---
+
+## 🎉 Phase 9: Syncplay, AnimeThemes & Cross-Platform Polish
+*Target: v0.8.0*
+
+### Checklist
+- [ ] **Syncplay Integration (lightweight)**
+  - [ ] Detect an existing Syncplay install (same approach as mpv detection: registry, PATH, WinGet).
+  - [ ] **One-click install** in **Settings → Playback**, like mpv: `winget install --id Syncplay.Syncplay` on Windows, package-manager hints on Linux/macOS.
+  - [ ] Save server, room and nickname in settings.
+  - [ ] **"Watch with friends"** button on episodes that launches Syncplay with the file, mpv path, room and nickname pre-filled (Syncplay handles all the actual syncing).
+- [ ] **AnimeThemes OP/ED Drawer**
+  - [ ] Browse and stream creditless NCOP / NCED videos for each series via the [AnimeThemes.moe](https://animethemes.moe) API.
+- [ ] **Linux / macOS Polish**
+  - [ ] mpv detection for Flatpak (`io.mpv.Mpv`), Snap and Homebrew paths.
+  - [ ] Distro-specific install hints in the mpv / Syncplay prompts (apt, dnf, pacman, brew).
+
+---
+
+## ⚡ Phase 10: Polish & Trust
+*Target: v1.0.0 (Beta)*
+
+- [ ] **Performance**: virtualized library grid for large collections, image cache cleanup, faster startup.
+- [ ] **Windows Code Signing**: remove SmartScreen "unknown publisher" warnings.
+- [ ] **Japanese UI Language**: optional Japanese interface (i18n groundwork for other languages).
+- [ ] **Embedded Player (research only)**: investigate embedding libmpv inside a Kura window. Note: a plain webview `<video>` player is *not* viable — no reliable MKV, HEVC 10-bit or ASS subtitle support — so this would have to be libmpv-based.
+
+---
+
+## 🗑️ Cut / Not Planned
+
+| Idea | Why it was cut |
+| :--- | :--- |
+| **Yomitan Subtitle HUD & built-in dictionary** | Main motivation was Memento's slow startup, now much less painful thanks to the player-launching indicator. Huge effort to rebuild what Yomitan/Memento already do well. |
+| **Exportable "Manga Stats Card"** | Not needed. |
+| **Smart RSS / torrent auto-downloader** | Out of scope for a library app, legal grey area, and Sonarr/qBittorrent RSS already do it better. |
+| **Built-in SyncPlay rooms** | Replaced by lightweight auto-install + launch of the real Syncplay app (Phase 9). |
+| **Comic strip / GIF / clip maker** | Fun but niche; mpv already takes screenshots. |
+| **Top-bar anime radio** | Background audio inside a library app adds little; the OP/ED drawer covers the useful part. |
+| **MAL sync** | AniList first; MAL only if users ask for it. |

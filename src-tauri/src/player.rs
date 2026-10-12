@@ -698,29 +698,36 @@ if mp.create_osd_overlay then
     skip_overlay.res_y = 1080
 end
 
-local op_start = nil
-local op_end = nil
-local ed_start = nil
-local ed_end = nil
-local aniskip_received = false
+-- Resolved OP/ED ranges used by the button.
+local op_start, op_end, ed_start, ed_end = nil, nil, nil, nil
+-- Source data. Priority: named chapters (from the file itself) > AniSkip > 90s chapter heuristic.
+local ch = {}
+local ask = {}
 local chapters_scanned = false
 local current_button = nil
 local is_hovered = false
 local mouse_bound = false
+local btn_box = nil -- {x1, y1, x2, y2} in overlay coordinates
 
 local update_state = nil
 
+local function norm(title)
+    return string.lower(title or ""):gsub("^%s*(.-)%s*$", "%1")
+end
+
 local function is_intro(title)
-    if not title or title == "" then return false end
-    local s = string.lower(title):gsub("^%s*(.-)%s*$", "%1")
-    return s == "intro" or s == "prologue" or s == "avant" or s == "アバン" or
-           string.find(s, "prologue") ~= nil or string.find(s, "cold open") ~= nil
+    local s = norm(title)
+    if s == "" then return false end
+    if s == "intro" or s == "avant" or s == "teaser" or s == "recap" or s == "cold open" then return true end
+    return string.find(s, "prolog") ~= nil or string.find(s, "cold open") ~= nil or
+           string.find(s, "avant") ~= nil or string.find(s, "アバン") ~= nil or
+           string.find(s, "previously") ~= nil or string.find(s, "recap") ~= nil or
+           string.find(s, "pre%-op") ~= nil or string.find(s, "preop") ~= nil
 end
 
 local function is_op(title)
-    if not title or title == "" then return false end
-    local s = string.lower(title):gsub("^%s*(.-)%s*$", "%1")
-    if is_intro(s) then return false end
+    local s = norm(title)
+    if s == "" or is_intro(s) then return false end
     if s == "op" or s == "ncop" or s == "opening" or s == "オープニング" then return true end
     if string.find(s, "^op[%s%d%-_]") or string.find(s, "[%s%-_%(%[]op[%s%d%-_%)%]]") or string.find(s, "[%s%-_%(%[]op$") then return true end
     if string.find(s, "opening") or string.find(s, "ncop") or string.find(s, "theme song") or string.find(s, "オープニング") then return true end
@@ -728,121 +735,171 @@ local function is_op(title)
 end
 
 local function is_ed(title)
-    if not title or title == "" then return false end
-    local s = string.lower(title):gsub("^%s*(.-)%s*$", "%1")
-    if is_intro(s) then return false end
+    local s = norm(title)
+    if s == "" or is_intro(s) then return false end
     if s == "ed" or s == "nced" or s == "ending" or s == "エンディング" then return true end
     if string.find(s, "^ed[%s%d%-_]") or string.find(s, "[%s%-_%(%[]ed[%s%d%-_%)%]]") or string.find(s, "[%s%-_%(%[]ed$") then return true end
-    if string.find(s, "ending") or string.find(s, "nced") or string.find(s, "credits") or string.find(s, "credit") or string.find(s, "preview") or string.find(s, "pv") or string.find(s, "エンディング") then return true end
+    if string.find(s, "ending") or string.find(s, "nced") or string.find(s, "credits") or string.find(s, "エンディング") then return true end
     return false
 end
 
+-- A real OP/ED song is roughly 1-3 minutes. Anything else is almost certainly a prologue, recap or a mislabelled chapter.
+local function plausible(s, e)
+    return s and e and e > s and (e - s) >= 30 and (e - s) <= 200
+end
+
+local function resolve()
+    op_start, op_end, ed_start, ed_end = nil, nil, nil, nil
+    if ch.op_named then
+        op_start, op_end = ch.op_s, ch.op_e
+    elseif plausible(ask.op_s, ask.op_e) then
+        op_start, op_end = ask.op_s, ask.op_e
+    elseif ch.op_s then
+        op_start, op_end = ch.op_s, ch.op_e
+    end
+    if ch.ed_named then
+        ed_start, ed_end = ch.ed_s, ch.ed_e
+    elseif plausible(ask.ed_s, ask.ed_e) then
+        ed_start, ed_end = ask.ed_s, ask.ed_e
+    elseif ch.ed_s then
+        ed_start, ed_end = ch.ed_s, ch.ed_e
+    end
+end
+
+local function chapter_span(i, ch_count, dur)
+    local time = mp.get_property_number(string.format("chapter-list/%d/time", i), 0.0)
+    local next_time = nil
+    if i + 1 < ch_count then
+        next_time = mp.get_property_number(string.format("chapter-list/%d/time", i + 1), nil)
+    elseif dur > 0 then
+        next_time = dur
+    end
+    return time, next_time
+end
+
 local function scan_chapters()
-    if aniskip_received then return end
-
-    op_start = nil
-    op_end = nil
-    ed_start = nil
-    ed_end = nil
-
+    ch = {}
     local ch_count = mp.get_property_number("chapters", 0)
     local dur = mp.get_property_number("duration", 0.0)
 
-    -- Phase 1: Named Chapter Recognition
+    -- Phase 1: chapters explicitly named Opening / Ending.
     for i = 0, ch_count - 1 do
         local title = mp.get_property(string.format("chapter-list/%d/title", i), "")
-        local time = mp.get_property_number(string.format("chapter-list/%d/time", i), 0.0)
-        local next_time = nil
-        if i + 1 < ch_count then
-            next_time = mp.get_property_number(string.format("chapter-list/%d/time", i + 1), nil)
-        elseif dur > 0 then
-            next_time = dur
-        end
-
-        if is_op(title) and not op_start then
-            op_start = time
-            op_end = next_time
-        elseif is_ed(title) and not ed_start then
-            ed_start = time
-            ed_end = next_time
+        local time, next_time = chapter_span(i, ch_count, dur)
+        if plausible(time, next_time) then
+            if is_op(title) and not ch.op_s then
+                ch.op_s, ch.op_e, ch.op_named = time, next_time, true
+            elseif is_ed(title) and not ch.ed_s then
+                ch.ed_s, ch.ed_e, ch.ed_named = time, next_time, true
+            end
         end
     end
 
-    -- Phase 2: Strict 90-Second Rule for Generic Chapters ("Chapter 1", "Chapter 2", etc.)
-    -- Anime OP and ED songs are standard ~90 seconds (85s to 95s).
-    if (not op_start or not ed_start) and ch_count > 0 then
+    -- Phase 2: generic chapters ("Chapter 1", ...). OP/ED songs are ~90s (85-95s).
+    -- A ~90s prologue can sit right before the OP, so when several 90s chapters exist in the
+    -- first half, prefer one that doesn't start at 0:00 (the cold open is always first).
+    if (not ch.op_s or not ch.ed_s) and ch_count > 0 and dur > 0 then
+        local op_cands = {}
         for i = 0, ch_count - 1 do
             local title = mp.get_property(string.format("chapter-list/%d/title", i), "")
             if not is_intro(title) then
-                local time = mp.get_property_number(string.format("chapter-list/%d/time", i), 0.0)
-                local next_time = nil
-                if i + 1 < ch_count then
-                    next_time = mp.get_property_number(string.format("chapter-list/%d/time", i + 1), nil)
-                elseif dur > 0 then
-                    next_time = dur
-                end
-
+                local time, next_time = chapter_span(i, ch_count, dur)
                 if next_time then
-                    local ch_len = next_time - time
-                    if ch_len >= 85 and ch_len <= 95 then
-                        if not op_start and time < (dur * 0.5) then
-                            op_start = time
-                            op_end = next_time
-                        elseif not ed_start and time >= (dur * 0.5) then
-                            ed_start = time
-                            ed_end = next_time
+                    local len = next_time - time
+                    if len >= 85 and len <= 95 then
+                        if time < dur * 0.5 then
+                            table.insert(op_cands, { s = time, e = next_time })
+                        elseif not ch.ed_s then
+                            ch.ed_s, ch.ed_e = time, next_time
                         end
                     end
                 end
             end
         end
+        if not ch.op_s and #op_cands > 0 then
+            local pick = op_cands[1]
+            if pick.s < 1.0 and op_cands[2] then pick = op_cands[2] end
+            ch.op_s, ch.op_e = pick.s, pick.e
+        end
     end
 
     chapters_scanned = (ch_count > 0 or dur > 0)
+    resolve()
 end
 
--- IPC Script Message from Kura (AniSkip frame-perfect timestamps)
+-- IPC Script Message from Kura (AniSkip timestamps, already matched to this file's length)
 mp.register_script_message("kura-skip-times", function(op_s, op_e, ed_s, ed_e)
-    local s_op = tonumber(op_s)
-    local e_op = tonumber(op_e)
-    local s_ed = tonumber(ed_s)
-    local e_ed = tonumber(ed_e)
-
-    if s_op and e_op and e_op > s_op then
-        op_start = s_op
-        op_end = e_op
-    end
-    if s_ed and e_ed and e_ed > s_ed then
-        ed_start = s_ed
-        ed_end = e_ed
-    end
-
-    aniskip_received = true
-    if update_state then
-        update_state()
-    end
+    ask = { op_s = tonumber(op_s), op_e = tonumber(op_e), ed_s = tonumber(ed_s), ed_e = tonumber(ed_e) }
+    resolve()
+    if update_state then update_state() end
 end)
+
+-- ---------------------------------------------------------------------------
+-- Skip button: rounded comic "sticker" pill, bottom-right, with a TAB key chip.
+-- ---------------------------------------------------------------------------
+local function rrect(w, h, r)
+    return string.format(
+        "m %d 0 l %d 0 b %d 0 %d %d %d %d l %d %d b %d %d %d %d %d %d l %d %d b %d %d 0 %d 0 %d l 0 %d b 0 %d %d 0 %d 0",
+        r, w - r, w - r / 2, w, r / 2, w, r, w, h - r, w, h - r / 2, w - r / 2, h, w - r, h,
+        r, h, r / 2, h, h - r / 2, h - r, r, r / 2, r / 2, r)
+end
 
 local function render_button()
     if not skip_overlay or not current_button then return end
 
-    if is_hovered then
-        skip_overlay.data = string.format(
-            "{\\an3\\pos(1860,960)\\b1\\fs28\\bord4\\shad3\\3c&H4D6DF7&\\c&HFFFFFF&}[ ⏭ SKIP %s {\\fs22\\c&HFFFFFF&}(Click or Tab) ]",
-            current_button:upper()
-        )
-    else
-        skip_overlay.data = string.format(
-            "{\\an3\\pos(1860,960)\\b1\\fs28\\bord3.5\\shad2.5\\3c&H0D0C14&\\c&H4D6DF7&}[ ⏭ SKIP %s {\\fs22\\c&HE2EDF7&}(Tab) ]",
-            current_button:upper()
-        )
+    -- Keep the pill's proportions on any window shape: fixed height space, width follows aspect.
+    local d = mp.get_property_native("osd-dimensions")
+    local res_x = 1920
+    if d and d.w and d.h and d.w > 0 and d.h > 0 then
+        res_x = math.floor(1080 * d.w / d.h + 0.5)
     end
+    skip_overlay.res_x = res_x
+    skip_overlay.res_y = 1080
+
+    local label = "SKIP " .. current_button:upper()
+    local h = 66
+    local icon_w, chip_w, chip_h = 26, 58, 32
+    -- pad | icon | gap | label | gap | chip | pad   (bold caps at fs30 ≈ 18px per char)
+    local w = 26 + icon_w + 16 + #label * 18 + 22 + chip_w + 16
+    local x = res_x - 60 - w
+    local y = 1080 - 130 - h
+    btn_box = { x, y, x + w, y + h }
+
+    local fill, text, chip_fill, chip_text
+    if is_hovered then
+        fill, text, chip_fill, chip_text = "&H4D6DF7&", "&H0D0C14&", "&H0D0C14&", "&HE2EDF7&"
+    else
+        fill, text, chip_fill, chip_text = "&H0D0C14&", "&HE2EDF7&", "&H4D6DF7&", "&H0D0C14&"
+    end
+
+    local chip_x = x + w - 16 - chip_w
+    local chip_y = y + (h - chip_h) / 2
+    local icon_x = x + 26
+    local icon_y = y + (h - 22) / 2
+
+    local events = {
+        -- Pill body with coral outline and a hard offset "sticker" shadow.
+        string.format("{\\an7\\pos(%d,%d)\\bord3.5\\shad6\\1c%s\\1a&H10&\\3c&H4D6DF7&\\4c&H0D0C14&\\4a&H40&\\p1}%s{\\p0}",
+            x, y, fill, rrect(w, h, 18)),
+        -- Fast-forward icon drawn as vectors (no font glyph needed).
+        string.format("{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c%s\\p1}m 0 0 l 13 11 l 0 22 m 13 0 l 26 11 l 13 22{\\p0}",
+            icon_x, icon_y, chip_fill == "&H4D6DF7&" and "&H4D6DF7&" or text),
+        -- Label.
+        string.format("{\\an4\\pos(%d,%d)\\bord0\\shad0\\b1\\fs30\\fsp1\\1c%s}%s",
+            icon_x + icon_w + 16, y + h / 2, text, label),
+        -- TAB key chip.
+        string.format("{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c%s\\p1}%s{\\p0}",
+            chip_x, chip_y, chip_fill, rrect(chip_w, chip_h, 8)),
+        string.format("{\\an5\\pos(%d,%d)\\bord0\\shad0\\b1\\fs18\\fsp1\\1c%s}TAB",
+            chip_x + chip_w / 2, chip_y + chip_h / 2, chip_text),
+    }
+    skip_overlay.data = table.concat(events, "\n")
     skip_overlay:update()
 end
 
 local function show_button(label)
     if not skip_overlay then return end
-    if current_button == label and not is_hovered then return end
+    if current_button == label then return end
     current_button = label
     render_button()
 end
@@ -852,6 +909,7 @@ local function hide_button()
     if current_button ~= nil then
         current_button = nil
         is_hovered = false
+        btn_box = nil
         if mouse_bound then
             mp.remove_key_binding("kura_skip_click")
             mouse_bound = false
@@ -860,148 +918,124 @@ local function hide_button()
     end
 end
 
+-- mp.osd_message only parses ASS styling when prefixed with osd-ass-cc/0; without it the raw
+-- {\an8...} tags were printed on screen.
+local function osd_ass(text, dur)
+    mp.osd_message(mp.get_property_osd("osd-ass-cc/0") .. text, dur)
+end
+
+local function ass_escape(s)
+    return (s:gsub("\\", "\\\226\129\160"):gsub("{", "\\{"):gsub("\n", " "))
+end
+
+local function osd(msg)
+    osd_ass("{\\an9\\b1\\fs20\\bord2.5\\shad0\\3c&H0D0C14&\\1c&H4D6DF7&}" .. msg, 2.0)
+end
+
 local function trigger_skip()
     local pos = mp.get_property_number("time-pos", 0.0)
 
-    -- If inside or near Opening -> jump past OP
-    if op_start and op_end and pos < op_end and (pos >= (op_start - 2) or op_start <= 25) then
+    if op_start and op_end and pos >= (op_start - 2) and pos < op_end then
         mp.commandv("seek", op_end + 0.5, "absolute", "exact")
-        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped Opening", 2.0)
-    -- If in Ending -> jump past ED
+        osd("Skipped Opening")
     elseif ed_start and ed_end and pos >= (ed_start - 2) and pos < ed_end then
         mp.commandv("seek", ed_end, "absolute", "exact")
-        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped Ending", 2.0)
-    -- If in cold open before OP -> jump directly to start of OP
-    elseif op_start and pos < op_start then
-        mp.commandv("seek", op_start + 0.2, "absolute", "exact")
-        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Jumped to Opening", 2.0)
+        osd("Skipped Ending")
     else
-        -- General anime song skip (+85s)
+        -- No known OP/ED here: plain song-length jump.
         mp.commandv("seek", 85, "relative", "exact")
-        mp.osd_message("{\\an8\\pos(0,50)\\b1\\fs26\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}⏭ Skipped +85s", 2.0)
+        osd("Skipped +85s")
     end
 
     hide_button()
-    if update_state then
-        update_state()
+    if update_state then update_state() end
+end
+
+local function set_hover(v)
+    if is_hovered == v then return end
+    is_hovered = v
+    render_button()
+    if v and not mouse_bound then
+        mp.add_forced_key_binding("MBTN_LEFT", "kura_skip_click", trigger_skip)
+        mouse_bound = true
+    elseif not v and mouse_bound then
+        mp.remove_key_binding("kura_skip_click")
+        mouse_bound = false
     end
 end
 
-local function on_click()
-    trigger_skip()
-end
-
 local function check_mouse()
-    if not current_button then
-        if mouse_bound then
-            mp.remove_key_binding("kura_skip_click")
-            mouse_bound = false
-            is_hovered = false
-        end
+    if not current_button or not btn_box then
+        set_hover(false)
         return
     end
 
     local m = mp.get_property_native("mouse-pos")
     local d = mp.get_property_native("osd-dimensions")
-    if not m or not d or not m.hover or d.w == 0 or d.h == 0 then
-        if is_hovered then
-            is_hovered = false
-            render_button()
-            if mouse_bound then
-                mp.remove_key_binding("kura_skip_click")
-                mouse_bound = false
-            end
-        end
+    if not m or not d or not m.hover or not d.w or d.w == 0 or d.h == 0 then
+        set_hover(false)
         return
     end
 
-    local vid_w = d.w - d.ml - d.mr
-    local vid_h = d.h - d.mt - d.mb
-    if vid_w <= 0 or vid_h <= 0 then return end
-
-    local vx = ((m.x - d.ml) / vid_w) * 1920
-    local vy = ((m.y - d.mt) / vid_h) * 1080
-
-    -- Button bounding box at \an3\pos(1860, 960)
-    local in_box = (vx >= 1400 and vx <= 1880 and vy >= 890 and vy <= 975)
-
-    if in_box then
-        if not is_hovered then
-            is_hovered = true
-            render_button()
-            mp.add_forced_key_binding("MBTN_LEFT", "kura_skip_click", on_click)
-            mouse_bound = true
-        end
-    else
-        if is_hovered then
-            is_hovered = false
-            render_button()
-            if mouse_bound then
-                mp.remove_key_binding("kura_skip_click")
-                mouse_bound = false
-            end
-        end
-    end
+    -- The overlay spans the whole window (not just the video area), so map against the window.
+    local ox = (m.x / d.w) * skip_overlay.res_x
+    local oy = (m.y / d.h) * 1080
+    local b = btn_box
+    set_hover(ox >= b[1] and ox <= b[3] and oy >= b[2] and oy <= b[4])
 end
 
 update_state = function()
-    if not aniskip_received and not chapters_scanned then
+    if not chapters_scanned then
         scan_chapters()
     end
 
-    local pos = mp.get_property_number("time-pos", 0.0)
+    local pos = mp.get_property_number("time-pos", nil)
     if not pos then
         hide_button()
         return
     end
 
-    -- 1. Currently inside Opening sequence (or near start if OP starts within first 25s)
-    if op_start and op_end and pos < op_end and (pos >= op_start or (op_start <= 25 and pos <= op_end)) then
+    -- Only show the button while actually inside the OP/ED, never during a prologue / cold open.
+    if op_start and op_end and pos >= (op_start - 1) and pos < (op_end - 1) then
         show_button("Opening")
-        return
-    end
-
-    -- 2. Currently inside Ending sequence
-    if ed_start and ed_end and pos >= ed_start and pos < ed_end then
+    elseif ed_start and ed_end and pos >= (ed_start - 1) and pos < (ed_end - 1) then
         show_button("Ending")
-        return
+    else
+        hide_button()
     end
-
-    -- 3. At the start of the episode (first 15s) when there is a delayed OP (cold open / prologue)
-    if op_start and op_start > 25 and pos >= 0 and pos <= 15 then
-        show_button("to Opening")
-        return
-    end
-
-    hide_button()
 end
+
+mp.observe_property("osd-dimensions", "native", function()
+    if current_button then render_button() end
+end)
+
+-- The last chapter's length depends on the duration, which can arrive after file-loaded.
+mp.observe_property("duration", "number", function()
+    chapters_scanned = false
+end)
 
 -- 1. Styled "Now Playing" Banner on file start
 mp.register_event("file-loaded", function()
-    aniskip_received = false
+    ask = {}
     chapters_scanned = false
+    hide_button()
     scan_chapters()
     update_state()
     local title = mp.get_property("media-title", "")
     if title ~= "" then
-        mp.osd_message("{\\an7\\pos(30,30)\\b1\\fs24\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}🌸 KURA {\\c&HE2EDF7&}• {\\fs20\\c&HE2EDF7&}" .. title, 3.5)
+        osd_ass("{\\an7\\b1\\fs17\\bord2.5\\shad0\\3c&H0D0C14&\\1c&H4D6DF7&}KURA  {\\b0\\fs15\\1c&HE2EDF7&}" .. ass_escape(title), 3.5)
     end
 end)
 
 -- 2. Subtitle Delay Shortcuts: 'z' (-100ms) and 'x' (+100ms)
-mp.add_forced_key_binding("z", "kura_sub_delay_down", function()
-    local d = mp.get_property_number("sub-delay", 0.0) - 0.1
+local function sub_delay(step)
+    local d = mp.get_property_number("sub-delay", 0.0) + step
     mp.set_property_number("sub-delay", d)
     local ms = math.floor(d * 1000 + 0.5)
-    mp.osd_message(string.format("{\\an8\\pos(0,40)\\b1\\fs24\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}💬 SUBTITLE DELAY: {\\c&HE2EDF7&}%+d ms", ms), 1.5)
-end)
-
-mp.add_forced_key_binding("x", "kura_sub_delay_up", function()
-    local d = mp.get_property_number("sub-delay", 0.0) + 0.1
-    mp.set_property_number("sub-delay", d)
-    local ms = math.floor(d * 1000 + 0.5)
-    mp.osd_message(string.format("{\\an8\\pos(0,40)\\b1\\fs24\\bord3\\shad2\\3c&H0D0C14&\\c&H4D6DF7&}💬 SUBTITLE DELAY: {\\c&HE2EDF7&}%+d ms", ms), 1.5)
-end)
+    osd_ass(string.format("{\\an8\\b1\\fs18\\bord2.5\\shad0\\3c&H0D0C14&\\1c&H4D6DF7&}SUBTITLE DELAY  {\\1c&HE2EDF7&}%+d ms", ms), 1.5)
+end
+mp.add_forced_key_binding("z", "kura_sub_delay_down", function() sub_delay(-0.1) end)
+mp.add_forced_key_binding("x", "kura_sub_delay_up", function() sub_delay(0.1) end)
 
 -- 3. Smart OP/ED Skip on 'Tab'
 mp.add_forced_key_binding("Tab", "kura_skip_oped", trigger_skip)
@@ -1229,12 +1263,16 @@ pub struct AniSkipTimes {
     pub ed_end: Option<f64>,
 }
 
-pub async fn fetch_aniskip(client: &reqwest::Client, mal_id: i64, ep_num: i64) -> Option<AniSkipTimes> {
-    let url = format!("https://api.aniskip.com/v2/skip-times/{mal_id}/{ep_num}?types=op&types=ed&episodeLength=0");
+/// Fetch OP/ED times from AniSkip. `episode_length` (seconds) should be the actual file's duration:
+/// AniSkip timestamps are only valid for a release with the same length — a TV vs. BD cut with a
+/// longer prologue shifts the OP, which made Kura flag prologues as openings. Pass `0.0` to skip the check.
+pub async fn fetch_aniskip(client: &reqwest::Client, mal_id: i64, ep_num: i64, episode_length: f64) -> Option<AniSkipTimes> {
+    let len = if episode_length > 0.0 { episode_length.round() as i64 } else { 0 };
+    let url = format!("https://api.aniskip.com/v2/skip-times/{mal_id}/{ep_num}?types=op&types=ed&episodeLength={len}");
     let resp = client
         .get(&url)
-        .header("User-Agent", "Kura/0.3.5")
-        .timeout(Duration::from_millis(2000))
+        .header("User-Agent", "Kura/0.3.6")
+        .timeout(Duration::from_millis(2500))
         .send()
         .await
         .ok()?;
@@ -1247,24 +1285,46 @@ pub async fn fetch_aniskip(client: &reqwest::Client, mal_id: i64, ep_num: i64) -
     if !val.get("found").and_then(|v| v.as_bool()).unwrap_or(false) {
         return None;
     }
+    parse_aniskip(&val, episode_length)
+}
 
+/// Results come sorted best-first, so the first plausible entry of each type wins.
+fn parse_aniskip(val: &serde_json::Value, episode_length: f64) -> Option<AniSkipTimes> {
     let results = val.get("results")?.as_array()?;
     let mut skip = AniSkipTimes::default();
 
     for item in results {
         let skip_type = item.get("skipType").and_then(|s| s.as_str()).unwrap_or("");
-        let start = item.get("interval").and_then(|i| i.get("startTime")).and_then(|s| s.as_f64());
-        let end = item.get("interval").and_then(|i| i.get("endTime")).and_then(|e| e.as_f64());
-
-        if skip_type == "op" {
-            skip.op_start = start;
-            skip.op_end = end;
-        } else if skip_type == "ed" {
-            skip.ed_start = start;
-            skip.ed_end = end;
+        let (Some(start), Some(end)) = (
+            item.get("interval").and_then(|i| i.get("startTime")).and_then(|s| s.as_f64()),
+            item.get("interval").and_then(|i| i.get("endTime")).and_then(|e| e.as_f64()),
+        ) else {
+            continue;
+        };
+        // A real OP/ED song is ~30s-200s; anything else is bad data.
+        if !(30.0..=200.0).contains(&(end - start)) {
+            continue;
+        }
+        // Submitted for a different cut of the episode → timestamps would be offset.
+        if episode_length > 0.0 {
+            if let Some(sub_len) = item.get("episodeLength").and_then(|l| l.as_f64()) {
+                if sub_len > 0.0 && (sub_len - episode_length).abs() > 4.0 {
+                    continue;
+                }
+            }
+        }
+        if skip_type == "op" && skip.op_start.is_none() {
+            skip.op_start = Some(start);
+            skip.op_end = Some(end);
+        } else if skip_type == "ed" && skip.ed_start.is_none() {
+            skip.ed_start = Some(start);
+            skip.ed_end = Some(end);
         }
     }
 
+    if skip == AniSkipTimes::default() {
+        return None;
+    }
     Some(skip)
 }
 
@@ -1876,7 +1936,26 @@ async fn sync_aniskip_to_player(ctl: &mut Controller, st: &AppState, ep: &Ep) {
         let ep_num: Option<i64> = ep.ep_key.parse().ok();
 
         if let (Some(ref client), Some(mid), Some(enum_val)) = (http_client.as_ref(), mal_id, ep_num) {
-            if let Some(skip) = fetch_aniskip(client, mid, enum_val).await {
+            // Wait (up to ~6s) until mpv has loaded *this* file and knows its duration,
+            // so AniSkip results can be matched to this exact cut of the episode.
+            let mut duration = 0.0;
+            for _ in 0..20 {
+                let path_ok = match mpv.prop("path").await {
+                    Some(serde_json::Value::String(p)) => same_file(&p, &ep.path),
+                    None => return, // player gone
+                    _ => false,
+                };
+                let d = mpv.prop("duration").await.and_then(|v| v.as_f64()).unwrap_or(0.0);
+                if path_ok && d > 0.0 {
+                    duration = d;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            if duration <= 0.0 {
+                return; // unknown length → can't trust AniSkip timestamps; chapters are used instead
+            }
+            if let Some(skip) = fetch_aniskip(client, mid, enum_val, duration).await {
                 let _ = mpv.send_skip_times(skip).await;
             }
         }
@@ -2206,11 +2285,38 @@ mod tests {
     async fn aniskip_fetch() {
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         // Trapped in a Dating Sim S01E01 (MAL ID: 50461)
-        if let Some(skip) = fetch_aniskip(&client, 50461, 1).await {
+        if let Some(skip) = fetch_aniskip(&client, 50461, 1, 0.0).await {
             assert!(skip.op_start.is_some());
             assert!(skip.op_end.is_some());
             let op_len = skip.op_end.unwrap() - skip.op_start.unwrap();
             assert!((op_len - 90.0).abs() < 2.0);
         }
+    }
+
+    #[test]
+    fn aniskip_rejects_other_cuts_and_bad_lengths() {
+        let val = serde_json::json!({
+            "found": true,
+            "results": [
+                // Prologue mislabelled as OP (too short) → ignored
+                { "skipType": "op", "episodeLength": 1420.0, "interval": { "startTime": 0.0, "endTime": 20.0 } },
+                // Submitted for a BD cut 40s longer → ignored
+                { "skipType": "op", "episodeLength": 1460.0, "interval": { "startTime": 150.0, "endTime": 240.0 } },
+                // Matches this file → used
+                { "skipType": "op", "episodeLength": 1421.5, "interval": { "startTime": 110.0, "endTime": 200.0 } },
+                // Lower-voted duplicate → ignored (first one wins)
+                { "skipType": "op", "episodeLength": 1420.0, "interval": { "startTime": 112.0, "endTime": 202.0 } },
+                { "skipType": "ed", "episodeLength": 1420.0, "interval": { "startTime": 1300.0, "endTime": 1390.0 } }
+            ]
+        });
+        let s = parse_aniskip(&val, 1420.0).unwrap();
+        assert_eq!((s.op_start, s.op_end), (Some(110.0), Some(200.0)));
+        assert_eq!((s.ed_start, s.ed_end), (Some(1300.0), Some(1390.0)));
+
+        // Nothing plausible → None, so mpv falls back to chapters.
+        let bad = serde_json::json!({ "found": true, "results": [
+            { "skipType": "op", "episodeLength": 1420.0, "interval": { "startTime": 0.0, "endTime": 15.0 } }
+        ]});
+        assert!(parse_aniskip(&bad, 1420.0).is_none());
     }
 }

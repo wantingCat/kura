@@ -62,8 +62,8 @@
         <div class="feature-item">
           <div class="feature-icon">🎌</div>
           <div class="feature-text">
-            <strong>Japanese Immersion Ready</strong>
-            <small>Real-time subtitle streaming and transparent Yomitan dictionary integration.</small>
+            <strong>Remembers Your Tracks</strong>
+            <small>Resume where you left off with your audio and subtitle choices kept per series.</small>
           </div>
         </div>
       </div>
