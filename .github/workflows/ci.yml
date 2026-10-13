@@ -1,0 +1,67 @@
+name: 'CI'
+
+# Runs on every push to main and every pull request, so platform-specific
+# compile errors (like the Linux/macOS break in v0.3.4) are caught before a
+# release tag is pushed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (svelte-check + build)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+
+  rust:
+    name: Rust (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, ubuntu-22.04, macos-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install system dependencies (Ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libxdo-dev
+
+      # tauri::generate_context! requires frontendDist (../build) to exist at
+      # compile time; an empty folder is enough for check/test.
+      - name: Create placeholder frontend build
+        shell: bash
+        run: mkdir -p build && touch build/index.html
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --all-targets --locked
+
+      - name: cargo test
+        working-directory: src-tauri
+        # Network-dependent tests (AniSkip) tolerate failures internally.
+        run: cargo test --lib --locked

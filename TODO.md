@@ -13,7 +13,8 @@ This document serves as the master planning roadmap for Kura, organizing propose
 | **v0.3.4** | **Playback & Immersion**: Interactive MPV Skip OP/ED Overlay, AniSkip, Changelog Popup & Settings Persistence | ✅ Completed |
 | **v0.3.5** | **Bug Fix**: Reliable MPV detection after winget install (registry, WinGet folders, fresh PATH) | ✅ Completed |
 | **v0.3.6** | **Bug Fix**: Skip button no longer triggers on prologues (length-matched AniSkip, stricter chapter detection) + redesigned skip button & styled MPV messages | ✅ Completed |
-| **v0.4.0** | **Foundations**: Settings Overhaul (sidebar + search), Full Backup & Restore, Diagnostics, CI Checks, Advanced Filtering, Visual Bug Sweep | 💡 Planned |
+| **v0.3.7** | **Foundations (part 1)**: Settings Overhaul (sidebar + search), Full Backup & Restore, Diagnostics & Log, CI Checks, Startup-Hang Fix, Maximized Window | ✅ Completed |
+| **v0.4.0** | **Foundations (part 2)**: Advanced Filtering, Visual Bug Sweep | 🚧 In Progress |
 | **v0.5.0** | **Sync & Airing**: AniList Two-Way Sync + Seasonal Airing Calendar & Countdown | 💡 Planned |
 | **v0.6.0** | **Subtitles & Cast**: Jimaku.cc Japanese Subtitle Fetcher + Smart Subtitle Matcher + Characters, Seiyuu & Staff | 💡 Planned |
 | **v0.7.0** | **Watch Analytics**: Watch-Time & Immersion Hours Tracker + Yearly Activity Heatmap | 💡 Planned |

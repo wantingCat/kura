@@ -3,8 +3,7 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE libraries (
@@ -179,9 +178,11 @@ pub fn open(path: &Path) -> Result<Connection> {
     let data_dir = path.parent().unwrap_or(Path::new("."));
     let restored = restore_user_data_if_needed(&conn, data_dir).unwrap_or(false);
     let _ = seed_default_prefs_if_missing(&conn);
-    if !restored {
-        backup_user_data(&conn, data_dir);
+    if restored {
+        crate::klog!("[kura] database was missing user data; filled it from the safety backup");
     }
+    // Refresh the safety copy shortly after launch (written in the background, see backup::start_auto).
+    crate::backup::mark_dirty();
 
     Ok(conn)
 }
@@ -193,157 +194,14 @@ pub struct BackupLibrary {
     pub folders: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserDataBackup {
-    pub version: u32,
-    pub updated_at: i64,
-    pub settings: HashMap<String, String>,
-    pub libraries: Vec<BackupLibrary>,
-}
-
-fn get_backup_paths(data_dir: &Path) -> Vec<PathBuf> {
-    let mut paths = vec![data_dir.join("kura_backup.json")];
-
-    #[cfg(windows)]
-    {
-        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
-            paths.push(PathBuf::from(user_profile).join(".kura").join("kura_backup.json"));
-        }
-        if let Some(app_data) = std::env::var_os("APPDATA") {
-            paths.push(PathBuf::from(app_data).join("Kura").join("kura_backup.json"));
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            paths.push(home.join(".kura").join("kura_backup.json"));
-            paths.push(home.join(".config").join("kura").join("kura_backup.json"));
-        }
-    }
-
-    paths
-}
-
+/// Synchronously write the automatic safety copy (see [`crate::backup`]).
 pub fn backup_user_data(conn: &Connection, data_dir: &Path) {
-    let _ = (|| -> Result<()> {
-        let mut settings_stmt = conn.prepare("SELECT key, value FROM settings")?;
-        let settings_map: HashMap<String, String> = settings_stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .flatten()
-            .collect();
-
-        let mut lib_stmt = conn.prepare("SELECT id, name, kind FROM libraries")?;
-        let mut libraries = Vec::new();
-        let lib_rows = lib_stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
-        for lib_res in lib_rows.flatten() {
-            let (lib_id, name, kind) = lib_res;
-            let mut folder_stmt =
-                conn.prepare("SELECT path FROM library_folders WHERE library_id = ?1")?;
-            let folders: Vec<String> = folder_stmt
-                .query_map([lib_id], |r| r.get(0))?
-                .flatten()
-                .collect();
-            libraries.push(BackupLibrary {
-                name,
-                kind,
-                folders,
-            });
-        }
-
-        // Never overwrite a good backup with an empty database
-        if settings_map.is_empty() && libraries.is_empty() {
-            return Ok(());
-        }
-
-        let backup = UserDataBackup {
-            version: 1,
-            updated_at: now(),
-            settings: settings_map,
-            libraries,
-        };
-
-        let json = serde_json::to_string_pretty(&backup)?;
-        let backup_paths = get_backup_paths(data_dir);
-        for path in backup_paths {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(&path, &json);
-        }
-        Ok(())
-    })();
+    crate::backup::write_safety_copy(conn, data_dir);
 }
 
+/// Fill empty parts of the database from the newest safety copy (see [`crate::backup`]).
 pub fn restore_user_data_if_needed(conn: &Connection, data_dir: &Path) -> Result<bool> {
-    let settings_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM settings WHERE key LIKE 'pref.%'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    let libraries_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM libraries", [], |r| r.get(0))
-        .unwrap_or(0);
-
-    // If we already have preferences and libraries, nothing to restore.
-    if settings_count > 0 && libraries_count > 0 {
-        return Ok(false);
-    }
-
-    let backup_paths = get_backup_paths(data_dir);
-    for path in backup_paths {
-        if path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(backup) = serde_json::from_str::<UserDataBackup>(&content) {
-                    let mut restored_something = false;
-
-                    // Restore settings if empty
-                    if settings_count == 0 && !backup.settings.is_empty() {
-                        for (k, v) in &backup.settings {
-                            let _ = conn.execute(
-                                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-                                params![k, v],
-                            );
-                        }
-                        restored_something = true;
-                    }
-
-                    // Restore libraries if empty
-                    if libraries_count == 0 && !backup.libraries.is_empty() {
-                        for lib in &backup.libraries {
-                            let _ = conn.execute(
-                                "INSERT INTO libraries (name, kind, created_at) VALUES (?1, ?2, ?3)",
-                                params![lib.name, lib.kind, now()],
-                            );
-                            let lib_id = conn.last_insert_rowid();
-                            for folder in &lib.folders {
-                                let _ = conn.execute(
-                                    "INSERT OR IGNORE INTO library_folders (library_id, path) VALUES (?1, ?2)",
-                                    params![lib_id, folder],
-                                );
-                            }
-                        }
-                        restored_something = true;
-                    }
-
-                    if restored_something {
-                        eprintln!("[kura] restored user data from backup: {:?}", path);
-                        return Ok(true);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(false)
+    crate::backup::restore_if_needed(conn, data_dir)
 }
 
 pub fn seed_default_prefs_if_missing(conn: &Connection) -> Result<()> {
@@ -389,6 +247,11 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch(&format!("BEGIN; {SCHEMA_V4} PRAGMA user_version = 4; COMMIT;"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn migrate_for_tests(conn: &Connection) -> Result<()> {
+    migrate(conn)
 }
 
 pub fn now() -> i64 {
@@ -567,7 +430,7 @@ mod tests {
 
         // 1. Initial db with user libraries & prefs
         let conn1 = Connection::open_in_memory().unwrap();
-        conn1.execute_batch(SCHEMA_V1).unwrap();
+        migrate(&conn1).unwrap();
         set_setting(&conn1, "pref.player", "mpv").unwrap();
         set_setting(&conn1, "pref.theme", "manga").unwrap();
         conn1.execute("INSERT INTO libraries (id, name, kind, created_at) VALUES (1, 'Anime', 'anime', ?1)", [now()]).unwrap();
@@ -581,7 +444,7 @@ mod tests {
 
         // 2. New blank database (simulating upgrade or wiped db)
         let conn2 = Connection::open_in_memory().unwrap();
-        conn2.execute_batch(SCHEMA_V1).unwrap();
+        migrate(&conn2).unwrap();
 
         let restored = restore_user_data_if_needed(&conn2, &temp_dir).unwrap();
         assert!(restored, "Should restore from backup");

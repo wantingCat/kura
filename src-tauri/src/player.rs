@@ -63,8 +63,8 @@ impl Kind {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Detected {
-    kind: &'static str,
-    path: String,
+    pub kind: &'static str,
+    pub path: String,
 }
 
 fn exe_names(kind: Kind) -> &'static [&'static str] {
@@ -491,14 +491,18 @@ pub fn check_tool_exists(name: &str) -> bool {
                 return true;
             }
         }
-        std::process::Command::new("where.exe")
-            .arg(name)
+        let mut cmd = std::process::Command::new("where.exe");
+        cmd.arg(name)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.status().map(|s| s.success()).unwrap_or(false)
     } else {
         std::process::Command::new("which")
             .arg(name)
@@ -1271,7 +1275,7 @@ pub async fn fetch_aniskip(client: &reqwest::Client, mal_id: i64, ep_num: i64, e
     let url = format!("https://api.aniskip.com/v2/skip-times/{mal_id}/{ep_num}?types=op&types=ed&episodeLength={len}");
     let resp = client
         .get(&url)
-        .header("User-Agent", "Kura/0.3.6")
+        .header("User-Agent", "Kura/0.3.7")
         .timeout(Duration::from_millis(2500))
         .send()
         .await
@@ -1627,6 +1631,9 @@ pub struct PlaybackEvent {
 }
 
 fn emit(app: &AppHandle, state: &'static str, kind: Kind, ep: &Ep, pos: f64, dur: f64, hint: Option<String>) {
+    if let Some(h) = &hint {
+        crate::klog!("[kura] playback ({}) {state}: {h}", kind.id());
+    }
     let _ = app.emit(
         "playback",
         PlaybackEvent { state, player: kind.id(), anilist_id: ep.anilist_id, ep_key: ep.ep_key.clone(), position: pos, duration: dur, hint },
@@ -1773,6 +1780,14 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         .filter(|x| x.is_file())
         .or_else(|| detect(p.kind))
         .ok_or_else(|| anyhow!("Couldn't find {} — set its location in Settings → Playback.", p.kind.id()))?;
+    crate::klog!(
+        "[kura] play {} / {} with {} ({}) from {:.0}s",
+        ep.anilist_id,
+        ep.ep_key,
+        p.kind.id(),
+        exe.display(),
+        start
+    );
 
     let tag = token();
     let mut cmd = std::process::Command::new(&exe);

@@ -66,7 +66,7 @@ pub async fn ensure_media(st: &AppState, id: i64) -> Result<()> {
         Ok(m) => store::upsert_media(&st.db(), &m),
         // Offline / API error: fall back to whatever we have.
         Err(e) if existing.is_some() => {
-            eprintln!("[kura] refresh of media {id} failed, using cache: {e}");
+            crate::klog!("[kura] refresh of media {id} failed, using cache: {e}");
             Ok(())
         }
         Err(e) => Err(e),
@@ -86,7 +86,7 @@ pub async fn ensure_episodes(st: &AppState, id: i64) -> Result<()> {
         return Ok(());
     }
     if let Err(e) = fetch_episodes(st, &m).await {
-        eprintln!("[kura] episode fetch for {id} failed: {e}");
+        crate::klog!("[kura] episode fetch for {id} failed: {e}");
     }
     Ok(())
 }
@@ -101,7 +101,7 @@ pub async fn fetch_episodes(st: &AppState, m: &MediaLite) -> Result<()> {
             (data.episodes, Some(data.images), data.thetvdb_id)
         }
         Err(e) => {
-            eprintln!("[kura] ani.zip failed for {}: {e}", m.id);
+            crate::klog!("[kura] ani.zip failed for {}: {e}", m.id);
             (Vec::new(), None, None)
         }
     };
@@ -119,7 +119,7 @@ pub async fn fetch_episodes(st: &AppState, m: &MediaLite) -> Result<()> {
             match st.providers.fanart_tv_images(tvdb, key.trim()).await {
                 Ok(imgs) => Some(imgs),
                 Err(e) => {
-                    eprintln!("[kura] Fanart.tv failed for TVDB {tvdb}: {e}");
+                    crate::klog!("[kura] Fanart.tv failed for TVDB {tvdb}: {e}");
                     None
                 }
             }
@@ -190,7 +190,7 @@ pub async fn fetch_episodes(st: &AppState, m: &MediaLite) -> Result<()> {
                     }
                 }
                 Ok(_) => {}
-                Err(e) => eprintln!("[kura] Jikan failed for MAL {mal}: {e}"),
+                Err(e) => crate::klog!("[kura] Jikan failed for MAL {mal}: {e}"),
             }
         }
     }

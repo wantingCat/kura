@@ -365,7 +365,7 @@
 
                     <div class="ep-body">
                       <div class="ep-title-row">
-                        <h3>{epTitle(e)}</h3>
+                        <h3 title={epTitle(e)}>{epTitle(e)}</h3>
                         {#if isLaunchingThis}
                           <span class="badge badge-accent launching-badge">
                             <span class="spinner spinner-xs"></span> Launching…
@@ -1181,6 +1181,12 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
+  }
+  /* Badges keep their size; the title is what gives way on long names. */
+  .ep-title-row > :global(.badge) {
+    flex-shrink: 0;
+    white-space: nowrap;
   }
   .ep h3 {
     font-family: var(--font-display);
@@ -1189,6 +1195,9 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    /* Flex items default to min-width: auto, which stops nowrap text from shrinking. */
+    min-width: 0;
+    flex: 0 1 auto;
   }
   .ep.watched h3 {
     color: var(--text-2);

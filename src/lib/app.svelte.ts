@@ -132,6 +132,13 @@ class AppStore {
       }
     });
     this.scanning = await api.isScanning();
+    await this.loadPrefs();
+    await this.refresh();
+    if (this.autoUpdate) setTimeout(() => updater.check(), 3000);
+  }
+
+  /** (Re)load preferences from the backend — at startup and after a settings import. */
+  async loadPrefs() {
     try {
       const prefs = await api.getPrefs();
       if (prefs.theme === "comic" || prefs.theme === "manga") {
@@ -163,8 +170,6 @@ class AppStore {
     } catch {
       /* keep defaults */
     }
-    await this.refresh();
-    if (this.autoUpdate) setTimeout(() => updater.check(), 3000);
   }
 
   scheduleRefresh() {

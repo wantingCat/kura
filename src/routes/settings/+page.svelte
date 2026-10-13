@@ -1,9 +1,20 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { open } from "@tauri-apps/plugin-dialog";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { onMount, tick } from "svelte";
+  import { open, save } from "@tauri-apps/plugin-dialog";
+  import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import { getVersion } from "@tauri-apps/api/app";
-  import { api, type DetectedPlayer, type Library, type PlayerKind } from "$lib/api";
+  import {
+    api,
+    type BackupSummary,
+    type DetectedPlayer,
+    type Diagnostics,
+    type ImportOptions,
+    type ImportReport,
+    type Library,
+    type PlayerKind,
+    type SafetyCopy,
+  } from "$lib/api";
+  import { relativeTime } from "$lib/format";
   import { app } from "$lib/app.svelte";
   import { updater } from "$lib/updater.svelte";
   import Icon from "$lib/components/Icon.svelte";
@@ -75,7 +86,7 @@
     { kind: "system", name: "System default", blurb: "Opens normally, no tracking" },
   ];
   let detected = $state<DetectedPlayer[]>([]);
-  let version = $state("0.3.6");
+  let version = $state("0.3.7");
   let threshold = $state(app.playback.threshold);
   $effect(() => {
     threshold = app.playback.threshold;
@@ -90,7 +101,7 @@
     try {
       version = await getVersion();
     } catch {
-      version = "0.3.6";
+      version = "0.3.7";
     }
   });
 
@@ -172,17 +183,382 @@
     confirmDelete = null;
     await app.refresh();
   }
+
+  // Backup & Restore --------------------------------------------------------
+  let safety = $state<SafetyCopy[]>([]);
+  let exporting = $state(false);
+  let exported = $state<BackupSummary | null>(null);
+  let preview = $state<BackupSummary | null>(null);
+  let importOpts = $state<ImportOptions>({ settings: true, libraries: true, history: true, trackPrefs: true, matches: true });
+  let importing = $state(false);
+  let importReport = $state<ImportReport | null>(null);
+
+  const fileName = (p: string) => p.split(/[\\/]/).pop() ?? p;
+  const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+
+  async function loadSafety() {
+    try {
+      safety = await api.backupStatus();
+    } catch {
+      safety = [];
+    }
+  }
+
+  async function doExport() {
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const path = await save({
+      title: "Export Kura backup",
+      defaultPath: `kura-backup-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.json`,
+      filters: [{ name: "Kura backup", extensions: ["json"] }],
+    });
+    if (!path) return;
+    exporting = true;
+    try {
+      exported = await api.exportBackup(path);
+      app.toast("Backup saved.", "info", 4000);
+    } catch (e) {
+      app.toast(String(e), "error", 8000);
+    } finally {
+      exporting = false;
+    }
+  }
+
+  async function pickImport() {
+    const picked = await open({
+      multiple: false,
+      directory: false,
+      title: "Choose a Kura backup",
+      filters: [{ name: "Kura backup", extensions: ["json"] }],
+    });
+    if (typeof picked !== "string") return;
+    importReport = null;
+    try {
+      const p = await api.previewBackup(picked);
+      importOpts = {
+        settings: p.settings > 0,
+        libraries: p.libraries.length > 0,
+        history: p.watched + p.progress > 0,
+        trackPrefs: p.trackPrefs > 0,
+        matches: p.manualMatches > 0,
+      };
+      preview = p;
+    } catch (e) {
+      preview = null;
+      app.toast(String(e), "error", 8000);
+    }
+  }
+
+  const importRows = $derived.by(() => {
+    const p = preview;
+    if (!p) return [];
+    const folders = p.libraries.reduce((n, l) => n + l.folders, 0);
+    return [
+      { key: "settings" as const, label: "Settings", count: p.settings, detail: `${plural(p.settings, "preference")} — theme, player, languages…` },
+      {
+        key: "libraries" as const,
+        label: "Libraries & folders",
+        count: p.libraries.length,
+        detail: p.libraries.length
+          ? `${p.libraries.map((l) => l.name).join(", ")} · ${plural(folders, "folder")}`
+          : "None in this backup",
+      },
+      {
+        key: "history" as const,
+        label: "Watch history & resume points",
+        count: p.watched + p.progress,
+        detail: `${plural(p.watched, "watched episode")} across ${plural(p.showsWatched, "show")} · ${plural(p.progress, "resume point")}`,
+      },
+      { key: "trackPrefs" as const, label: "Per-show audio & subtitles", count: p.trackPrefs, detail: plural(p.trackPrefs, "show override") },
+      { key: "matches" as const, label: "Fixed matches", count: p.manualMatches, detail: plural(p.manualMatches, "manual match", "manual matches") },
+    ];
+  });
+  const anySelected = $derived(importRows.some((r) => r.count > 0 && importOpts[r.key]));
+
+  async function doImport() {
+    if (!preview) return;
+    importing = true;
+    try {
+      importReport = await api.importBackup(preview.path, $state.snapshot(importOpts));
+      if (importOpts.settings) await app.loadPrefs();
+      await app.refresh();
+      preview = null;
+      app.toast("Backup imported.", "info", 5000);
+      loadSafety();
+    } catch (e) {
+      app.toast(String(e), "error", 8000);
+    } finally {
+      importing = false;
+    }
+  }
+
+  const reportText = (r: ImportReport) => {
+    const parts = [
+      r.settings && plural(r.settings, "setting"),
+      r.librariesAdded && plural(r.librariesAdded, "new library", "new libraries"),
+      r.foldersAdded && plural(r.foldersAdded, "folder"),
+      r.watchedAdded && plural(r.watchedAdded, "watched episode"),
+      r.progressAdded && plural(r.progressAdded, "resume point"),
+      r.trackPrefs && plural(r.trackPrefs, "show override"),
+      r.matches && plural(r.matches, "fixed match", "fixed matches"),
+    ].filter(Boolean);
+    return parts.length ? parts.join(", ") : "nothing new — this library already had everything";
+  };
+
+  async function reveal(path: string) {
+    try {
+      await revealItemInDir(path);
+    } catch (e) {
+      app.toast(String(e), "error", 6000);
+    }
+  }
+
+  // Categories & search -----------------------------------------------------
+  type CatId =
+    | "libraries"
+    | "appearance"
+    | "playback"
+    | "tracks"
+    | "artwork"
+    | "integrations"
+    | "backup"
+    | "updates"
+    | "about";
+
+  const CATEGORIES: { id: CatId; label: string; icon: string }[] = [
+    { id: "libraries", label: "Libraries", icon: "library" },
+    { id: "appearance", label: "Appearance", icon: "palette" },
+    { id: "playback", label: "Playback", icon: "play" },
+    { id: "tracks", label: "Audio & Subtitles", icon: "subtitles" },
+    { id: "artwork", label: "Artwork & Metadata", icon: "image" },
+    { id: "integrations", label: "Integrations", icon: "discord" },
+    { id: "backup", label: "Backup & Restore", icon: "archive" },
+    { id: "updates", label: "Updates", icon: "refresh" },
+    { id: "about", label: "About & Diagnostics", icon: "info" },
+  ];
+  const catOf = (id: CatId) => CATEGORIES.find((c) => c.id === id)!;
+
+  const CAT_KEY = "kura.settings.category";
+  function loadCat(): CatId {
+    try {
+      const v = localStorage.getItem(CAT_KEY);
+      if (v && CATEGORIES.some((c) => c.id === v)) return v as CatId;
+    } catch {}
+    return "libraries";
+  }
+  let active = $state<CatId>(loadCat());
+  let rootEl = $state<HTMLElement>();
+  let searchEl = $state<HTMLInputElement>();
+
+  $effect(() => {
+    if (active === "backup") loadSafety();
+  });
+
+  // Diagnostics -------------------------------------------------------------
+  let diag = $state<Diagnostics | null>(null);
+  let diagLoading = $state(false);
+  let copied = $state(false);
+  let showLog = $state(false);
+
+  async function loadDiag() {
+    diagLoading = true;
+    try {
+      diag = await api.getDiagnostics();
+      detected = diag.players;
+    } catch (e) {
+      app.toast(String(e), "error", 6000);
+    } finally {
+      diagLoading = false;
+    }
+  }
+
+  async function copyText(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Fallback for webviews without async clipboard access.
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+  }
+
+  async function copyDiag() {
+    await loadDiag(); // always copy a fresh report
+    if (!diag) return;
+    await copyText(diag.report);
+    copied = true;
+    setTimeout(() => (copied = false), 2200);
+  }
+
+  $effect(() => {
+    if (active === "about") loadDiag();
+  });
+
+  function go(id: CatId) {
+    query = "";
+    if (active !== id) rootEl?.scrollIntoView({ block: "start" });
+    active = id;
+    try {
+      localStorage.setItem(CAT_KEY, id);
+    } catch {}
+  }
+
+  /** Searchable index. `target` is an element id; `fallback` is used when the
+   *  target is conditionally hidden (e.g. sub-options of a disabled toggle). */
+  type Entry = { cat: CatId; label: string; hint: string; target: string; fallback?: string; kw: string };
+  const INDEX: Entry[] = [
+    { cat: "libraries", label: "New library", hint: "Create an anime library from your folders", target: "settings-new-library", kw: "add create" },
+    { cat: "libraries", label: "Library folders", hint: "Add, remove or rescan folders", target: "set-libraries", kw: "folder path rescan rename remove delete drive" },
+    { cat: "libraries", label: "Live folder watcher", hint: "Auto-rescan when files change", target: "pref-folder-watcher", kw: "auto rescan watch sync new episodes" },
+    { cat: "appearance", label: "Theme", hint: "Comicbook (dark) or Manga (light)", target: "set-theme", kw: "comic manga dark light color colour look" },
+    { cat: "appearance", label: "Multi-season shows", hint: "Group seasons into one card or keep them separate", target: "set-seasons", kw: "group grouped separate season movie ova tabs" },
+    { cat: "playback", label: "Player", hint: "mpv, VLC, MPC, Memento or system default", target: "set-player", kw: "mpv vlc mpc memento system default video install" },
+    { cat: "playback", label: "Program location", hint: "Point Kura at your player's executable", target: "player-path", fallback: "set-player", kw: "path exe browse custom" },
+    { cat: "playback", label: "MPC web interface port", hint: "Port MPC-HC / BE listens on", target: "mpc-port", fallback: "set-player", kw: "mpc port web interface" },
+    { cat: "playback", label: "Mark as watched at", hint: "How much of an episode counts as watched", target: "pref-threshold", kw: "threshold percent watched complete" },
+    { cat: "playback", label: "Resume where I left off", hint: "Continue from the last position", target: "pref-resume", kw: "resume continue position progress" },
+    { cat: "playback", label: "Autoplay next episode", hint: "Play the next episode automatically", target: "pref-autoplay", kw: "autoplay next binge" },
+    { cat: "tracks", label: "Track presets", hint: "Sub, dub or no-subs presets", target: "set-tracks", kw: "preset audio subtitle sub dub japanese english" },
+    { cat: "tracks", label: "Preferred audio", hint: "Audio language priority", target: "pref-audio-lang", kw: "audio language dub japanese english" },
+    { cat: "tracks", label: "Primary subtitles", hint: "Subtitle language priority", target: "pref-sub-lang", kw: "subtitle subs language" },
+    { cat: "tracks", label: "Fallback subtitles", hint: "Used when the primary language is missing", target: "pref-sub-fallback", kw: "subtitle subs fallback second" },
+    { cat: "artwork", label: "Artwork pipeline", hint: "Where posters, backdrops and logos come from", target: "set-pipeline", kw: "poster backdrop logo clearlogo local fanart anilist image" },
+    { cat: "artwork", label: "Fanart.tv API key", hint: "Optional personal key", target: "set-fanart", kw: "fanart api key token" },
+    { cat: "artwork", label: "Rebuild metadata & artwork", hint: "Re-download everything, keep watch history", target: "set-rebuild", kw: "rebuild refresh redownload reset metadata" },
+    { cat: "integrations", label: "Discord Rich Presence", hint: "Show what you're watching on Discord", target: "pref-discord-rpc", kw: "discord rpc activity status presence" },
+    { cat: "integrations", label: "Discord spoiler protection", hint: "Hide episode titles on Discord", target: "pref-discord-spoilers", fallback: "pref-discord-rpc", kw: "discord spoiler hide title" },
+    { cat: "integrations", label: "Discord profile buttons", hint: "AniList and GitHub buttons", target: "pref-discord-buttons", fallback: "pref-discord-rpc", kw: "discord buttons anilist github" },
+    { cat: "backup", label: "Export a backup", hint: "Save settings, libraries and watch history to a file", target: "set-export", kw: "backup export save transfer move computer" },
+    { cat: "backup", label: "Restore from a backup", hint: "Import a Kura backup file", target: "set-import", kw: "backup import restore load transfer" },
+    { cat: "backup", label: "Automatic safety copy", hint: "Where Kura's automatic backups live", target: "set-safety", kw: "backup automatic safety reinstall" },
+    { cat: "updates", label: "Automatic update checks", hint: "Look for new versions on start", target: "pref-auto-update", kw: "update auto check" },
+    { cat: "updates", label: "Check for updates", hint: "See if a new version is out", target: "update-check", kw: "update version new release" },
+    { cat: "updates", label: "What's New", hint: "Read the changelog", target: "view-changelog", kw: "changelog release notes whats new" },
+    { cat: "about", label: "About Kura", hint: "Version, credits and links", target: "set-about", kw: "about version github credits" },
+    { cat: "about", label: "Diagnostics", hint: "Copy a report for bug reports", target: "set-diagnostics", kw: "diagnostics debug bug report issue copy log problem help" },
+    { cat: "about", label: "Detected players", hint: "Where Kura found mpv, VLC, MPC and Memento", target: "set-players-detected", kw: "detect redetect player mpv vlc mpc memento path found" },
+    { cat: "about", label: "Log file", hint: "Open Kura's log folder", target: "set-diagnostics", kw: "log logs file folder kura.log" },
+  ];
+
+  let query = $state("");
+  const results = $derived.by(() => {
+    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) return [];
+    return INDEX.filter((e) => {
+      const hay = `${e.label} ${e.hint} ${e.kw} ${catOf(e.cat).label}`.toLowerCase();
+      return words.every((w) => hay.includes(w));
+    });
+  });
+
+  async function jump(e: Entry) {
+    go(e.cat);
+    await tick();
+    const el = document.getElementById(e.target) ?? (e.fallback ? document.getElementById(e.fallback) : null);
+    if (!el) return;
+    const box = (el.closest(".row, .field, .opt-head, .block") as HTMLElement | null) ?? el;
+    box.scrollIntoView({ behavior: "smooth", block: "center" });
+    box.classList.remove("flash");
+    void box.offsetWidth; // restart the animation if it's already flashing
+    box.classList.add("flash");
+    setTimeout(() => box.classList.remove("flash"), 1700);
+  }
+
+  function onWindowKey(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+      e.preventDefault();
+      searchEl?.focus();
+      searchEl?.select();
+    }
+  }
 </script>
+
+<svelte:window onkeydown={onWindowKey} />
 
 <svelte:head><title>Settings · Kura</title></svelte:head>
 
-<div class="page narrow">
+<div class="page settings-page" bind:this={rootEl}>
   <header class="head">
     <h1>Settings</h1>
-    <p class="muted">Libraries, playback and updates.</p>
+    <p class="muted">Tune Kura to the way you watch.</p>
   </header>
 
-  <section class="block">
+  <div class="layout">
+  <aside class="side">
+    <div class="search">
+      <Icon name="search" size={15} />
+      <input
+        bind:this={searchEl}
+        bind:value={query}
+        type="search"
+        placeholder="Search settings…"
+        aria-label="Search settings"
+        id="settings-search"
+        autocomplete="off"
+        spellcheck="false"
+        onkeydown={(e) => {
+          if (e.key === "Escape") query = "";
+          if (e.key === "Enter" && results[0]) jump(results[0]);
+        }}
+      />
+      {#if query}
+        <button class="clear" onclick={() => (query = "")} aria-label="Clear search" id="settings-search-clear">
+          <Icon name="x" size={13} />
+        </button>
+      {:else}
+        <kbd>Ctrl F</kbd>
+      {/if}
+    </div>
+    <nav class="cats" aria-label="Settings categories">
+      {#each CATEGORIES as c (c.id)}
+        <button
+          class="cat"
+          class:on={active === c.id && !query}
+          aria-current={active === c.id && !query ? "page" : undefined}
+          onclick={() => go(c.id)}
+          id={`settings-cat-${c.id}`}
+        >
+          <span class="cat-icon"><Icon name={c.icon} size={16} /></span>
+          <span class="cat-label">{c.label}</span>
+        </button>
+      {/each}
+    </nav>
+  </aside>
+
+  <div class="content">
+  {#if query.trim()}
+    <section class="block results">
+      <h2 class="section-title">{results.length} result{results.length === 1 ? "" : "s"} for “{query.trim()}”</h2>
+      {#if results.length}
+        <div class="result-list">
+          {#each results as r (r.cat + r.label)}
+            <button class="result" onclick={() => jump(r)}>
+              <span class="r-icon"><Icon name={catOf(r.cat).icon} size={16} /></span>
+              <span class="r-text">
+                <strong>{r.label}</strong>
+                <small>{catOf(r.cat).label} · {r.hint}</small>
+              </span>
+              <Icon name="chevron-right" size={16} />
+            </button>
+          {/each}
+        </div>
+      {:else}
+        <div class="card empty-search">
+          <strong>Nothing matches that.</strong>
+          <p class="faint">Try a simpler word like “subtitle”, “theme” or “mpv”.</p>
+        </div>
+      {/if}
+    </section>
+  {:else}
+  {#key active}
+  <div class="pane">
+  {#if active === "libraries"}
+  <section class="block" id="set-libraries">
     <div class="block-head">
       <h2 class="section-title">Libraries</h2>
       {#if !showNew}
@@ -294,11 +670,13 @@
       </div>
     </div>
   </section>
+  {/if}
 
-  <section class="block">
-    <h2 class="section-title">Display</h2>
+  {#if active === "appearance"}
+  <section class="block" id="set-appearance">
+    <h2 class="section-title">Appearance</h2>
     <div class="card display">
-      <div class="opt-head">
+      <div class="opt-head" id="set-theme">
         <h3>Theme</h3>
         <p class="faint">Choose between the classic dark comicbook look and the printed manga ink & paper aesthetic.</p>
       </div>
@@ -347,7 +725,7 @@
 
       <div class="opt-divider"></div>
 
-      <div class="opt-head">
+      <div class="opt-head" id="set-seasons">
         <h3>Multi-season shows</h3>
         <p class="faint">AniList lists every season, movie and OVA as a separate entry.</p>
       </div>
@@ -383,11 +761,13 @@
       </div>
     </div>
   </section>
+  {/if}
 
-  <section class="block">
+  {#if active === "artwork"}
+  <section class="block" id="set-artwork">
     <h2 class="section-title">Artwork & Metadata</h2>
     <div class="card display">
-      <div class="opt-head">
+      <div class="opt-head" id="set-pipeline">
         <h3>Priority Artwork Pipeline</h3>
         <p class="faint">Kura resolves posters, backdrops, and transparent ClearLogos using a three-tiered hierarchy.</p>
       </div>
@@ -443,7 +823,7 @@
 
       <div class="opt-divider"></div>
 
-      <div class="opt-head">
+      <div class="opt-head" id="set-fanart">
         <h3>Fanart.tv Personal API Key</h3>
         <p class="faint">
           Optional personal API key for high-rate ClearLogo and backdrop downloads. Without a key, Kura uses bundled ani.zip mappings.
@@ -484,7 +864,7 @@
 
       <div class="opt-divider"></div>
 
-      <div class="opt-head">
+      <div class="opt-head" id="set-rebuild">
         <h3>Rebuild Metadata & Artwork</h3>
         <p class="faint">
           Re-downloads all series metadata, 1080p Fanart backdrops, transparent ClearLogos, and episode lists from scratch.
@@ -513,11 +893,13 @@
       </div>
     </div>
   </section>
+  {/if}
 
-  <section class="block">
+  {#if active === "playback"}
+  <section class="block" id="set-playback">
     <h2 class="section-title">Playback</h2>
     <div class="card playback">
-      <div class="opt-head">
+      <div class="opt-head" id="set-player">
         <h3>Player</h3>
         <p class="faint">Kura opens episodes in your own player and follows along to remember where you stopped.</p>
       </div>
@@ -550,7 +932,7 @@
             <span class="burst-mini" aria-hidden="true"><span>⚡</span></span>
             <div>
               <strong>MPV Player is recommended for Kura</strong>
-              <p class="faint">Unlocks 10-bit playback, smart OP/ED skip, Japanese subtitle immersion, and subtitle sync hotkeys.</p>
+              <p class="faint">Unlocks 10-bit playback, smart OP/ED skip, seamless autoplay, and subtitle sync hotkeys.</p>
             </div>
           </div>
           <button class="btn btn-sm btn-accent" onclick={() => mpvModal.open()} id="settings-install-mpv">
@@ -656,11 +1038,13 @@
       </div>
     </div>
   </section>
+  {/if}
 
-  <section class="block">
+  {#if active === "tracks"}
+  <section class="block" id="set-tracks-section">
     <h2 class="section-title">Audio & Subtitles</h2>
     <div class="card playback">
-      <div class="opt-head">
+      <div class="opt-head" id="set-tracks">
         <h3>Default track preferences</h3>
         <p class="faint">Kura tells mpv, Memento, and VLC your language priorities when launching episodes. You can also override this for individual shows.</p>
       </div>
@@ -751,8 +1135,10 @@
       </div>
     </div>
   </section>
+  {/if}
 
-  <section class="block">
+  {#if active === "integrations"}
+  <section class="block" id="set-integrations">
     <h2 class="section-title">Discord Rich Presence</h2>
     <div class="card playback">
       <div class="rows">
@@ -808,8 +1194,10 @@
       </div>
     </div>
   </section>
+  {/if}
 
-  <section class="block">
+  {#if active === "updates"}
+  <section class="block" id="set-updates">
     <h2 class="section-title">Updates</h2>
     <div class="card playback">
       <div class="rows">
@@ -862,8 +1250,141 @@
       </div>
     </div>
   </section>
+  {/if}
 
-  <section class="block">
+  {#if active === "backup"}
+  <section class="block" id="set-backup">
+    <h2 class="section-title">Backup & Restore</h2>
+    <div class="card playback">
+      <div class="opt-head" id="set-export">
+        <h3>Export a backup</h3>
+        <p class="faint">
+          Saves your settings, libraries, watch history, resume points, per-show audio &amp; subtitle choices and fixed
+          matches into one small file. Artwork and episode info aren't included — Kura re-downloads those.
+        </p>
+      </div>
+      <div class="backup-actions">
+        <button class="btn btn-primary" onclick={doExport} disabled={exporting} id="backup-export">
+          {#if exporting}<span class="spinner"></span>{:else}<Icon name="download" size={15} />{/if}
+          Export backup…
+        </button>
+        {#if exported}
+          <span class="backup-done">
+            <Icon name="check" size={14} stroke={3} />
+            Saved {plural(exported.watched, "watched episode")} from {plural(exported.showsWatched, "show")} to
+            <button class="linkish" onclick={() => exported && reveal(exported.path)} title={exported.path}>{fileName(exported.path)}</button>
+          </span>
+        {/if}
+      </div>
+
+      <div class="opt-divider"></div>
+
+      <div class="opt-head" id="set-import">
+        <h3>Restore from a backup</h3>
+        <p class="faint">
+          Merges a backup into this library — nothing gets deleted. Episodes you've watched here stay watched and the newer
+          resume point wins, so it's safe to import the same file twice.
+        </p>
+      </div>
+
+      {#if !preview}
+        <div class="backup-actions">
+          <button class="btn" onclick={pickImport} id="backup-import-pick">
+            <Icon name="folder-open" size={15} /> Choose backup file…
+          </button>
+        </div>
+      {:else}
+        <div class="backup-preview">
+          <div class="bp-head">
+            <span class="bp-icon"><Icon name="archive" size={18} /></span>
+            <div class="bp-title">
+              <strong title={preview.path}>{fileName(preview.path)}</strong>
+              <small>
+                Made {relativeTime(preview.createdAt)}{preview.appVersion ? ` with Kura ${preview.appVersion}` : ""}
+                {#if preview.format < 2}· older backup (settings &amp; libraries only){/if}
+              </small>
+            </div>
+            <button class="btn btn-ghost btn-sm btn-icon" onclick={() => (preview = null)} aria-label="Cancel import">
+              <Icon name="x" size={14} />
+            </button>
+          </div>
+
+          <div class="bp-options">
+            {#each importRows as row (row.key)}
+              <label class="bp-opt" class:off={row.count === 0}>
+                <input
+                  type="checkbox"
+                  bind:checked={importOpts[row.key]}
+                  disabled={row.count === 0}
+                  id={`backup-opt-${row.key}`}
+                />
+                <span class="bp-check" aria-hidden="true"><Icon name="check" size={12} stroke={3.5} /></span>
+                <span class="bp-text">
+                  <strong>{row.label}</strong>
+                  <small>{row.count === 0 ? "Not in this backup" : row.detail}</small>
+                </span>
+              </label>
+            {/each}
+          </div>
+
+          <div class="backup-actions">
+            <button class="btn btn-primary" onclick={doImport} disabled={importing || !anySelected} id="backup-import-confirm">
+              {#if importing}<span class="spinner"></span> Importing…{:else}<Icon name="check" size={15} /> Import selected{/if}
+            </button>
+            <button class="btn btn-ghost" onclick={() => (preview = null)} disabled={importing}>Cancel</button>
+          </div>
+        </div>
+      {/if}
+
+      {#if importReport}
+        <div class="note ok-note">
+          <Icon name="check" size={15} />
+          <div>
+            Imported {reportText(importReport)}.
+            {#if importReport.librariesAdded || importReport.foldersAdded || importReport.matches}
+              A scan is running to pick up the files.
+            {/if}
+            {#if importReport.matchesSkipped}
+              {plural(importReport.matchesSkipped, "fixed match", "fixed matches")} couldn't be placed because the library
+              or folder doesn't exist here.
+            {/if}
+          </div>
+        </div>
+      {/if}
+    </div>
+
+    <div class="card playback safety-card">
+      <div class="opt-head" id="set-safety">
+        <h3>Automatic safety copy</h3>
+        <p class="faint">
+          Kura keeps an up-to-date copy of all of the above outside its data folder and uses it to refill an empty
+          library after a reinstall. Nothing to do here — it just runs.
+        </p>
+      </div>
+      <div class="folders safety-list">
+        {#each safety as s (s.path)}
+          <div class="folder">
+            <Icon name="file" size={16} />
+            <span class="path" title={s.path}>{s.path}</span>
+            <span class="badge" class:badge-ok={!!s.modified}>
+              {s.modified ? `Updated ${relativeTime(s.modified)}` : "Not written yet"}
+            </span>
+            {#if s.modified}
+              <button class="btn btn-ghost btn-sm btn-icon" onclick={() => reveal(s.path)} title="Show in folder">
+                <Icon name="folder-open" size={14} />
+              </button>
+            {/if}
+          </div>
+        {:else}
+          <p class="faint">Checking…</p>
+        {/each}
+      </div>
+    </div>
+  </section>
+  {/if}
+
+  {#if active === "about"}
+  <section class="block" id="set-about">
     <h2 class="section-title">About</h2>
     <div class="card about">
       <div class="about-hero">
@@ -871,7 +1392,7 @@
         <div class="about-title-block">
           <h3>
             Kura 蔵
-            <span class="badge badge-accent">v{version || "0.3.6"}</span>
+            <span class="badge badge-accent">v{version || "0.3.7"}</span>
           </h3>
           <p class="faint">A local-first, manga-styled desktop anime media library.</p>
         </div>
@@ -916,16 +1437,498 @@
       <div class="about-coming">
         <strong>Coming up in future releases:</strong>
         <p class="faint">
-          2-way AniList & MyAnimeList account sync, rich cast/voice actors & staff metadata, and Japanese immersion tools.
+          Advanced library filters, Jimaku subtitle fetching with smart matching, AniList / MyAnimeList sync, and
+          Syncplay watch-together sessions.
         </p>
       </div>
     </div>
+
+    <div class="card playback diag-card">
+      <div class="opt-head" id="set-diagnostics">
+        <h3>Diagnostics</h3>
+        <p class="faint">
+          Something not working? Copy this report into a GitHub issue. It lists your Kura version, library folders,
+          detected players, settings (API keys hidden) and recent log lines — note that it includes folder paths.
+        </p>
+      </div>
+      <div class="backup-actions">
+        <button class="btn btn-primary" onclick={copyDiag} disabled={diagLoading && !diag} id="diag-copy">
+          {#if copied}<Icon name="check" size={15} stroke={3} /> Copied!{:else}<Icon name="copy" size={15} /> Copy diagnostics{/if}
+        </button>
+        <button class="btn" onclick={loadDiag} disabled={diagLoading} id="diag-redetect">
+          {#if diagLoading}<span class="spinner"></span>{:else}<Icon name="refresh" size={15} />{/if} Re-detect players
+        </button>
+        {#if diag}
+          <button class="btn btn-ghost" onclick={() => diag && reveal(diag.logPath)} id="diag-open-log">
+            <Icon name="folder-open" size={15} /> Open log folder
+          </button>
+        {/if}
+      </div>
+
+      <h4 class="diag-sub" id="set-players-detected">Players found on this computer</h4>
+      <div class="folders">
+        {#each PLAYERS.filter((p) => p.kind !== "system") as p (p.kind)}
+          {@const hit = diag?.players.find((d) => d.kind === p.kind)}
+          <div class="folder" class:offline={!!diag && !hit}>
+            <Icon name={hit ? "check" : "x"} size={15} />
+            <strong class="diag-name">{p.name}</strong>
+            <span class="path" title={hit?.path}>
+              {hit ? hit.path : diag ? "Not found" : "Checking…"}
+            </span>
+            {#if effective === p.kind}<span class="badge badge-accent">In use</span>{/if}
+          </div>
+        {/each}
+      </div>
+
+      <button class="linkish log-toggle" onclick={() => (showLog = !showLog)} id="diag-toggle-log">
+        <Icon name={showLog ? "chevron-down" : "chevron-right"} size={14} />
+        {showLog ? "Hide" : "Show"} recent log{diag ? ` (${diag.logTail.length} lines)` : ""}
+      </button>
+      {#if showLog}
+        <pre class="log-view">{diag?.logTail.length ? diag.logTail.join("\n") : "Nothing logged yet."}</pre>
+      {/if}
+    </div>
   </section>
+  {/if}
+  </div>
+  {/key}
+  {/if}
+  </div>
+  </div>
 </div>
 
 <style>
-  .narrow {
-    max-width: 920px;
+  .settings-page {
+    max-width: 1180px;
+  }
+  .layout {
+    display: grid;
+    grid-template-columns: 236px minmax(0, 1fr);
+    gap: 32px;
+    align-items: start;
+  }
+  .content {
+    min-width: 0;
+  }
+  .pane {
+    animation: fade-up 260ms var(--ease);
+  }
+
+  /* Sidebar */
+  .side {
+    position: sticky;
+    top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 40px;
+    padding: 0 10px 0 12px;
+    border-radius: var(--r-md);
+    border: var(--bw) solid var(--line);
+    background: var(--bg-elev);
+    color: var(--text-3);
+    box-shadow: 2px 2px 0 var(--line);
+    transition:
+      box-shadow var(--t-fast) var(--ease),
+      transform var(--t-fast) var(--ease);
+  }
+  .search:focus-within {
+    color: var(--coral);
+    transform: translate(-1px, -1px);
+    box-shadow: 3px 3px 0 var(--coral);
+  }
+  .search input {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 14px;
+  }
+  .search input::-webkit-search-cancel-button {
+    display: none;
+  }
+  .search kbd {
+    font-family: var(--font);
+    font-size: 10.5px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 6px;
+    border: 1.5px solid var(--border-strong);
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+  .search .clear {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--surface);
+    color: var(--text-2);
+    cursor: pointer;
+  }
+  .search .clear:hover {
+    background: var(--coral);
+    color: var(--on-coral);
+  }
+  .cats {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .cat {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 8px 10px;
+    border-radius: var(--r-md);
+    border: var(--bw) solid transparent;
+    background: transparent;
+    color: var(--text-2);
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+    transition:
+      background var(--t-fast) var(--ease),
+      color var(--t-fast) var(--ease),
+      transform var(--t-fast) var(--bounce),
+      box-shadow var(--t-fast) var(--ease);
+  }
+  .cat:hover {
+    background: var(--surface);
+    color: var(--text);
+    transform: translateX(2px);
+  }
+  .cat-icon {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    flex: none;
+    border-radius: 9px;
+    background: var(--surface);
+    color: var(--text-2);
+    transition:
+      background var(--t-fast) var(--ease),
+      color var(--t-fast) var(--ease);
+  }
+  .cat-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cat.on {
+    background: var(--bg-elev);
+    border-color: var(--line);
+    color: var(--text);
+    box-shadow: 3px 3px 0 var(--line);
+    transform: none;
+  }
+  .cat.on .cat-icon {
+    background: var(--coral);
+    color: var(--on-coral);
+  }
+
+  /* Search results */
+  .result-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .result {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 16px;
+    border-radius: var(--r-md);
+    border: var(--bw) solid var(--line);
+    background: var(--bg-elev);
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    box-shadow: 2px 2px 0 var(--line);
+    transition:
+      transform var(--t-fast) var(--bounce),
+      box-shadow var(--t-fast) var(--ease);
+  }
+  .result:hover,
+  .result:focus-visible {
+    transform: translate(-2px, -2px);
+    box-shadow: 4px 4px 0 var(--coral);
+  }
+  .r-icon {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    flex: none;
+    border-radius: 10px;
+    background: var(--coral);
+    color: var(--on-coral);
+  }
+  .r-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .r-text small {
+    color: var(--text-3);
+    font-size: 12.5px;
+    overflow-wrap: anywhere;
+  }
+  .empty-search {
+    padding: 22px;
+  }
+  .content :global(.flash) {
+    animation: -global-kura-settings-flash 1.6s var(--ease);
+    border-radius: var(--r-md);
+  }
+  @keyframes -global-kura-settings-flash {
+    0%,
+    60% {
+      box-shadow: 0 0 0 3px var(--coral);
+      background-color: color-mix(in srgb, var(--coral) 12%, transparent);
+    }
+    100% {
+      box-shadow: 0 0 0 3px transparent;
+    }
+  }
+
+  @media (max-width: 860px) {
+    .layout {
+      grid-template-columns: 1fr;
+      gap: 20px;
+    }
+    .side {
+      position: static;
+    }
+    .cats {
+      flex-direction: row;
+      overflow-x: auto;
+      padding-bottom: 6px;
+    }
+    .cat {
+      flex: none;
+    }
+    .cat:hover {
+      transform: none;
+    }
+  }
+
+  /* Backup & Restore */
+  .backup-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px 14px;
+    margin-top: 14px;
+  }
+  .backup-done {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-2);
+    min-width: 0;
+  }
+  .backup-done :global(svg) {
+    color: var(--ok);
+  }
+  .linkish {
+    border: 0;
+    padding: 0;
+    background: none;
+    color: var(--coral);
+    font: inherit;
+    font-weight: 700;
+    cursor: pointer;
+    overflow-wrap: anywhere;
+    text-align: left;
+  }
+  .linkish:hover {
+    text-decoration: underline;
+  }
+  .backup-preview {
+    margin-top: 14px;
+    padding: 16px;
+    border-radius: var(--r-md);
+    border: var(--bw) solid var(--line);
+    background: var(--bg);
+    box-shadow: 3px 3px 0 var(--line);
+    animation: fade-up 260ms var(--ease);
+  }
+  .bp-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .bp-icon {
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    flex: none;
+    border-radius: 11px;
+    border: var(--bw) solid var(--line);
+    background: var(--coral);
+    color: var(--on-coral);
+    box-shadow: 2px 2px 0 var(--line);
+  }
+  .bp-title {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .bp-title strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .bp-title small {
+    color: var(--text-3);
+    font-size: 12.5px;
+  }
+  .bp-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 10px;
+    margin-top: 14px;
+  }
+  .bp-opt {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 11px;
+    padding: 11px 12px;
+    border-radius: var(--r-sm);
+    border: var(--bw) solid var(--border-strong);
+    background: var(--bg-elev);
+    cursor: pointer;
+    transition:
+      border-color var(--t-fast) var(--ease),
+      background var(--t-fast) var(--ease);
+  }
+  .bp-opt:hover {
+    border-color: var(--coral);
+  }
+  .bp-opt:has(input:checked) {
+    border-color: var(--line);
+    background: color-mix(in srgb, var(--coral) 10%, var(--bg-elev));
+  }
+  .bp-opt:has(input:focus-visible) {
+    outline: 2px solid var(--coral);
+    outline-offset: 2px;
+  }
+  .bp-opt.off {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .bp-opt input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .bp-check {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    flex: none;
+    margin-top: 1px;
+    border-radius: 6px;
+    border: var(--bw) solid var(--line);
+    background: var(--surface);
+    color: transparent;
+    transition:
+      background var(--t-fast) var(--ease),
+      color var(--t-fast) var(--ease),
+      transform var(--t-fast) var(--bounce);
+  }
+  .bp-opt:has(input:checked) .bp-check {
+    background: var(--coral);
+    color: var(--on-coral);
+    transform: scale(1.06);
+  }
+  .bp-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .bp-text strong {
+    font-size: 14px;
+  }
+  .bp-text small {
+    color: var(--text-3);
+    font-size: 12.5px;
+    overflow-wrap: anywhere;
+  }
+  .ok-note {
+    margin-top: 14px;
+    border-color: color-mix(in srgb, var(--ok) 60%, var(--line));
+  }
+  .ok-note :global(svg) {
+    color: var(--ok);
+  }
+  .safety-card {
+    margin-top: 18px;
+  }
+  .safety-list {
+    margin-top: 12px;
+  }
+
+  /* Diagnostics */
+  .diag-card {
+    margin-top: 18px;
+  }
+  .diag-sub {
+    margin: 22px 0 10px;
+    font-size: 14px;
+    color: var(--text-2);
+  }
+  .diag-name {
+    flex: none;
+    min-width: 92px;
+    font-size: 13.5px;
+  }
+  .log-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 16px;
+    font-size: 13px;
+  }
+  .log-view {
+    margin-top: 10px;
+    max-height: 320px;
+    overflow: auto;
+    padding: 12px 14px;
+    border-radius: var(--r-sm);
+    border: var(--bw) solid var(--line);
+    background: var(--bg);
+    color: var(--text-2);
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 11.5px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    animation: fade-up 220ms var(--ease);
   }
   .head {
     margin: 12px 0 32px;

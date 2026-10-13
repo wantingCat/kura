@@ -1,5 +1,6 @@
 //! Tauri commands exposed to the frontend.
 
+use crate::backup;
 use crate::db::{self, now};
 use crate::franchise;
 use crate::matcher;
@@ -49,39 +50,66 @@ pub struct Library {
 }
 
 #[tauri::command]
-pub fn list_libraries(st: St) -> CmdResult<Vec<Library>> {
-    let conn = st.db();
-    let mut stmt = conn
-        .prepare(
-            "SELECT l.id, l.name, l.kind,
-                (SELECT COUNT(*) FROM local_files f WHERE f.library_id = l.id),
-                (SELECT COUNT(DISTINCT anilist_id) FROM local_files f WHERE f.library_id = l.id AND anilist_id IS NOT NULL)
-             FROM libraries l ORDER BY l.id",
-        )
-        .map_err(err)?;
-    let libs: Vec<(i64, String, String, i64, i64)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
-        .map_err(err)?
-        .collect::<Result<_, _>>()
-        .map_err(err)?;
+pub async fn list_libraries(st: St<'_>) -> CmdResult<Vec<Library>> {
+    // Read everything from SQLite first and release the lock before touching the disk.
+    let (libs, folder_rows) = {
+        let conn = st.db();
+        let mut stmt = conn
+            .prepare(
+                "SELECT l.id, l.name, l.kind,
+                    (SELECT COUNT(*) FROM local_files f WHERE f.library_id = l.id),
+                    (SELECT COUNT(DISTINCT anilist_id) FROM local_files f WHERE f.library_id = l.id AND anilist_id IS NOT NULL)
+                 FROM libraries l ORDER BY l.id",
+            )
+            .map_err(err)?;
+        let libs: Vec<(i64, String, String, i64, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+        let mut fs = conn.prepare("SELECT id, library_id, path FROM library_folders ORDER BY id").map_err(err)?;
+        let folder_rows: Vec<(i64, i64, String)> = fs
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+        (libs, folder_rows)
+    };
+
+    // Checking a folder on a sleeping external HDD or an unreachable network drive can block
+    // for many seconds. Check all folders in parallel and give up after a short timeout
+    // (treated as "present" so we don't flash a false "folder missing" warning).
+    let tasks: Vec<_> = folder_rows
+        .iter()
+        .map(|(_, _, path)| {
+            let path = path.clone();
+            tauri::async_runtime::spawn_blocking(move || std::path::Path::new(&path).is_dir())
+        })
+        .collect();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
+    let mut exists = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        exists.push(match tokio::time::timeout_at(deadline, task).await {
+            Ok(Ok(ok)) => ok,
+            _ => true,
+        });
+    }
+
     let mut out = Vec::new();
     for (id, name, kind, file_count, media_count) in libs {
-        let mut fs = conn.prepare("SELECT id, path FROM library_folders WHERE library_id = ?1 ORDER BY id").map_err(err)?;
-        let folders = fs
-            .query_map([id], |r| {
-                let path: String = r.get(1)?;
-                Ok(Folder { id: r.get(0)?, exists: std::path::Path::new(&path).is_dir(), path })
-            })
-            .map_err(err)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(err)?;
+        let folders = folder_rows
+            .iter()
+            .zip(&exists)
+            .filter(|((_, lib, _), _)| *lib == id)
+            .map(|((fid, _, path), ok)| Folder { id: *fid, path: path.clone(), exists: *ok })
+            .collect();
         out.push(Library { id, name, kind, folders, file_count, media_count });
     }
     Ok(out)
 }
 
 #[tauri::command]
-pub fn create_library(st: St, name: String, folders: Vec<String>) -> CmdResult<i64> {
+pub async fn create_library(st: St<'_>, name: String, folders: Vec<String>) -> CmdResult<i64> {
     let conn = st.db();
     conn.execute("INSERT INTO libraries (name, kind, created_at) VALUES (?1, 'anime', ?2)", params![name.trim(), now()])
         .map_err(err)?;
@@ -92,38 +120,38 @@ pub fn create_library(st: St, name: String, folders: Vec<String>) -> CmdResult<i
     }
     st.watcher.reload();
     drop(conn);
-    db::backup_user_data(&st.db(), &st.data_dir);
+    crate::backup::mark_dirty();
     Ok(id)
 }
 
 #[tauri::command]
-pub fn rename_library(st: St, id: i64, name: String) -> CmdResult<()> {
+pub async fn rename_library(st: St<'_>, id: i64, name: String) -> CmdResult<()> {
     st.db().execute("UPDATE libraries SET name = ?2 WHERE id = ?1", params![id, name.trim()]).map_err(err)?;
-    db::backup_user_data(&st.db(), &st.data_dir);
+    crate::backup::mark_dirty();
     Ok(())
 }
 
 #[tauri::command]
-pub fn delete_library(app: AppHandle, st: St, id: i64) -> CmdResult<()> {
+pub async fn delete_library(app: AppHandle, st: St<'_>, id: i64) -> CmdResult<()> {
     st.db().execute("DELETE FROM libraries WHERE id = ?1", [id]).map_err(err)?;
     st.watcher.reload();
     let _ = app.emit("library-changed", ());
-    db::backup_user_data(&st.db(), &st.data_dir);
+    crate::backup::mark_dirty();
     Ok(())
 }
 
 #[tauri::command]
-pub fn add_folder(st: St, library_id: i64, path: String) -> CmdResult<()> {
+pub async fn add_folder(st: St<'_>, library_id: i64, path: String) -> CmdResult<()> {
     st.db()
         .execute("INSERT OR IGNORE INTO library_folders (library_id, path) VALUES (?1, ?2)", params![library_id, path])
         .map_err(err)?;
     st.watcher.reload();
-    db::backup_user_data(&st.db(), &st.data_dir);
+    crate::backup::mark_dirty();
     Ok(())
 }
 
 #[tauri::command]
-pub fn remove_folder(app: AppHandle, st: St, folder_id: i64) -> CmdResult<()> {
+pub async fn remove_folder(app: AppHandle, st: St<'_>, folder_id: i64) -> CmdResult<()> {
     let conn = st.db();
     let row: Option<(i64, String)> = conn
         .query_row("SELECT library_id, path FROM library_folders WHERE id = ?1", [folder_id], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -142,19 +170,19 @@ pub fn remove_folder(app: AppHandle, st: St, folder_id: i64) -> CmdResult<()> {
     }
     let _ = app.emit("library-changed", ());
     drop(conn);
-    db::backup_user_data(&st.db(), &st.data_dir);
+    crate::backup::mark_dirty();
     Ok(())
 }
 
 #[tauri::command]
-pub fn start_scan(app: AppHandle, st: St, library_id: Option<i64>) -> CmdResult<()> {
+pub async fn start_scan(app: AppHandle, st: St<'_>, library_id: Option<i64>) -> CmdResult<()> {
     scan::spawn_scan(app, st.inner().clone(), library_id);
     Ok(())
 }
 
 #[tauri::command]
-pub fn is_scanning(st: St) -> bool {
-    st.scanning.load(std::sync::atomic::Ordering::SeqCst)
+pub async fn is_scanning(st: St<'_>) -> CmdResult<bool> {
+    Ok(st.scanning.load(std::sync::atomic::Ordering::SeqCst))
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +203,8 @@ pub struct MediaCard {
     season: Option<String>,
     season_year: Option<i64>,
     genres: Vec<String>,
+    tags: Vec<String>,
+    studios: Vec<String>,
     average_score: Option<i64>,
     cover_url: Option<String>,
     cover_path: Option<String>,
@@ -197,7 +227,7 @@ pub struct MediaCard {
 }
 
 #[tauri::command]
-pub fn get_library(st: St, library_id: Option<i64>) -> CmdResult<Vec<MediaCard>> {
+pub async fn get_library(st: St<'_>, library_id: Option<i64>) -> CmdResult<Vec<MediaCard>> {
     let conn = st.db();
     let mut stmt = conn
         .prepare(
@@ -210,7 +240,7 @@ pub fn get_library(st: St, library_id: Option<i64>) -> CmdResult<Vec<MediaCard>>
                     GROUP_CONCAT(DISTINCT f.library_id) AS libs,
                     (SELECT COUNT(*) FROM watch_state w WHERE w.anilist_id = m.anilist_id AND w.ep_key NOT LIKE 'S%') AS watched,
                     (SELECT MAX(watched_at) FROM watch_state w WHERE w.anilist_id = m.anilist_id) AS last_watched,
-                    NULLIF(m.logo_url, ''), m.logo_path
+                    NULLIF(m.logo_url, ''), m.logo_path, m.tags, m.studios
              FROM media m
              JOIN local_files f ON f.anilist_id = m.anilist_id
              LEFT JOIN match_groups g ON g.id = f.group_id
@@ -235,6 +265,8 @@ pub fn get_library(st: St, library_id: Option<i64>) -> CmdResult<Vec<MediaCard>>
                 season: r.get(8)?,
                 season_year: r.get(9)?,
                 genres: json_list(r.get(10)?),
+                tags: json_list(r.get(26)?),
+                studios: json_list(r.get(27)?),
                 average_score: r.get(11)?,
                 cover_url: r.get(12)?,
                 cover_path: r.get(13)?,
@@ -286,7 +318,7 @@ pub struct UnmatchedGroup {
 }
 
 #[tauri::command]
-pub fn get_unmatched(st: St) -> CmdResult<Vec<UnmatchedGroup>> {
+pub async fn get_unmatched(st: St<'_>) -> CmdResult<Vec<UnmatchedGroup>> {
     let conn = st.db();
     let mut stmt = conn
         .prepare(
@@ -461,7 +493,7 @@ fn file_ref(id: i64, path: String, size: i64) -> FileRef {
 }
 
 #[tauri::command]
-pub fn get_media_detail(st: St, anilist_id: i64) -> CmdResult<MediaDetail> {
+pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDetail> {
     let conn = st.db();
     let mut d = conn
         .query_row(
@@ -786,7 +818,7 @@ pub fn get_media_detail(st: St, anilist_id: i64) -> CmdResult<MediaDetail> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn set_watched(app: AppHandle, st: St, anilist_id: i64, ep_keys: Vec<String>, watched: bool) -> CmdResult<()> {
+pub async fn set_watched(app: AppHandle, st: St<'_>, anilist_id: i64, ep_keys: Vec<String>, watched: bool) -> CmdResult<()> {
     let mut conn = st.db();
     let tx = conn.transaction().map_err(err)?;
     for key in ep_keys {
@@ -806,6 +838,7 @@ pub fn set_watched(app: AppHandle, st: St, anilist_id: i64, ep_keys: Vec<String>
     }
     tx.commit().map_err(err)?;
     let _ = app.emit("library-changed", ());
+    crate::backup::mark_dirty();
     Ok(())
 }
 
@@ -880,6 +913,7 @@ pub async fn fix_match(
         }
     }
     let _ = app.emit("library-changed", ());
+    crate::backup::mark_dirty();
     scan::spawn_scan(app, st.inner().clone(), None);
     Ok(())
 }
@@ -910,13 +944,13 @@ fn known_file(st: &AppState, path: &str) -> CmdResult<()> {
 }
 
 #[tauri::command]
-pub fn open_file(st: St, path: String) -> CmdResult<()> {
+pub async fn open_file(st: St<'_>, path: String) -> CmdResult<()> {
     known_file(&st, &path)?;
     tauri_plugin_opener::open_path(&path, None::<&str>).map_err(err)
 }
 
 #[tauri::command]
-pub fn reveal_file(st: St, path: String) -> CmdResult<()> {
+pub async fn reveal_file(st: St<'_>, path: String) -> CmdResult<()> {
     known_file(&st, &path)?;
     tauri_plugin_opener::reveal_item_in_dir(&path).map_err(err)
 }
@@ -925,14 +959,16 @@ pub fn reveal_file(st: St, path: String) -> CmdResult<()> {
 // Playback
 // ---------------------------------------------------------------------------
 
+// Detection probes the registry, PATH and several folders and may spawn `where.exe`;
+// run it on a blocking thread so it can never freeze the window.
 #[tauri::command]
-pub fn detect_players() -> Vec<player::Detected> {
-    player::detect_all()
+pub async fn detect_players() -> Vec<player::Detected> {
+    tauri::async_runtime::spawn_blocking(player::detect_all).await.unwrap_or_default()
 }
 
 #[tauri::command]
-pub fn check_mpv_status() -> player::MpvStatus {
-    player::check_mpv_status()
+pub async fn check_mpv_status() -> CmdResult<player::MpvStatus> {
+    tauri::async_runtime::spawn_blocking(player::check_mpv_status).await.map_err(err)
 }
 
 #[tauri::command]
@@ -942,9 +978,12 @@ pub async fn install_mpv(app: AppHandle, st: St<'_>) -> CmdResult<player::Instal
 
 /// Play an episode with the configured external player, tracking progress where possible.
 #[tauri::command]
-pub fn play_episode(app: AppHandle, st: St, anilist_id: i64, ep_key: String, path: String) -> CmdResult<()> {
+pub async fn play_episode(app: AppHandle, st: St<'_>, anilist_id: i64, ep_key: String, path: String) -> CmdResult<()> {
     known_file(&st, &path)?;
-    player::play(app, st.inner().clone(), player::Ep { anilist_id, ep_key, path }).map_err(err)
+    player::play(app, st.inner().clone(), player::Ep { anilist_id, ep_key, path }).map_err(|e| {
+        crate::klog!("[kura] play failed: {e:#}");
+        err(e)
+    })
 }
 
 /// An episode to surface on the home page (continue watching / new episode).
@@ -1041,7 +1080,7 @@ fn is_watched(conn: &rusqlite::Connection, ep: &player::Ep) -> bool {
 
 /// What to resume / watch next, most recently active first. One entry per franchise.
 #[tauri::command]
-pub fn get_up_next(st: St, limit: Option<usize>) -> CmdResult<Vec<UpNextItem>> {
+pub async fn get_up_next(st: St<'_>, limit: Option<usize>) -> CmdResult<Vec<UpNextItem>> {
     let limit = limit.unwrap_or(6);
     let conn = st.db();
     let mut stmt = conn
@@ -1114,7 +1153,7 @@ pub fn get_up_next(st: St, limit: Option<usize>) -> CmdResult<Vec<UpNextItem>> {
 
 /// Unwatched episodes that showed up after a show was already in the library (last 30 days).
 #[tauri::command]
-pub fn get_new_episodes(st: St, limit: Option<usize>) -> CmdResult<Vec<UpNextItem>> {
+pub async fn get_new_episodes(st: St<'_>, limit: Option<usize>) -> CmdResult<Vec<UpNextItem>> {
     let limit = limit.unwrap_or(6) as i64;
     let since = now() - 30 * 86_400;
     let conn = st.db();
@@ -1159,7 +1198,7 @@ pub fn get_new_episodes(st: St, limit: Option<usize>) -> CmdResult<Vec<UpNextIte
 
 /// UI preferences, stored as `pref.<key>` rows in the settings table.
 #[tauri::command]
-pub fn get_prefs(st: St) -> CmdResult<HashMap<String, String>> {
+pub async fn get_prefs(st: St<'_>) -> CmdResult<HashMap<String, String>> {
     let conn = st.db();
     let _ = db::seed_default_prefs_if_missing(&conn);
     let mut stmt = conn.prepare("SELECT key, value FROM settings WHERE key LIKE 'pref.%'").map_err(err)?;
@@ -1196,7 +1235,7 @@ pub fn get_prefs(st: St) -> CmdResult<HashMap<String, String>> {
 }
 
 #[tauri::command]
-pub fn set_pref(st: St, key: String, value: String) -> CmdResult<()> {
+pub async fn set_pref(st: St<'_>, key: String, value: String) -> CmdResult<()> {
     if key == "discord_rpc" && value == "0" {
         st.discord.clear();
     }
@@ -1204,19 +1243,20 @@ pub fn set_pref(st: St, key: String, value: String) -> CmdResult<()> {
     if key == "folder_watcher" {
         st.watcher.reload();
     }
-    db::backup_user_data(&st.db(), &st.data_dir);
+    crate::backup::mark_dirty();
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_media_track_pref(st: St, anilist_id: i64) -> CmdResult<Option<db::MediaTrackPref>> {
+pub async fn get_media_track_pref(st: St<'_>, anilist_id: i64) -> CmdResult<Option<db::MediaTrackPref>> {
     db::get_media_track_pref(&st.db(), anilist_id).map_err(err)
 }
 
 #[tauri::command]
-pub fn set_media_track_pref(app: AppHandle, st: St, anilist_id: i64, pref: Option<db::MediaTrackPref>) -> CmdResult<()> {
+pub async fn set_media_track_pref(app: AppHandle, st: St<'_>, anilist_id: i64, pref: Option<db::MediaTrackPref>) -> CmdResult<()> {
     db::set_media_track_pref(&st.db(), anilist_id, pref).map_err(err)?;
     let _ = app.emit("library-changed", ());
+    crate::backup::mark_dirty();
     Ok(())
 }
 
@@ -1256,4 +1296,239 @@ pub async fn rebuild_metadata(app: AppHandle, st: St<'_>) -> CmdResult<()> {
     scan::spawn_scan(app, st.inner().clone(), None);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Backup & restore
+// ---------------------------------------------------------------------------
+
+/// Export all user data to a JSON file chosen by the user.
+#[tauri::command]
+pub async fn export_backup(st: St<'_>, path: String) -> CmdResult<backup::BackupSummary> {
+    let snap = backup::snapshot(&st.db());
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = std::path::PathBuf::from(&path);
+        backup::write_file(&p, &snap).map_err(|e| format!("{e:#}"))?;
+        Ok(backup::summarize(&p, &snap))
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Read a backup file and describe what's inside, without changing anything.
+#[tauri::command]
+pub async fn preview_backup(path: String) -> CmdResult<backup::BackupSummary> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = std::path::PathBuf::from(&path);
+        let b = backup::read_file(&p).map_err(|e| format!("{e:#}"))?;
+        Ok(backup::summarize(&p, &b))
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Merge a backup file into the library. Nothing is deleted.
+#[tauri::command]
+pub async fn import_backup(
+    app: AppHandle,
+    st: St<'_>,
+    path: String,
+    options: backup::ImportOptions,
+) -> CmdResult<backup::ImportReport> {
+    let b = tauri::async_runtime::spawn_blocking(move || backup::read_file(std::path::Path::new(&path)))
+        .await
+        .map_err(err)?
+        .map_err(|e| format!("{e:#}"))?;
+    let report = backup::apply(&st.db(), &b, &options).map_err(|e| format!("{e:#}"))?;
+
+    if options.settings {
+        let rpc_off = db::get_setting(&st.db(), "pref.discord_rpc").ok().flatten().as_deref() == Some("0");
+        if rpc_off {
+            st.discord.clear();
+        }
+    }
+    st.watcher.reload();
+    crate::backup::mark_dirty();
+    let _ = app.emit("library-changed", ());
+    if options.libraries || options.matches {
+        scan::spawn_scan(app, st.inner().clone(), None);
+    }
+    Ok(report)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafetyCopy {
+    path: String,
+    /// Unix seconds of the last write, if the file exists.
+    modified: Option<i64>,
+}
+
+/// Where the automatic safety copies live and when they were last written.
+#[tauri::command]
+pub async fn backup_status(st: St<'_>) -> CmdResult<Vec<SafetyCopy>> {
+    let dir = st.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        backup::safety_paths(&dir)
+            .into_iter()
+            .map(|p| {
+                let modified = std::fs::metadata(&p)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64);
+                SafetyCopy { path: p.to_string_lossy().to_string(), modified }
+            })
+            .collect()
+    })
+    .await
+    .map_err(err)
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Diagnostics {
+    /// Plain-text report, ready to paste into a GitHub issue.
+    report: String,
+    log_path: String,
+    players: Vec<player::Detected>,
+    log_tail: Vec<String>,
+}
+
+/// Check folders in parallel with a shared deadline. `None` = didn't answer in time.
+async fn folders_reachable(paths: &[String]) -> Vec<Option<bool>> {
+    let tasks: Vec<_> = paths
+        .iter()
+        .map(|p| {
+            let p = p.clone();
+            tauri::async_runtime::spawn_blocking(move || std::path::Path::new(&p).is_dir())
+        })
+        .collect();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
+    let mut out = Vec::with_capacity(tasks.len());
+    for t in tasks {
+        out.push(match tokio::time::timeout_at(deadline, t).await {
+            Ok(Ok(ok)) => Some(ok),
+            _ => None,
+        });
+    }
+    out
+}
+
+#[tauri::command]
+pub async fn get_diagnostics(app: AppHandle, st: St<'_>) -> CmdResult<Diagnostics> {
+    use std::fmt::Write as _;
+
+    struct Snap {
+        libs: Vec<(i64, String)>,
+        folders: Vec<(i64, String)>,
+        files: i64,
+        matched: i64,
+        unmatched: i64,
+        watched: i64,
+        progress: i64,
+        settings: Vec<(String, String)>,
+    }
+    let snap = {
+        let conn = st.db();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
+        let list = |sql: &str| -> Vec<(i64, String)> {
+            conn.prepare(sql)
+                .and_then(|mut s| s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+                .unwrap_or_default()
+        };
+        let settings: Vec<(String, String)> = conn
+            .prepare("SELECT key, value FROM settings WHERE key LIKE 'pref.%' ORDER BY key")
+            .and_then(|mut s| s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+            .unwrap_or_default();
+        Snap {
+            libs: list("SELECT id, name FROM libraries ORDER BY id"),
+            folders: list("SELECT library_id, path FROM library_folders ORDER BY id"),
+            files: count("SELECT COUNT(*) FROM local_files"),
+            matched: count("SELECT COUNT(DISTINCT anilist_id) FROM local_files WHERE anilist_id IS NOT NULL"),
+            unmatched: count("SELECT COUNT(*) FROM match_groups WHERE anilist_id IS NULL"),
+            watched: count("SELECT COUNT(*) FROM watch_state"),
+            progress: count("SELECT COUNT(*) FROM watch_progress"),
+            settings,
+        }
+    };
+
+    let folder_paths: Vec<String> = snap.folders.iter().map(|(_, p)| p.clone()).collect();
+    let reachable = folders_reachable(&folder_paths).await;
+    let players = tauri::async_runtime::spawn_blocking(player::detect_all).await.unwrap_or_default();
+    let data_dir = st.data_dir.clone();
+    let (db_size, log_tail) = {
+        let dir = data_dir.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let db = std::fs::metadata(dir.join("kura.db")).map(|m| m.len()).unwrap_or(0);
+            (db, crate::logging::tail(&dir, 120))
+        })
+        .await
+        .map_err(err)?
+    };
+
+    let mut r = String::new();
+    let _ = writeln!(r, "Kura diagnostics — {}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
+    let _ = writeln!(
+        r,
+        "App: Kura {} ({})",
+        app.package_info().version,
+        if cfg!(debug_assertions) { "debug" } else { "release" }
+    );
+    let _ = writeln!(r, "OS: {} {}", std::env::consts::OS, std::env::consts::ARCH);
+    let _ = writeln!(r, "WebView: {}", tauri::webview_version().unwrap_or_else(|_| "unknown".into()));
+    let _ = writeln!(r, "Data folder: {}", data_dir.display());
+    let _ = writeln!(r, "Database: {:.1} MB", db_size as f64 / 1_048_576.0);
+
+    let _ = writeln!(r, "\n[Library]");
+    for (id, name) in &snap.libs {
+        let _ = writeln!(r, "- {name}");
+        for ((lib, path), ok) in snap.folders.iter().zip(&reachable) {
+            if lib == id {
+                let state = match ok {
+                    Some(true) => "ok",
+                    Some(false) => "NOT FOUND",
+                    None => "no response (sleeping or network drive?)",
+                };
+                let _ = writeln!(r, "    {path}  [{state}]");
+            }
+        }
+    }
+    let _ = writeln!(
+        r,
+        "Files: {} · matched shows: {} · unmatched groups: {}",
+        snap.files, snap.matched, snap.unmatched
+    );
+    let _ = writeln!(r, "Watched episodes: {} · resume points: {}", snap.watched, snap.progress);
+
+    let _ = writeln!(r, "\n[Playback]");
+    if players.is_empty() {
+        let _ = writeln!(r, "Detected players: none");
+    }
+    for p in &players {
+        let _ = writeln!(r, "Detected {}: {}", p.kind, p.path);
+    }
+
+    let _ = writeln!(r, "\n[Settings]");
+    for (k, v) in &snap.settings {
+        let shown = if k.contains("api_key") && !v.is_empty() { "(set, hidden)" } else { v.as_str() };
+        let _ = writeln!(r, "{} = {}", k.trim_start_matches("pref."), shown);
+    }
+
+    let _ = writeln!(r, "\n[Recent log]");
+    for l in log_tail.iter().rev().take(60).collect::<Vec<_>>().into_iter().rev() {
+        let _ = writeln!(r, "{l}");
+    }
+
+    Ok(Diagnostics {
+        report: r,
+        log_path: crate::logging::log_path(&data_dir).to_string_lossy().to_string(),
+        players,
+        log_tail,
+    })
+}
+
 

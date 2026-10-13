@@ -114,7 +114,7 @@ async fn run_worker(app: AppHandle, st: Arc<AppState>, mut reload_rx: UnboundedR
     ) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("[kura-watcher] failed to initialize watcher: {e}");
+            crate::klog!("[kura-watcher] failed to initialize watcher: {e}");
             return;
         }
     };
@@ -224,7 +224,7 @@ fn reload_watches(
         let mut stmt = match conn.prepare("SELECT DISTINCT path FROM library_folders") {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[kura-watcher] db error querying library_folders: {e}");
+                crate::klog!("[kura-watcher] db error querying library_folders: {e}");
                 return;
             }
         };
@@ -254,7 +254,7 @@ fn reload_watches(
     for p in to_add {
         println!("[kura-watcher] watching folder: {}", p.display());
         if let Err(e) = watcher.watch(&p, RecursiveMode::Recursive) {
-            eprintln!("[kura-watcher] failed to watch {}: {e}", p.display());
+            crate::klog!("[kura-watcher] failed to watch {}: {e}", p.display());
         } else {
             current_watched.insert(p);
         }
@@ -532,7 +532,7 @@ async fn process_ready_batch(app: &AppHandle, st: &Arc<AppState>, paths: Vec<Pat
                                 );
                                 changed = true;
                             }
-                            Err(e) => eprintln!("[kura-watcher] resolve error for {path_s}: {e}"),
+                            Err(e) => crate::klog!("[kura-watcher] resolve error for {path_s}: {e}"),
                         }
                     }
                 }

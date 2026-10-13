@@ -5,7 +5,7 @@
   <br>
   <strong>A local-first, manga-styled desktop anime media library.</strong>
   <br>
-  <em>Current Release: <code>v0.3.6-alpha</code> · Built with AI assistance</em>
+  <em>Current Release: <code>v0.3.7-alpha</code> · Built with AI assistance</em>
 </p>
 
 ---
@@ -34,6 +34,14 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 ---
 
 ## ✨ Features
+
+### New in `v0.3.7-alpha`
+- **No more freeze on first launch**: slow/disconnected library drives and player detection no longer block the window while Kura starts.
+- **Redesigned Settings**: category sidebar plus instant settings search (`Ctrl F`).
+- **Full Backup & Restore**: export settings, libraries, watch history, progress, track preferences and manual matches; preview a backup and pick what to restore. Automatic safety copies now cover watch history too.
+- **Diagnostics**: copy a redacted system report, re-detect players and view the recent log from Settings → About. Kura now writes a rotating log file.
+- **Opens maximized** instead of a small centered window.
+- **Layout fix**: the "Up next" badge no longer breaks on long episode titles.
 
 ### Fixed in `v0.3.6-alpha`
 - **Skip button no longer triggers on prologues**: the Skip Opening button only appears inside the actual opening/ending; AniSkip timestamps are matched to your file's exact length (TV vs. Blu-ray cuts), and prologue/recap chapters are ignored.

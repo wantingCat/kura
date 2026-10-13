@@ -41,9 +41,14 @@ pub fn spawn_scan(app: AppHandle, st: Arc<AppState>, library_id: Option<i64>) {
         let mut lib = library_id;
         loop {
             st.rescan_requested.store(false, Ordering::SeqCst);
-            if let Err(e) = run_scan(&app, &st, lib).await {
-                eprintln!("[kura] scan failed: {e:#}");
-                let _ = app.emit("scan-error", e.to_string());
+            let started = std::time::Instant::now();
+            crate::klog!("[kura] scan started ({})", lib.map_or("all libraries".to_string(), |l| format!("library {l}")));
+            match run_scan(&app, &st, lib).await {
+                Ok(()) => crate::klog!("[kura] scan finished in {:.1}s", started.elapsed().as_secs_f64()),
+                Err(e) => {
+                    crate::klog!("[kura] scan failed after {:.1}s: {e:#}", started.elapsed().as_secs_f64());
+                    let _ = app.emit("scan-error", e.to_string());
+                }
             }
             if !st.rescan_requested.load(Ordering::SeqCst) {
                 break;
@@ -164,7 +169,7 @@ fn discover(st: &AppState, library_id: Option<i64>) -> Result<(Vec<Found>, Vec<i
     for (lib, folder) in folders {
         let root = PathBuf::from(&folder);
         if !root.is_dir() {
-            eprintln!("[kura] folder not accessible, skipping: {folder}");
+            crate::klog!("[kura] folder not accessible, skipping: {folder}");
             continue;
         }
         for entry in WalkDir::new(&root).follow_links(true).into_iter().filter_entry(|e| {
@@ -424,13 +429,21 @@ fn pending_files(st: &AppState) -> Result<Vec<PendingFile>> {
 }
 
 pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i64>) -> Result<()> {
-    // 1. Discover
+    // 1. Discover + 2. Sync — blocking disk I/O (a sleeping HDD can take seconds to spin up),
+    // so keep it off the async runtime threads that serve the UI's commands.
     progress(app, "discover", 0, 0, "Looking for video files…");
-    let (found, libraries) = discover(st, library_id)?;
-    progress(app, "discover", found.len(), found.len(), format!("Found {} video files", found.len()));
-
-    // 2. Sync
-    let changed = sync_files(st, &found, &libraries)?;
+    let (changed, libraries) = {
+        let st = st.clone();
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || -> Result<(usize, Vec<i64>)> {
+            let (found, libraries) = discover(&st, library_id)?;
+            progress(&app, "discover", found.len(), found.len(), format!("Found {} video files", found.len()));
+            let changed = sync_files(&st, &found, &libraries)?;
+            Ok((changed, libraries))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("scan task failed: {e}"))??
+    };
     if changed > 0 {
         let _ = app.emit("library-changed", ());
     }
@@ -441,7 +454,7 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
     for (i, g) in groups.iter().enumerate() {
         progress(app, "match", i, total, format!("Identifying “{}”", g.title_guess));
         if let Err(e) = match_group(st, g).await {
-            eprintln!("[kura] matching '{}' failed: {e:#}", g.title_guess);
+            crate::klog!("[kura] matching '{}' failed: {e:#}", g.title_guess);
             progress(app, "match", i, total, format!("Couldn't reach AniList for “{}”", g.title_guess));
         }
     }
@@ -472,7 +485,7 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
             Ok(None) => {
                 conn.execute("UPDATE local_files SET anilist_id = ?2, ep_key = NULL WHERE id = ?1", params![f.id, f.base])?;
             }
-            Err(e) => eprintln!("[kura] resolving file {} failed: {e:#}", f.id),
+            Err(e) => crate::klog!("[kura] resolving file {} failed: {e:#}", f.id),
         }
     }
     let _ = app.emit("library-changed", ());
@@ -488,7 +501,7 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
     for (i, id) in owned.iter().enumerate() {
         progress(app, "metadata", i, total, "Fetching episode info…");
         if let Err(e) = service::ensure_media(st, *id).await {
-            eprintln!("[kura] media {id}: {e:#}");
+            crate::klog!("[kura] media {id}: {e:#}");
         }
         let _ = service::ensure_episodes(st, *id).await;
     }
@@ -699,7 +712,7 @@ async fn download_artwork(app: &AppHandle, st: &Arc<AppState>, owned: &[i64]) ->
                     )?,
                 };
             }
-            Err(e) => eprintln!("[kura] image {} failed: {e}", job.url),
+            Err(e) => crate::klog!("[kura] image {} failed: {e}", job.url),
         }
         if done % 5 == 0 || done == total {
             progress(app, "artwork", done, total, "Downloading artwork…");

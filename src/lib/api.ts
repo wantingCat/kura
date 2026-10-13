@@ -28,6 +28,10 @@ export interface MediaCard {
   season: string | null;
   seasonYear: number | null;
   genres: string[];
+  /** Non-spoiler AniList tags. */
+  tags: string[];
+  /** Main animation studios. */
+  studios: string[];
   averageScore: number | null;
   coverUrl: string | null;
   coverPath: string | null;
@@ -262,6 +266,54 @@ export interface PlaybackEvent {
   hint: string | null;
 }
 
+export interface BackupSummary {
+  path: string;
+  /** Unix seconds. */
+  createdAt: number;
+  appVersion: string;
+  format: number;
+  settings: number;
+  libraries: { name: string; folders: number }[];
+  watched: number;
+  showsWatched: number;
+  progress: number;
+  trackPrefs: number;
+  manualMatches: number;
+}
+
+export interface ImportOptions {
+  settings: boolean;
+  libraries: boolean;
+  history: boolean;
+  trackPrefs: boolean;
+  matches: boolean;
+}
+
+export interface ImportReport {
+  settings: number;
+  librariesAdded: number;
+  foldersAdded: number;
+  watchedAdded: number;
+  progressAdded: number;
+  trackPrefs: number;
+  matches: number;
+  matchesSkipped: number;
+}
+
+export interface SafetyCopy {
+  path: string;
+  /** Unix seconds of the last write; null if the file doesn't exist yet. */
+  modified: number | null;
+}
+
+export interface Diagnostics {
+  /** Plain-text report for bug reports. */
+  report: string;
+  logPath: string;
+  players: DetectedPlayer[];
+  logTail: string[];
+}
+
 export const api = {
   listLibraries: () => invoke<Library[]>("list_libraries"),
   createLibrary: (name: string, folders: string[]) => invoke<number>("create_library", { name, folders }),
@@ -299,6 +351,11 @@ export const api = {
   setMediaTrackPref: (anilistId: number, pref: MediaTrackPref | null) =>
     invoke<void>("set_media_track_pref", { anilistId, pref }),
   rebuildMetadata: () => invoke<void>("rebuild_metadata"),
+  exportBackup: (path: string) => invoke<BackupSummary>("export_backup", { path }),
+  previewBackup: (path: string) => invoke<BackupSummary>("preview_backup", { path }),
+  importBackup: (path: string, options: ImportOptions) => invoke<ImportReport>("import_backup", { path, options }),
+  backupStatus: () => invoke<SafetyCopy[]>("backup_status"),
+  getDiagnostics: () => invoke<Diagnostics>("get_diagnostics"),
 };
 
 export const events = {

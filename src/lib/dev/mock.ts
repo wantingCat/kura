@@ -109,6 +109,8 @@ function card(m: AniMedia, i: number): MediaCard {
     season: m.season,
     seasonYear: m.seasonYear,
     genres: m.genres ?? [],
+    tags: (m.tags ?? []).map((t: { name: string }) => t.name),
+    studios: (m.studios?.nodes ?? []).map((n: { name: string }) => n.name),
     averageScore: m.averageScore,
     coverUrl: m.coverImage?.extraLarge ?? null,
     coverPath: null,
@@ -375,7 +377,7 @@ export function installMock() {
           );
           return null;
         case "plugin:app|version":
-          return "0.3.6";
+          return "0.3.7";
         default:
           console.info("[preview] ignored command", cmd, a);
           return null;

@@ -1,7 +1,9 @@
+pub mod backup;
 pub mod commands;
 pub mod db;
 pub mod discord;
 pub mod franchise;
+pub mod logging;
 pub mod matcher;
 pub mod parser;
 pub mod player;
@@ -31,6 +33,13 @@ pub fn run() {
                 data_dir = std::path::PathBuf::from(dir);
             }
             std::fs::create_dir_all(&data_dir)?;
+            logging::init(&data_dir);
+            klog!(
+                "[kura] Kura {} starting on {} {}",
+                app.package_info().version,
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            );
             let _ = app.asset_protocol_scope().allow_directory(&data_dir, true);
             let conn = db::open(&data_dir.join("kura.db"))?;
             let (watcher, reload_rx) = watcher::WatcherHandle::new();
@@ -68,6 +77,9 @@ pub fn run() {
 
             // Start background filesystem watcher for configured folders.
             watcher::start(app.handle().clone(), state.clone(), reload_rx);
+
+            // Debounced writer for the automatic safety backup.
+            backup::start_auto(state.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -99,6 +111,11 @@ pub fn run() {
             commands::get_media_track_pref,
             commands::set_media_track_pref,
             commands::rebuild_metadata,
+            commands::export_backup,
+            commands::preview_backup,
+            commands::import_backup,
+            commands::backup_status,
+            commands::get_diagnostics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

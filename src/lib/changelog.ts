@@ -16,10 +16,46 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.3.7",
+    title: "Settings, Backups & Diagnostics",
+    date: "October 2026",
+    badge: "Latest",
+    summary: "A reorganized Settings page, full backup & restore of your library data, a built-in diagnostics report, and a fix for the app hanging on first launch.",
+    items: [
+      {
+        type: "fix",
+        text: "Kura no longer freezes for a few seconds when it first opens: slow or disconnected library drives and player detection now run in the background.",
+      },
+      {
+        type: "improvement",
+        text: "Redesigned Settings: a sidebar with categories, plus a search box (Ctrl+F) that jumps straight to any setting.",
+      },
+      {
+        type: "new",
+        text: "Full Backup & Restore: export your settings, libraries, watch history, progress, track preferences and manual matches to a file, then preview and choose what to restore.",
+      },
+      {
+        type: "improvement",
+        text: "Automatic safety backups now include watch history and progress, and are restored automatically if your database is ever lost.",
+      },
+      {
+        type: "new",
+        text: "Diagnostics in Settings → About: copy a system report (API keys redacted), re-detect players, and view the recent log. Kura now keeps a log file for troubleshooting.",
+      },
+      {
+        type: "improvement",
+        text: "Kura now opens maximized instead of in a small window in the middle of the screen.",
+      },
+      {
+        type: "fix",
+        text: "The \"Up next\" badge no longer breaks the layout on episodes with very long titles.",
+      },
+    ],
+  },
+  {
     version: "0.3.6",
     title: "Smarter Skip Button",
     date: "October 2026",
-    badge: "Latest",
     summary: "A bug-fix release: the skip button no longer mistakes prologues for openings, and it got a proper redesign.",
     items: [
       {
