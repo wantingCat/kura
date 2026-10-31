@@ -16,10 +16,39 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.4",
+    title: "AniList Two-Way Sync, Airing Calendar & Advanced Filters",
+    date: "October 2026",
+    badge: "Latest",
+    summary:
+      "A major milestone release: connect your AniList account with safe two-way sync and offline auto-scrobbling, browse the weekly Seasonal Airing Calendar with live episode countdowns, filter and sort your library by genres, tags, studios, and progress, plus a comprehensive visual layout hardening pass.",
+    items: [
+      {
+        type: "new",
+        text: "AniList Two-Way Sync & Auto-Scrobble: sign in via browser OAuth or token in Settings → Integrations, import your Watching/Planning/Completed lists, and auto-scrobble episodes when they hit your watched threshold — with an offline queue that syncs automatically when you reconnect.",
+      },
+      {
+        type: "new",
+        text: "Seasonal Airing Calendar: a new Calendar tab in the top bar showing a Mon–Sun weekly broadcast schedule in your local timezone, live episode countdowns, Today highlights, and instant filtering between all seasonal anime, shows in your library, and your AniList list.",
+      },
+      {
+        type: "new",
+        text: "Airing & New-Episode Notifications: optional in-app notifications when a tracked seasonal episode airs or when the live folder watcher ingests a newly downloaded episode.",
+      },
+      {
+        type: "new",
+        text: "Advanced Library Filtering & Sorting: filter your library by multiple genres, non-spoiler tags, animation studios, airing status, format, and watch status, with quick removable filter pills and multi-criteria sorting (including Watch Progress and ascending/descending order).",
+      },
+      {
+        type: "improvement",
+        text: "Visual Bug Sweep & Layout Hardening: long English, Romaji, and Japanese episode/series titles now wrap and clamp cleanly across episode rows, badges, poster cards, Continue Watching panels, search modals, and narrow (~900px) windows.",
+      },
+    ],
+  },
+  {
     version: "0.3.7",
     title: "Settings, Backups & Diagnostics",
     date: "October 2026",
-    badge: "Latest",
     summary: "A reorganized Settings page, full backup & restore of your library data, a built-in diagnostics report, and a fix for the app hanging on first launch.",
     items: [
       {

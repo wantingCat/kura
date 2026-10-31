@@ -1,3 +1,4 @@
+pub mod anilist_sync;
 pub mod backup;
 pub mod commands;
 pub mod db;
@@ -80,6 +81,7 @@ pub fn run() {
 
             // Debounced writer for the automatic safety backup.
             backup::start_auto(state.clone());
+            anilist_sync::start_worker(app.handle().clone(), state.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -116,6 +118,13 @@ pub fn run() {
             commands::import_backup,
             commands::backup_status,
             commands::get_diagnostics,
+            commands::get_anilist_account,
+            commands::anilist_update_entry,
+            commands::anilist_start_oauth,
+            commands::anilist_login_token,
+            commands::anilist_disconnect,
+            commands::anilist_sync_now,
+            commands::get_seasonal_calendar,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

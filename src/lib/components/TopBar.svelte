@@ -71,7 +71,12 @@
 
   <div class="actions">
     {#if playing}
-      <a class="now" href={`/anime/${playing.anilistId}`} id="now-playing" title="Kura is tracking this episode">
+      <a
+        class="now"
+        href={`/anime/${playing.anilistId}`}
+        id="now-playing"
+        title={playingCard ? `${playingCard.titleEnglish ?? playingCard.titleRomaji} · Ep ${playing.epKey}` : "Kura is tracking this episode"}
+      >
         <span class="eq" aria-hidden="true"><i></i><i></i><i></i></span>
         <span class="now-text">
           {#if playingCard}<span class="now-title">{playingCard.titleEnglish ?? playingCard.titleRomaji}</span>{/if}
@@ -113,6 +118,39 @@
         <Icon name="refresh" size={18} />
       </button>
     {/if}
+
+    {#if app.anilist?.connected}
+      <a
+        class="anilist-pill"
+        href="/settings"
+        onclick={() => {
+          try {
+            localStorage.setItem("kura.settings.category", "integrations");
+          } catch {}
+        }}
+        id="nav-anilist"
+        title={`AniList connected as ${app.anilist.userName ?? "user"} (${app.anilist.trackedCount} synced)`}
+      >
+        {#if app.anilist.avatarUrl}
+          <img class="anilist-avatar" src={app.anilist.avatarUrl} alt="" />
+        {:else}
+          <Icon name="user" size={14} />
+        {/if}
+        <span class="anilist-name">{app.anilist.userName ?? "AniList"}</span>
+        <span class="anilist-dot" aria-hidden="true"></span>
+      </a>
+    {/if}
+
+    <a
+      class="icon-btn"
+      class:active={path.startsWith("/calendar")}
+      href="/calendar"
+      id="nav-calendar"
+      title="Seasonal airing calendar"
+      aria-label="Seasonal airing calendar"
+    >
+      <Icon name="calendar" size={18} />
+    </a>
 
     <a
       class="icon-btn"
@@ -411,5 +449,47 @@
     .brand-word {
       display: none;
     }
+  }
+
+  .anilist-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    height: 36px;
+    padding: 0 11px 0 6px;
+    border-radius: 99px;
+    border: var(--bw) solid var(--line);
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--font-display);
+    font-size: 13px;
+    font-weight: 600;
+    box-shadow: 2px 2px 0 var(--line);
+    transition: transform var(--t-fast) var(--ease);
+  }
+  .anilist-pill:hover {
+    transform: translate(-1px, -1px);
+    background: var(--surface-2);
+  }
+  .anilist-avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 1.5px solid var(--line);
+  }
+  .anilist-name {
+    max-width: 110px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .anilist-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--ok);
+    border: 1.5px solid var(--line);
+    flex-shrink: 0;
   }
 </style>

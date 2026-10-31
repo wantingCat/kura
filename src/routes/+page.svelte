@@ -5,16 +5,16 @@
   import { displayTitle, groupCards, norm, searchHaystack, type LibraryItem } from "$lib/format";
   import HomePanels from "$lib/components/HomePanels.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import LibraryFilterPanel from "$lib/components/LibraryFilterPanel.svelte";
   import NewLibraryForm from "$lib/components/NewLibraryForm.svelte";
   import PosterCard from "$lib/components/PosterCard.svelte";
-
-  type FormatFilter = "all" | "tv" | "movie" | "extra";
-  type WatchFilter = "all" | "unwatched" | "watching" | "completed";
-  type SortKey = "added" | "title" | "year" | "watched" | "score";
-
-  let formatFilter = $state<FormatFilter>("all");
-  let watchFilter = $state<WatchFilter>("all");
-  let sort = $state<SortKey>("added");
+  import {
+    AIRING,
+    filters,
+    SORTS,
+    type FormatFilter,
+    type SortKey,
+  } from "$lib/libraryFilters.svelte";
 
   const libId = $derived(page.url.searchParams.get("lib"));
   const library = $derived(libId ? app.libraries.find((l) => String(l.id) === libId) : null);
@@ -26,6 +26,10 @@
   const haystacks = $derived(new Map(scoped.map((c) => [c.anilistId, searchHaystack(c)])));
 
   const total = (c: MediaCard) => c.episodes ?? (c.format === "MOVIE" ? 1 : null);
+  const progressRatio = (c: MediaCard) => {
+    const denom = total(c) ?? c.ownedCount;
+    return denom > 0 ? Math.min(1, c.watchedCount / denom) : 0;
+  };
   const isCompleted = (c: MediaCard) => {
     const t = total(c);
     return t !== null && t > 0 && c.watchedCount >= t;
@@ -45,40 +49,47 @@
   const filtered = $derived.by(() => {
     const q = norm(app.query);
     const terms = q ? q.split(" ") : [];
-    // Title + format filters look at individual entries (so "Movies" pulls the movie out of its franchise)…
+    // Title, format and facet filters look at individual entries (so "Movies" pulls the movie out of its franchise)…
     const entries = scoped.filter((c) => {
       if (terms.length) {
         const h = haystacks.get(c.anilistId) ?? "";
         if (!terms.every((t) => h.includes(t))) return false;
       }
-      return formatOk(c, formatFilter);
+      if (!formatOk(c, filters.format)) return false;
+      return filters.matches(c);
     });
     // …while watch status is judged for the franchise as a whole.
     const list = present(entries).filter((c) => {
-      if (watchFilter === "unwatched" && c.watchedCount > 0) return false;
-      if (watchFilter === "watching" && !isWatching(c)) return false;
-      if (watchFilter === "completed" && !isCompleted(c)) return false;
+      if (filters.watch === "unwatched" && c.watchedCount > 0) return false;
+      if (filters.watch === "watching" && !isWatching(c)) return false;
+      if (filters.watch === "completed" && !isCompleted(c)) return false;
       return true;
     });
+    const dir = filters.desc ? -1 : 1;
+    const tie = (a: LibraryItem, b: LibraryItem) => displayTitle(a).localeCompare(displayTitle(b));
     const by: Record<SortKey, (a: LibraryItem, b: LibraryItem) => number> = {
-      added: (a, b) => b.addedAt - a.addedAt,
-      title: (a, b) => displayTitle(a).localeCompare(displayTitle(b)),
-      year: (a, b) => (b.yearEnd ?? b.seasonYear ?? 0) - (a.yearEnd ?? a.seasonYear ?? 0),
-      watched: (a, b) => (b.lastWatchedAt ?? 0) - (a.lastWatchedAt ?? 0),
-      score: (a, b) => (b.averageScore ?? 0) - (a.averageScore ?? 0),
+      added: (a, b) => dir * (a.addedAt - b.addedAt) || tie(a, b),
+      title: (a, b) => dir * tie(a, b),
+      year: (a, b) => dir * ((a.yearEnd ?? a.seasonYear ?? 0) - (b.yearEnd ?? b.seasonYear ?? 0)) || tie(a, b),
+      watched: (a, b) => dir * ((a.lastWatchedAt ?? 0) - (b.lastWatchedAt ?? 0)) || tie(a, b),
+      score: (a, b) => dir * ((a.averageScore ?? 0) - (b.averageScore ?? 0)) || tie(a, b),
+      progress: (a, b) => dir * (progressRatio(a) - progressRatio(b)) || tie(a, b),
     };
-    return list.sort(by[sort]);
+    return list.sort(by[filters.sort]);
   });
 
-  const browsing = $derived(!app.query && formatFilter === "all" && watchFilter === "all");
+  const browsing = $derived(!app.query && !filters.active);
   const recentlyAdded = $derived([...all].sort((a, b) => b.addedAt - a.addedAt).slice(0, 12));
 
+  const panelScoped = $derived(scoped.filter((c) => filters.matches(c)));
   const counts = $derived({
-    all: all.length,
-    tv: present(scoped.filter((c) => formatOk(c, "tv"))).length,
-    movie: present(scoped.filter((c) => formatOk(c, "movie"))).length,
-    extra: present(scoped.filter((c) => formatOk(c, "extra"))).length,
+    all: present(panelScoped).length,
+    tv: present(panelScoped.filter((c) => formatOk(c, "tv"))).length,
+    movie: present(panelScoped.filter((c) => formatOk(c, "movie"))).length,
+    extra: present(panelScoped.filter((c) => formatOk(c, "extra"))).length,
   });
+
+  const airingLabel = $derived(AIRING.find((a) => a.key === filters.airing)?.label ?? "");
 </script>
 
 <svelte:head>
@@ -161,19 +172,47 @@
           {/if}
         </h2>
         <div class="right">
-          <select class="input select" bind:value={watchFilter} id="filter-watch" aria-label="Watch status">
+          <button
+            class="btn btn-sm filter-btn"
+            class:active={filters.panelOpen || filters.advancedCount > 0}
+            aria-expanded={filters.panelOpen}
+            onclick={() => (filters.panelOpen = !filters.panelOpen)}
+            id="toggle-filters"
+          >
+            <Icon name="filter" size={14} />
+            Filters
+            {#if filters.advancedCount > 0}
+              <span class="filter-badge">{filters.advancedCount}</span>
+            {/if}
+          </button>
+          <select class="input select" bind:value={filters.watch} id="filter-watch" aria-label="Watch status">
             <option value="all">Any status</option>
             <option value="unwatched">Unwatched</option>
             <option value="watching">Watching</option>
             <option value="completed">Completed</option>
           </select>
-          <select class="input select" bind:value={sort} id="sort-select" aria-label="Sort">
-            <option value="added">Recently added</option>
-            <option value="watched">Recently watched</option>
-            <option value="title">Title</option>
-            <option value="year">Year</option>
-            <option value="score">Score</option>
-          </select>
+          <div class="sort-group">
+            <select
+              class="input select"
+              value={filters.sort}
+              onchange={(e) => filters.setSort((e.currentTarget as HTMLSelectElement).value as SortKey)}
+              id="sort-select"
+              aria-label="Sort"
+            >
+              {#each SORTS as s (s.key)}
+                <option value={s.key}>{s.label}</option>
+              {/each}
+            </select>
+            <button
+              class="btn btn-sm btn-icon sort-dir"
+              onclick={() => filters.flipDirection()}
+              title={filters.desc ? "Sort descending (click to reverse)" : "Sort ascending (click to reverse)"}
+              aria-label={filters.desc ? "Sort descending" : "Sort ascending"}
+              id="sort-direction"
+            >
+              <Icon name={filters.desc ? "arrow-down" : "arrow-up"} size={14} />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -181,14 +220,50 @@
         {#each [["all", "All"], ["tv", "Series"], ["movie", "Movies"], ["extra", "OVA & Specials"]] as [k, label] (k)}
           <button
             class="chip"
-            class:active={formatFilter === k}
-            onclick={() => (formatFilter = k as FormatFilter)}
+            class:active={filters.format === k}
+            onclick={() => (filters.format = k as FormatFilter)}
             id={`filter-format-${k}`}
           >
             {label}<span class="chip-count">{counts[k as FormatFilter]}</span>
           </button>
         {/each}
       </div>
+
+      {#if filters.panelOpen}
+        <LibraryFilterPanel entries={scoped} />
+      {/if}
+
+      {#if filters.advancedCount > 0}
+        <div class="active-filters" aria-label="Active filters">
+          {#if filters.airing !== "all"}
+            <button class="active-pill" onclick={() => (filters.airing = "all")}>
+              <span class="k">Status:</span> {airingLabel}
+              <Icon name="x" size={12} />
+            </button>
+          {/if}
+          {#each filters.genres as g (g)}
+            <button class="active-pill" onclick={() => filters.toggle("genres", g)}>
+              <span class="k">Genre:</span> {g}
+              <Icon name="x" size={12} />
+            </button>
+          {/each}
+          {#each filters.studios as s (s)}
+            <button class="active-pill" onclick={() => filters.toggle("studios", s)}>
+              <span class="k">Studio:</span> {s}
+              <Icon name="x" size={12} />
+            </button>
+          {/each}
+          {#each filters.tags as t (t)}
+            <button class="active-pill" onclick={() => filters.toggle("tags", t)}>
+              <span class="k">Tag:</span> {t}
+              <Icon name="x" size={12} />
+            </button>
+          {/each}
+          <button class="clear-link" onclick={() => filters.clearAll()} id="clear-all-filters">
+            Clear all
+          </button>
+        </div>
+      {/if}
 
       {#if filtered.length > 0}
         <div class="grid">
@@ -217,9 +292,16 @@
           <img class="mascot empty-cat" src="/brand/cat.png" alt="" width="150" />
           <h3>Nothing matches</h3>
           <p class="muted">Try a different title, or clear the filters.</p>
-          {#if app.query}
+          {#if app.query || filters.active}
             <div class="empty-actions">
-              <button class="btn" onclick={() => (app.query = "")} id="clear-search">Clear search</button>
+              {#if app.query}
+                <button class="btn" onclick={() => (app.query = "")} id="clear-search">Clear search</button>
+              {/if}
+              {#if filters.active}
+                <button class="btn btn-primary" onclick={() => filters.clearAll()} id="empty-clear-filters">
+                  Clear filters
+                </button>
+              {/if}
             </div>
           {/if}
         </div>
@@ -252,6 +334,7 @@
     justify-content: space-between;
     gap: 16px;
     margin-bottom: 12px;
+    flex-wrap: wrap;
   }
   .toolbar .section-title {
     margin: 0;
@@ -261,15 +344,48 @@
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+    align-items: center;
   }
   .chips {
-    margin-bottom: 24px;
+    margin-bottom: 18px;
   }
   .chip-count {
     font-family: var(--font);
     font-size: 11px;
     font-weight: 700;
     color: var(--text-3);
+  }
+  .filter-btn {
+    height: 34px;
+    padding: 0 12px;
+    font-size: 13px;
+  }
+  .filter-btn.active {
+    border-color: var(--coral);
+    color: var(--coral);
+  }
+  .filter-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--coral);
+    color: var(--on-coral);
+    font-size: 11px;
+    font-weight: 800;
+  }
+  .sort-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .sort-dir {
+    width: 34px;
+    height: 34px;
+    padding: 0;
   }
   .select {
     height: 34px;
@@ -284,6 +400,54 @@
   }
   .select option {
     background: var(--surface);
+  }
+
+  .active-filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+  .active-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1.5px solid var(--coral);
+    background: var(--coral-soft);
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    overflow-wrap: anywhere;
+  }
+  .active-pill .k {
+    color: var(--text-3);
+    font-weight: 600;
+  }
+  .active-pill:hover {
+    background: var(--coral);
+    color: var(--on-coral);
+  }
+  .active-pill:hover .k {
+    color: inherit;
+    opacity: 0.85;
+  }
+  .clear-link {
+    padding: 4px 8px;
+    border: 0;
+    background: none;
+    color: var(--coral);
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .clear-link:hover {
+    text-decoration: underline;
   }
 
   .review-banner {

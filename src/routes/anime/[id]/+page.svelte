@@ -75,12 +75,45 @@
   const logo = $derived(d && !logoFailed ? img(d.logoPath, d.logoUrl) : null);
   const description = $derived(cleanDescription(d?.description));
   const lowConfidence = $derived(d?.groups.some((g) => !g.manual && (g.confidence ?? 1) < 0.8) ?? false);
-  const pct = $derived(totalEps ? Math.round((watched / totalEps) * 100) : 0);
+  const effectiveWatched = $derived(Math.max(watched, d?.anilistProgress ?? 0));
+  const pct = $derived(totalEps ? Math.round((effectiveWatched / totalEps) * 100) : 0);
   /** Other owned seasons / movies of this franchise, shown as tabs when grouping is on. */
   const seasons = $derived(app.groupSeasons && d && d.franchise.length > 1 ? d.franchise : []);
   const inTabs = $derived(new Set(seasons.map((s) => s.anilistId)));
   // Owned entries already reachable via the tabs don't need to be repeated under "Related".
   const relations = $derived(d?.relations.filter((r) => !inTabs.has(r.relatedId)) ?? []);
+
+  const ANILIST_STATUSES = [
+    { key: "CURRENT", label: "Watching" },
+    { key: "PLANNING", label: "Planning" },
+    { key: "COMPLETED", label: "Completed" },
+    { key: "PAUSED", label: "Paused" },
+    { key: "DROPPED", label: "Dropped" },
+    { key: "REPEATING", label: "Rewatching" },
+  ] as const;
+
+  let anilistSaving = $state(false);
+
+  async function updateAnilist(opts: { status?: string | null; progress?: number | null; score?: number | null }) {
+    if (!d || anilistSaving) return;
+    anilistSaving = true;
+    try {
+      const updated = await api.anilistUpdateEntry({
+        anilistId: d.anilistId,
+        status: opts.status,
+        progress: opts.progress,
+        score: opts.score,
+      });
+      d.anilistStatus = updated.status;
+      d.anilistProgress = updated.progress;
+      d.anilistScore = updated.score;
+      await load(d.anilistId);
+    } catch (e) {
+      app.toast(String(e), "error", 6000);
+    } finally {
+      anilistSaving = false;
+    }
+  }
 
   async function toggleWatched(e: EpisodeRow) {
     if (!d) return;
@@ -189,6 +222,11 @@
               {#if d.averageScore}
                 <span class="badge"><Icon name="star" size={11} fill /> {d.averageScore}%</span>
               {/if}
+              {#if d.anilistStatus}
+                <span class="badge badge-ok" title="Synced with your AniList account">
+                  AniList · {d.anilistStatus === "CURRENT" ? "Watching" : d.anilistStatus.charAt(0) + d.anilistStatus.slice(1).toLowerCase()}{#if d.anilistProgress} ({d.anilistProgress}){/if}
+                </span>
+              {/if}
             </div>
             <h1>{displayTitle(d)}</h1>
             {#if d.titleRomaji && d.titleRomaji !== displayTitle(d)}<p class="alt">{d.titleRomaji}</p>{/if}
@@ -197,7 +235,7 @@
             <div class="stats">
               {#if d.format !== "MOVIE"}
                 <div class="stat">
-                  <strong>{watched}<span>/{totalEps || "?"}</span></strong>
+                  <strong>{effectiveWatched}<span>/{totalEps || "?"}</span></strong>
                   <small>watched</small>
                 </div>
                 <div class="stat">
@@ -245,20 +283,22 @@
                     {#if nextUp.progressPos}
                       Resume · {d.format === "MOVIE" ? "" : `Ep ${nextUp.number} · `}{clock(nextUp.progressPos)}
                     {:else}
-                      {d.format === "MOVIE" ? "Play" : `${watched > 0 ? "Continue" : "Start"} · Ep ${nextUp.number}`}
+                      {d.format === "MOVIE" ? "Play" : `${effectiveWatched > 0 ? "Continue" : "Start"} · Ep ${nextUp.number}`}
                     {/if}
                   {/if}
                 </button>
               {/if}
-              <button class="btn" onclick={() => (showTracks = true)} id="detail-track-prefs" title="Audio & Subtitles">
-                <Icon name="subtitles" size={15} /> Audio & Subs
-                {#if d.trackPref}
-                  <span class="custom-track-badge">Custom</span>
-                {/if}
-              </button>
-              <button class="btn" onclick={() => (showFix = true)} id="detail-fix-match">
-                <Icon name="link" size={15} /> Fix match
-              </button>
+              {#if owned > 0 || d.groups.length > 0}
+                <button class="btn" onclick={() => (showTracks = true)} id="detail-track-prefs" title="Audio & Subtitles">
+                  <Icon name="subtitles" size={15} /> Audio & Subs
+                  {#if d.trackPref}
+                    <span class="custom-track-badge">Custom</span>
+                  {/if}
+                </button>
+                <button class="btn" onclick={() => (showFix = true)} id="detail-fix-match">
+                  <Icon name="link" size={15} /> Fix match
+                </button>
+              {/if}
               <button class="btn btn-ghost btn-icon" onclick={refresh} disabled={refreshing} title="Refresh metadata" id="detail-refresh">
                 {#if refreshing}<div class="spinner"></div>{:else}<Icon name="refresh" size={16} />{/if}
               </button>
@@ -270,6 +310,94 @@
               >
                 <Icon name="external" size={16} />
               </button>
+            </div>
+
+            <div class="anilist-tracker card" id="detail-anilist-tracker">
+              <div class="tracker-head">
+                <span class="tracker-brand">
+                  <Icon name="user" size={13} />
+                  AniList Tracker
+                  {#if anilistSaving}<span class="spinner spinner-xs"></span>{/if}
+                </span>
+                {#if !app.anilist?.connected}
+                  <button
+                    class="tracker-signin-link"
+                    onclick={() => {
+                      try { localStorage.setItem("kura.settings.category", "integrations"); } catch {}
+                      goto("/settings");
+                    }}
+                  >
+                    Connect AniList in Settings to sync →
+                  </button>
+                {/if}
+              </div>
+
+              <div class="tracker-controls">
+                <div class="status-pills" role="group" aria-label="AniList status">
+                  {#each ANILIST_STATUSES as st (st.key)}
+                    <button
+                      class="status-pill"
+                      class:active={d.anilistStatus === st.key}
+                      disabled={anilistSaving}
+                      onclick={() => updateAnilist({ status: st.key })}
+                      id={`al-status-${st.key.toLowerCase()}`}
+                    >
+                      {st.label}
+                    </button>
+                  {/each}
+                </div>
+
+                <div class="tracker-right">
+                  <div class="prog-stepper" aria-label="Episode progress">
+                    <button
+                      class="step-btn"
+                      disabled={anilistSaving || effectiveWatched <= 0}
+                      onclick={() => updateAnilist({ progress: Math.max(0, effectiveWatched - 1) })}
+                      title="Decrease watched episodes by 1"
+                      id="al-prog-dec"
+                    >
+                      −
+                    </button>
+                    <span class="prog-readout">
+                      <strong>{effectiveWatched}</strong><span>/{totalEps || "?"}</span> eps
+                    </span>
+                    <button
+                      class="step-btn plus"
+                      disabled={anilistSaving || (totalEps > 0 && effectiveWatched >= totalEps)}
+                      onclick={() => updateAnilist({ progress: effectiveWatched + 1 })}
+                      title={`Mark episode ${effectiveWatched + 1} as watched`}
+                      id="al-prog-inc"
+                    >
+                      +1 Ep
+                    </button>
+                  </div>
+
+                  <label class="score-picker" title="Your AniList score">
+                    <Icon name="star" size={13} fill />
+                    <select
+                      value={d.anilistScore ? String(Math.round(d.anilistScore)) : ""}
+                      disabled={anilistSaving}
+                      onchange={(ev) => {
+                        const val = (ev.currentTarget as HTMLSelectElement).value;
+                        if (val) updateAnilist({ score: Number(val) });
+                      }}
+                      id="al-score-select"
+                    >
+                      <option value="">Score —</option>
+                      <option value="10">10 · Masterpiece</option>
+                      <option value="9">9 · Great</option>
+                      <option value="8">8 · Very Good</option>
+                      <option value="7">7 · Good</option>
+                      <option value="6">6 · Fine</option>
+                      <option value="5">5 · Average</option>
+                      <option value="4">4 · Bad</option>
+                      <option value="3">3 · Very Bad</option>
+                      <option value="2">2 · Horrible</option>
+                      <option value="1">1 · Appalling</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
             </div>
           </div>
         </header>
@@ -517,27 +645,19 @@
                 <div class="relations">
                   {#each relations as r (r.relatedId)}
                     {@const rc = img(r.coverPath, r.coverUrl)}
-                    {#if r.ownedCount > 0}
-                      <a class="relation" href={`/anime/${r.relatedId}`}>
-                        <div class="r-cover">{#if rc}<img src={rc} alt="" loading="lazy" />{/if}</div>
-                        <div class="r-info">
-                          <span class="r-type">{relationLabel(r.relationType)}</span>
-                          <strong>{r.title}</strong>
-                          <span class="faint">{[formatLabel(r.format), r.seasonYear].filter(Boolean).join(" · ")}</span>
-                        </div>
+                    <a class="relation" class:not-owned={r.ownedCount === 0} href={`/anime/${r.relatedId}`}>
+                      <div class="r-cover">{#if rc}<img src={rc} alt="" loading="lazy" />{/if}</div>
+                      <div class="r-info">
+                        <span class="r-type">{relationLabel(r.relationType)}</span>
+                        <strong>{r.title}</strong>
+                        <span class="faint">{[formatLabel(r.format), r.seasonYear].filter(Boolean).join(" · ")}</span>
+                      </div>
+                      {#if r.ownedCount > 0}
                         <span class="badge badge-ok">Owned</span>
-                      </a>
-                    {:else}
-                      <button class="relation not-owned" onclick={() => openUrl(`https://anilist.co/anime/${r.relatedId}`)}>
-                        <div class="r-cover">{#if rc}<img src={rc} alt="" loading="lazy" />{/if}</div>
-                        <div class="r-info">
-                          <span class="r-type">{relationLabel(r.relationType)}</span>
-                          <strong>{r.title}</strong>
-                          <span class="faint">{[formatLabel(r.format), r.seasonYear].filter(Boolean).join(" · ")}</span>
-                        </div>
-                        <span class="badge" title="Not in your library">—</span>
-                      </button>
-                    {/if}
+                      {:else}
+                        <span class="badge" title="View details in Kura">View</span>
+                      {/if}
+                    </a>
                   {/each}
                 </div>
               </section>
@@ -771,11 +891,13 @@
     margin-top: 12px;
     font-size: 38px;
     font-weight: 600;
+    overflow-wrap: anywhere;
   }
   .alt {
     margin-top: 4px;
     color: var(--text-2);
     font-size: 15px;
+    overflow-wrap: anywhere;
   }
   .alt.jp {
     color: var(--text-3);
@@ -1179,7 +1301,7 @@
   }
   .ep-title-row {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
     min-width: 0;
   }
@@ -1187,15 +1309,20 @@
   .ep-title-row > :global(.badge) {
     flex-shrink: 0;
     white-space: nowrap;
+    margin-top: 2px;
   }
   .ep h3 {
     font-family: var(--font-display);
     font-size: 16px;
     font-weight: 500;
-    white-space: nowrap;
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
     overflow: hidden;
-    text-overflow: ellipsis;
-    /* Flex items default to min-width: auto, which stops nowrap text from shrinking. */
+    overflow-wrap: anywhere;
+    /* Flex items default to min-width: auto, which stops text from shrinking. */
     min-width: 0;
     flex: 0 1 auto;
   }
@@ -1209,6 +1336,7 @@
     margin-top: 1px;
     font-size: 12.5px;
     color: var(--text-3);
+    overflow-wrap: anywhere;
   }
   .ep-overview {
     display: -webkit-box;
@@ -1593,5 +1721,172 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     margin-left: 2px;
+  }
+
+  .anilist-tracker {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: var(--r-md);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .tracker-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .tracker-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-display);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-2);
+  }
+  .tracker-signin-link {
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--coral);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .tracker-signin-link:hover {
+    text-decoration: underline;
+  }
+  .tracker-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .status-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .status-pill {
+    height: 30px;
+    padding: 0 11px;
+    border-radius: 8px;
+    border: 1.5px solid var(--border-strong);
+    background: var(--bg-elev);
+    color: var(--text-2);
+    font-family: var(--font-display);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--t-fast) var(--ease);
+  }
+  .status-pill:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--line);
+    transform: translate(-1px, -1px);
+  }
+  .status-pill.active {
+    background: var(--coral);
+    color: var(--on-coral);
+    border-color: var(--line);
+    box-shadow: 2px 2px 0 var(--line);
+  }
+  .tracker-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .prog-stepper {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 8px;
+    border: 1.5px solid var(--line);
+    background: var(--bg-elev);
+    overflow: hidden;
+    height: 32px;
+  }
+  .step-btn {
+    height: 100%;
+    padding: 0 10px;
+    border: 0;
+    background: var(--surface-2);
+    color: var(--text);
+    font-family: var(--font-display);
+    font-size: 12.5px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background var(--t-fast) var(--ease);
+  }
+  .step-btn:hover:not(:disabled) {
+    background: var(--coral);
+    color: var(--on-coral);
+  }
+  .step-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .step-btn.plus {
+    border-left: 1.5px solid var(--line);
+  }
+  .prog-readout {
+    padding: 0 10px;
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+    border-left: 1.5px solid var(--line);
+  }
+  .prog-readout strong {
+    font-weight: 800;
+    color: var(--text);
+  }
+  .prog-readout span {
+    color: var(--text-3);
+  }
+  .score-picker {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 32px;
+    padding: 0 8px 0 9px;
+    border-radius: 8px;
+    border: 1.5px solid var(--line);
+    background: var(--bg-elev);
+    color: var(--amber);
+  }
+  .score-picker select {
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    font-family: var(--font-display);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    outline: none;
+  }
+  .score-picker select option {
+    background: var(--surface);
+    color: var(--text);
+  }
+  @media (max-width: 900px) {
+    .head {
+      gap: 20px;
+      padding: 0 12px;
+    }
+    .poster {
+      width: 155px;
+      margin-top: -100px;
+    }
+    h1 {
+      font-size: 28px;
+    }
+    .ep-thumb {
+      width: 150px;
+    }
   }
 </style>

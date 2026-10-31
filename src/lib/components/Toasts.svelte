@@ -59,6 +59,8 @@
   }
   p {
     flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
     font-size: 13.5px;
     color: var(--text-2);
   }

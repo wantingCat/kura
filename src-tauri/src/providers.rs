@@ -93,7 +93,7 @@ pub struct AlTitle {
     pub native: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AlDate {
     pub year: Option<i64>,
     pub month: Option<i64>,
@@ -111,7 +111,7 @@ impl AlDate {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlCover {
     pub extra_large: Option<String>,
@@ -127,17 +127,17 @@ pub struct AlTag {
     pub is_media_spoiler: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AlStudioNode {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AlStudios {
     pub nodes: Vec<AlStudioNode>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlAiring {
     pub episode: i64,
@@ -212,18 +212,71 @@ impl AlMedia {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlAvatar {
+    pub large: Option<String>,
+    pub medium: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlViewer {
+    pub id: i64,
+    pub name: String,
+    pub avatar: Option<AlAvatar>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlListEntry {
+    pub id: i64,
+    pub media_id: i64,
+    pub status: String,
+    pub progress: i64,
+    pub score: Option<f64>,
+    pub updated_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlSeasonalMedia {
+    pub id: i64,
+    pub format: Option<String>,
+    pub status: Option<String>,
+    pub episodes: Option<i64>,
+    pub duration: Option<i64>,
+    pub season: Option<String>,
+    pub season_year: Option<i64>,
+    pub average_score: Option<i64>,
+    #[serde(default)]
+    pub genres: Vec<String>,
+    pub title: AlTitle,
+    pub start_date: Option<AlDate>,
+    pub cover_image: Option<AlCover>,
+    pub banner_image: Option<String>,
+    pub studios: Option<AlStudios>,
+    pub next_airing_episode: Option<AlAiring>,
+}
+
 impl Providers {
     async fn anilist_query(&self, query: &str, variables: Value) -> Result<Value> {
+        self.anilist_authed_query(None, query, variables).await
+    }
+
+    pub async fn anilist_authed_query(&self, token: Option<&str>, query: &str, variables: Value) -> Result<Value> {
         let body = json!({ "query": query, "variables": variables });
         for attempt in 0..4 {
             self.anilist_rl.wait().await;
-            let resp = self
+            let mut req = self
                 .http
                 .post("https://graphql.anilist.co")
                 .header("Accept", "application/json")
-                .json(&body)
-                .send()
-                .await?;
+                .json(&body);
+            if let Some(t) = token.filter(|s| !s.trim().is_empty()) {
+                req = req.header("Authorization", format!("Bearer {}", t.trim()));
+            }
+            let resp = req.send().await?;
 
             if let Some(limit) = resp
                 .headers()
@@ -276,6 +329,130 @@ impl Providers {
             bail!("AniList media {id} not found");
         }
         Ok(serde_json::from_value(data["Media"].clone())?)
+    }
+
+    pub async fn anilist_viewer(&self, token: &str) -> Result<AlViewer> {
+        let q = "query { Viewer { id name avatar { large medium } } }";
+        let data = self.anilist_authed_query(Some(token), q, json!({})).await?;
+        if data["Viewer"].is_null() {
+            bail!("Invalid or expired AniList token");
+        }
+        Ok(serde_json::from_value(data["Viewer"].clone())?)
+    }
+
+    pub async fn anilist_user_list(&self, token: &str, user_id: i64) -> Result<Vec<AlListEntry>> {
+        let q = r#"
+            query ($userId: Int) {
+              MediaListCollection(userId: $userId, type: ANIME) {
+                lists {
+                  entries {
+                    id
+                    mediaId
+                    status
+                    progress
+                    score(format: POINT_10_DECIMAL)
+                    updatedAt
+                  }
+                }
+              }
+            }
+        "#;
+        let data = self
+            .anilist_authed_query(Some(token), q, json!({ "userId": user_id }))
+            .await?;
+        let mut out = Vec::new();
+        if let Some(lists) = data["MediaListCollection"]["lists"].as_array() {
+            for list in lists {
+                if let Some(entries) = list["entries"].as_array() {
+                    for e in entries {
+                        if let Ok(entry) = serde_json::from_value::<AlListEntry>(e.clone()) {
+                            out.push(entry);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn anilist_save_entry(
+        &self,
+        token: &str,
+        media_id: i64,
+        progress: i64,
+        status: Option<&str>,
+    ) -> Result<AlListEntry> {
+        self.anilist_save_entry_full(token, media_id, status, Some(progress), None).await
+    }
+
+    pub async fn anilist_save_entry_full(
+        &self,
+        token: &str,
+        media_id: i64,
+        status: Option<&str>,
+        progress: Option<i64>,
+        score: Option<f64>,
+    ) -> Result<AlListEntry> {
+        let score_raw = score.map(|s| (s * 10.0).round() as i64);
+        let q = r#"
+            mutation ($mediaId: Int, $status: MediaListStatus, $progress: Int, $scoreRaw: Int) {
+              SaveMediaListEntry(mediaId: $mediaId, status: $status, progress: $progress, scoreRaw: $scoreRaw) {
+                id mediaId status progress score(format: POINT_10_DECIMAL) updatedAt
+              }
+            }
+        "#;
+        let mut vars = serde_json::Map::new();
+        vars.insert("mediaId".into(), json!(media_id));
+        if let Some(st) = status {
+            vars.insert("status".into(), json!(st));
+        }
+        if let Some(p) = progress {
+            vars.insert("progress".into(), json!(p));
+        }
+        if let Some(sr) = score_raw {
+            vars.insert("scoreRaw".into(), json!(sr));
+        }
+        let data = self
+            .anilist_authed_query(Some(token), q, Value::Object(vars))
+            .await?;
+        Ok(serde_json::from_value(data["SaveMediaListEntry"].clone())?)
+    }
+
+    pub async fn anilist_season(&self, season: &str, year: i32) -> Result<Vec<AlSeasonalMedia>> {
+        let q = r#"
+            query ($season: MediaSeason, $year: Int, $page: Int) {
+              Page(page: $page, perPage: 50) {
+                pageInfo { hasNextPage }
+                media(season: $season, seasonYear: $year, type: ANIME, isAdult: false, format_in: [TV, TV_SHORT, ONA, MOVIE, OVA], sort: [POPULARITY_DESC]) {
+                  id format status episodes duration season seasonYear averageScore genres
+                  title { romaji english native }
+                  startDate { year month day }
+                  coverImage { extraLarge large color }
+                  bannerImage
+                  studios(isMain: true) { nodes { name } }
+                  nextAiringEpisode { episode airingAt }
+                }
+              }
+            }
+        "#;
+        let mut all = Vec::new();
+        for page in 1..=2 {
+            let data = self
+                .anilist_query(q, json!({ "season": season, "year": year, "page": page }))
+                .await?;
+            if let Some(arr) = data["Page"]["media"].as_array() {
+                for item in arr {
+                    if let Ok(m) = serde_json::from_value::<AlSeasonalMedia>(item.clone()) {
+                        all.push(m);
+                    }
+                }
+            }
+            let has_next = data["Page"]["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false);
+            if !has_next {
+                break;
+            }
+        }
+        Ok(all)
     }
 }
 

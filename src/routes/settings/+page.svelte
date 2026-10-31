@@ -4,8 +4,8 @@
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import { getVersion } from "@tauri-apps/api/app";
   import {
-    api,
-    type BackupSummary,
+
+    api, events, type AnilistAccount, type AnilistSyncReport, type BackupSummary,
     type DetectedPlayer,
     type Diagnostics,
     type ImportOptions,
@@ -86,7 +86,7 @@
     { kind: "system", name: "System default", blurb: "Opens normally, no tracking" },
   ];
   let detected = $state<DetectedPlayer[]>([]);
-  let version = $state("0.3.7");
+  let version = $state("0.4");
   let threshold = $state(app.playback.threshold);
   $effect(() => {
     threshold = app.playback.threshold;
@@ -99,9 +99,9 @@
       detected = [];
     }
     try {
-      version = await getVersion();
+      version = (await getVersion()).replace(/\.0$/, "");
     } catch {
-      version = "0.3.7";
+      version = "0.4";
     }
   });
 
@@ -352,6 +352,122 @@
 
   $effect(() => {
     if (active === "backup") loadSafety();
+    if (active === "integrations") loadAnilist();
+  });
+
+  // AniList Sync ------------------------------------------------------------
+  let anilist = $state<AnilistAccount | null>(null);
+  let anilistLoading = $state(false);
+  let anilistSyncing = $state(false);
+  let anilistSyncReport = $state<AnilistSyncReport | null>(null);
+  let anilistConnecting = $state(false);
+
+  async function loadAnilist() {
+    anilistLoading = true;
+    try {
+      const acct = await api.getAnilistAccount();
+      anilist = acct;
+      app.anilist = acct;
+    } catch {
+      anilist = null;
+    } finally {
+      anilistLoading = false;
+    }
+  }
+
+  let anilistPoll: ReturnType<typeof setInterval> | null = null;
+  function stopAnilistPoll() {
+    if (anilistPoll) {
+      clearInterval(anilistPoll);
+      anilistPoll = null;
+    }
+  }
+
+  onMount(() => {
+    let unsub: (() => void) | undefined;
+    events.onAnilistChanged(async (acct) => {
+      stopAnilistPoll();
+      anilist = acct;
+      anilistConnecting = false;
+      await app.refresh();
+    }).then((u) => (unsub = u));
+    return () => {
+      stopAnilistPoll();
+      unsub?.();
+    };
+  });
+
+  async function startAnilistOauth() {
+    anilistConnecting = true;
+    stopAnilistPoll();
+    try {
+      await api.anilistStartOauth();
+      const started = Date.now();
+      anilistPoll = setInterval(async () => {
+        try {
+          const acct = await api.getAnilistAccount();
+          if (acct.connected) {
+            stopAnilistPoll();
+            const wasConnected = !!app.anilist?.connected;
+            anilist = acct;
+            app.anilist = acct;
+            anilistConnecting = false;
+            if (!wasConnected) {
+              app.toast(`Connected to AniList as ${acct.userName ?? "user"}!`, "info", 6000);
+            }
+            await app.refresh();
+          } else if (Date.now() - started > 120_000) {
+            stopAnilistPoll();
+            anilistConnecting = false;
+          }
+        } catch {
+          stopAnilistPoll();
+          anilistConnecting = false;
+        }
+      }, 1200);
+    } catch (e) {
+      stopAnilistPoll();
+      anilistConnecting = false;
+      app.toast(String(e), "error", 8000);
+    }
+  }
+
+  async function syncAnilistNow() {
+    if (anilistSyncing) return;
+    anilistSyncing = true;
+    anilistSyncReport = null;
+    try {
+      anilistSyncReport = await api.anilistSyncNow();
+      await loadAnilist();
+      await app.refresh();
+      app.toast("AniList sync complete.", "info", 4000);
+    } catch (e) {
+      app.toast(String(e), "error", 8000);
+    } finally {
+      anilistSyncing = false;
+    }
+  }
+
+  async function toggleAnilistScrobble() {
+    if (!anilist) return;
+    const next = !anilist.autoScrobble;
+    await api.setPref("pref.anilist_auto_scrobble", next ? "1" : "0");
+    anilist = { ...anilist, autoScrobble: next };
+  }
+
+  async function disconnectAnilist() {
+    try {
+      await api.anilistDisconnect();
+      anilist = await api.getAnilistAccount();
+      app.anilist = anilist;
+      anilistSyncReport = null;
+      app.toast("Disconnected from AniList.", "info", 4000);
+    } catch (e) {
+      app.toast(String(e), "error", 6000);
+    }
+  }
+
+  $effect(() => {
   });
 
   // Diagnostics -------------------------------------------------------------
@@ -433,6 +549,9 @@
     { cat: "artwork", label: "Rebuild metadata & artwork", hint: "Re-download everything, keep watch history", target: "set-rebuild", kw: "rebuild refresh redownload reset metadata" },
     { cat: "integrations", label: "Discord Rich Presence", hint: "Show what you're watching on Discord", target: "pref-discord-rpc", kw: "discord rpc activity status presence" },
     { cat: "integrations", label: "Discord spoiler protection", hint: "Hide episode titles on Discord", target: "pref-discord-spoilers", fallback: "pref-discord-rpc", kw: "discord spoiler hide title" },
+    { cat: "integrations", label: "AniList Two-Way Sync", hint: "Connect your AniList account and sync progress", target: "set-anilist", kw: "anilist sync account oauth token login list track progress" },
+    { cat: "integrations", label: "Auto-scrobble to AniList", hint: "Automatically update AniList when episodes are watched", target: "pref-anilist-scrobble", fallback: "set-anilist", kw: "anilist scrobble auto watched offline queue" },
+    { cat: "integrations", label: "Airing notifications", hint: "Desktop & in-app alerts when tracked episodes air", target: "pref-airing-notify", kw: "airing calendar countdown notification toast new episode" },
     { cat: "integrations", label: "Discord profile buttons", hint: "AniList and GitHub buttons", target: "pref-discord-buttons", fallback: "pref-discord-rpc", kw: "discord buttons anilist github" },
     { cat: "backup", label: "Export a backup", hint: "Save settings, libraries and watch history to a file", target: "set-export", kw: "backup export save transfer move computer" },
     { cat: "backup", label: "Restore from a backup", hint: "Import a Kura backup file", target: "set-import", kw: "backup import restore load transfer" },
@@ -1139,6 +1258,124 @@
 
   {#if active === "integrations"}
   <section class="block" id="set-integrations">
+    <div class="anilist-section" id="set-anilist">
+      <h2 class="section-title">AniList Two-Way Sync</h2>
+      <div class="card playback anilist-card">
+        <div class="opt-head">
+          <h3>AniList Account & Auto-Scrobble</h3>
+          <p class="faint">
+            Sync your AniList Watching / Planning / Completed lists with your local Kura library. When you finish an episode at your watched threshold, Kura automatically increments your AniList progress (and queues offline updates until you're back online).
+          </p>
+        </div>
+
+        {#if anilist?.connected}
+          <div class="anilist-profile">
+            {#if anilist.avatarUrl}
+              <img class="anilist-avatar" src={anilist.avatarUrl} alt="" />
+            {:else}
+              <div class="anilist-avatar fallback"><Icon name="user" size={20} /></div>
+            {/if}
+            <div class="anilist-user">
+              <div class="anilist-user-row">
+                <strong>{anilist.userName ?? "AniList User"}</strong>
+                <span class="badge badge-ok">Connected</span>
+                {#if anilist.queuedCount > 0}
+                  <span class="badge badge-warn">{anilist.queuedCount} queued offline</span>
+                {/if}
+              </div>
+              <small class="faint">
+                {anilist.trackedCount.toLocaleString()} synced entries
+                {#if anilist.lastSyncAt}· Last synced {relativeTime(anilist.lastSyncAt)}{/if}
+              </small>
+            </div>
+            <div class="anilist-actions">
+              <button
+                class="btn btn-primary btn-sm"
+                onclick={syncAnilistNow}
+                disabled={anilistSyncing}
+                id="anilist-sync-now"
+              >
+                {#if anilistSyncing}<span class="spinner"></span> Syncing…{:else}<Icon name="refresh" size={14} /> Sync now{/if}
+              </button>
+              <button
+                class="btn btn-ghost btn-sm btn-danger"
+                onclick={disconnectAnilist}
+                id="anilist-disconnect"
+              >
+                Disconnect
+              </button>
+            </div>
+          </div>
+
+          {#if anilistSyncReport}
+            <div class="note ok-note">
+              <Icon name="check" size={15} />
+              <div>
+                Synced {anilistSyncReport.totalRemote.toLocaleString()} AniList entries — pulled {anilistSyncReport.pulledEpisodes} episode updates ({anilistSyncReport.pulledSeries} shows) into Kura, pushed {anilistSyncReport.pushedSeries} local updates to AniList{anilistSyncReport.flushedQueue ? `, and flushed ${anilistSyncReport.flushedQueue} queued scrobbles` : ""}.
+              </div>
+            </div>
+          {/if}
+
+          <div class="rows">
+            <div class="row">
+              <div class="row-text">
+                <strong>Auto-scrobble watched episodes</strong>
+                <small>Automatically push episode progress to AniList when an episode reaches your watched threshold ({threshold}%). Works offline via local queue.</small>
+              </div>
+              <button
+                class="switch"
+                class:on={anilist.autoScrobble}
+                role="switch"
+                aria-checked={anilist.autoScrobble}
+                aria-label="Auto-scrobble watched episodes"
+                onclick={toggleAnilistScrobble}
+                id="pref-anilist-scrobble"
+              ><span></span></button>
+            </div>
+          </div>
+        {:else}
+          <div class="anilist-connect">
+            <div class="backup-actions">
+              <button
+                class="btn btn-primary"
+                onclick={startAnilistOauth}
+                id="anilist-oauth-btn"
+              >
+                {#if anilistConnecting}
+                  <span class="spinner"></span> Waiting for AniList sign-in…
+                {:else}
+                  <Icon name="user" size={15} /> Sign in with AniList
+                {/if}
+              </button>
+            </div>
+          </div>
+        {/if}
+      </div>
+    </div>
+
+    <div class="anilist-section" id="set-airing-notify">
+      <h2 class="section-title">Seasonal Calendar & Notifications</h2>
+      <div class="card playback">
+        <div class="rows">
+          <div class="row">
+            <div class="row-text">
+              <strong>Airing & new-episode notifications</strong>
+              <small>Show an in-app notification when a tracked seasonal episode airs or when the live folder watcher detects a newly downloaded episode in your library.</small>
+            </div>
+            <button
+              class="switch"
+              class:on={app.airingNotifications}
+              role="switch"
+              aria-checked={app.airingNotifications}
+              aria-label="Airing and new-episode notifications"
+              onclick={() => app.setAiringNotifications(!app.airingNotifications)}
+              id="pref-airing-notify"
+            ><span></span></button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <h2 class="section-title">Discord Rich Presence</h2>
     <div class="card playback">
       <div class="rows">
@@ -1392,7 +1629,7 @@
         <div class="about-title-block">
           <h3>
             Kura 蔵
-            <span class="badge badge-accent">v{version || "0.3.7"}</span>
+            <span class="badge badge-accent">v{version || "0.4"}</span>
           </h3>
           <p class="faint">A local-first, manga-styled desktop anime media library.</p>
         </div>
@@ -1437,7 +1674,7 @@
       <div class="about-coming">
         <strong>Coming up in future releases:</strong>
         <p class="faint">
-          Advanced library filters, Jimaku subtitle fetching with smart matching, AniList / MyAnimeList sync, and
+          Jimaku subtitle fetching with smart episode matching, characters &amp; voice actor drawers, watch-time analytics, and
           Syncplay watch-together sessions.
         </p>
       </div>
@@ -2726,5 +2963,66 @@
     font-size: 13px;
     color: var(--ok);
     font-weight: 500;
+  }
+  .rebuild-note {
+    font-size: 13px;
+    color: var(--ok);
+    font-weight: 500;
+  }
+
+  /* AniList Sync ----------------------------------------------------------- */
+  .anilist-section {
+    margin-bottom: 28px;
+  }
+  .anilist-profile {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px;
+    margin-top: 14px;
+    border-radius: var(--r-md);
+    background: var(--surface);
+    border: var(--bw) solid var(--line);
+    flex-wrap: wrap;
+  }
+  .anilist-avatar {
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: var(--bw) solid var(--line);
+    background: var(--surface-2);
+    flex: none;
+  }
+  .anilist-avatar.fallback {
+    display: grid;
+    place-items: center;
+    color: var(--text-2);
+  }
+  .anilist-user {
+    flex: 1;
+    min-width: 180px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .anilist-user-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .anilist-user-row strong {
+    font-family: var(--font-display);
+    font-size: 16px;
+  }
+  .anilist-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .anilist-connect {
+    margin-top: 14px;
   }
 </style>

@@ -182,6 +182,17 @@ export interface MediaDetail {
   /** Owned entries of the same franchise in release order (empty if standalone). */
   franchise: FranchiseEntry[];
   trackPref: MediaTrackPref | null;
+  anilistStatus?: string | null;
+  anilistProgress?: number | null;
+  anilistScore?: number | null;
+}
+
+export interface AnilistRemoteEntry {
+  anilistId: number;
+  status: string;
+  progress: number;
+  score: number | null;
+  updatedAt: number;
 }
 
 export interface SearchResult {
@@ -314,6 +325,69 @@ export interface Diagnostics {
   logTail: string[];
 }
 
+export interface AnilistAccount {
+  connected: boolean;
+  userId: number | null;
+  userName: string | null;
+  avatarUrl: string | null;
+  lastSyncAt: number | null;
+  autoScrobble: boolean;
+  queuedCount: number;
+  trackedCount: number;
+  clientId: string;
+}
+
+export interface AnilistSyncReport {
+  pulledSeries: number;
+  pulledEpisodes: number;
+  pushedSeries: number;
+  flushedQueue: number;
+  totalRemote: number;
+}
+
+export interface SeasonalItem {
+  anilistId: number;
+  linkId: number;
+  titleRomaji: string | null;
+  titleEnglish: string | null;
+  titleNative: string | null;
+  format: string | null;
+  status: string | null;
+  episodes: number | null;
+  duration: number | null;
+  season: string | null;
+  seasonYear: number | null;
+  averageScore: number | null;
+  genres: string[];
+  studios: string[];
+  startDate: string | null;
+  coverUrl: string | null;
+  coverPath: string | null;
+  coverColor: string | null;
+  bannerUrl: string | null;
+  nextAiringEpisode: number | null;
+  nextAiringAt: number | null;
+  inLibrary: boolean;
+  ownedCount: number;
+  watchedCount: number;
+  anilistStatus: string | null;
+  anilistProgress: number | null;
+}
+
+export interface SeasonalCalendar {
+  season: string;
+  year: number;
+  fetchedAt: number;
+  items: SeasonalItem[];
+}
+
+export interface AiringNotification {
+  anilistId: number;
+  title: string;
+  episode: string | number;
+  message: string;
+}
+
 export const api = {
   listLibraries: () => invoke<Library[]>("list_libraries"),
   createLibrary: (name: string, folders: string[]) => invoke<number>("create_library", { name, folders }),
@@ -356,6 +430,24 @@ export const api = {
   importBackup: (path: string, options: ImportOptions) => invoke<ImportReport>("import_backup", { path, options }),
   backupStatus: () => invoke<SafetyCopy[]>("backup_status"),
   getDiagnostics: () => invoke<Diagnostics>("get_diagnostics"),
+  getAnilistAccount: () => invoke<AnilistAccount>("get_anilist_account"),
+  anilistUpdateEntry: (opts: { anilistId: number; status?: string | null; progress?: number | null; score?: number | null }) =>
+    invoke<AnilistRemoteEntry>("anilist_update_entry", {
+      anilistId: opts.anilistId,
+      status: opts.status ?? null,
+      progress: opts.progress ?? null,
+      score: opts.score ?? null,
+    }),
+  anilistStartOauth: (clientId?: string) => invoke<string>("anilist_start_oauth", { clientId: clientId ?? null }),
+  anilistLoginToken: (token: string) => invoke<AnilistAccount>("anilist_login_token", { token }),
+  anilistDisconnect: () => invoke<AnilistAccount>("anilist_disconnect"),
+  anilistSyncNow: () => invoke<AnilistSyncReport>("anilist_sync_now"),
+  getSeasonalCalendar: (opts?: { season?: string; year?: number; refresh?: boolean }) =>
+    invoke<SeasonalCalendar>("get_seasonal_calendar", {
+      season: opts?.season ?? null,
+      year: opts?.year ?? null,
+      refresh: opts?.refresh ?? false,
+    }),
 };
 
 export const events = {
@@ -368,6 +460,10 @@ export const events = {
     listen<PlaybackEvent>("playback", (e) => cb(e.payload)),
   onMpvInstallProgress: (cb: (msg: string) => void): Promise<UnlistenFn> =>
     listen<string>("mpv-install-progress", (e) => cb(e.payload)),
+  onAnilistChanged: (cb: (acct: AnilistAccount) => void): Promise<UnlistenFn> =>
+    listen<AnilistAccount>("anilist-changed", (e) => cb(e.payload)),
+  onAiringNotification: (cb: (n: AiringNotification) => void): Promise<UnlistenFn> =>
+    listen<AiringNotification>("airing-notification", (e) => cb(e.payload)),
 };
 
 /** Prefer the locally cached image (works offline), fall back to the remote URL. */

@@ -11,7 +11,7 @@ class ChangelogModalState {
   async getAppVersion(): Promise<string> {
     if (this.#appVersion) return this.#appVersion;
     try {
-      this.#appVersion = await getVersion();
+      this.#appVersion = (await getVersion()).replace(/\.0$/, "");
       return this.#appVersion;
     } catch {
       return CHANGELOG[0].version;

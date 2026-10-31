@@ -9,10 +9,13 @@
  * Query params:
  *   ?preview=onboarding  → start with no libraries (first-run screen)
  *   ?preview=scanning    → show the scan progress card
+ *   ?preview=stress      → add a synthetic 120-episode series with extreme titles & missing art
  */
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import type { EpisodeRow, Library, MediaCard, MediaDetail, RelationCard, UnmatchedGroup, UpNextItem } from "$lib/api";
+
+const STRESS_ID = 999999;
 
 const SAMPLE: { id: number; owned: number; watched: number }[] = [
   { id: 154587, owned: 10, watched: 6 }, // Frieren
@@ -56,10 +59,39 @@ async function loadMedia(): Promise<Map<number, AniMedia>> {
   const res = await fetch("https://graphql.anilist.co", {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ query: QUERY, variables: { ids: SAMPLE.map((s) => s.id) } }),
+    body: JSON.stringify({ query: QUERY, variables: { ids: SAMPLE.filter((s) => s.id !== STRESS_ID).map((s) => s.id) } }),
   });
   const json = await res.json();
   media = new Map((json?.data?.Page?.media ?? []).map((m: AniMedia) => [m.id, m]));
+  if (SAMPLE.some((s) => s.id === STRESS_ID)) {
+    media.set(STRESS_ID, {
+      id: STRESS_ID,
+      idMal: null,
+      format: "TV",
+      status: "RELEASING",
+      episodes: 120,
+      duration: null,
+      season: null,
+      seasonYear: null,
+      averageScore: null,
+      genres: ["Action", "Comedy", "Fantasy", "Slice of Life"],
+      synonyms: ["ChoujouGenshouParanormalSuperLongUnspacedRomajiTitleWithoutAnySpacesAtAllForTestingOverflowWrappingInCardsAndHeaders"],
+      title: {
+        romaji: "ShuumatsuNaniShitemasuKaIsogashiiDesuKaSukutteMoratteIiDesuKaLongUnspacedRomajiStressFixture",
+        english: "What Do You Do at the End of the World? Are You Busy? Will You Save Us? Super-Long Edition With Extreme Subtitle Length for Layout Stress Testing",
+        native: "終末なにしてますか？忙しいですか？救ってもらっていいですか？超長題名レイアウト検証用特別編・果てしない物語の記録",
+      },
+      coverImage: { extraLarge: null, color: null },
+      bannerImage: null,
+      description: null,
+      startDate: null,
+      endDate: null,
+      studios: { nodes: [] },
+      tags: [{ name: "Long Title Stress Test", rank: 90 }],
+      nextAiringEpisode: { episode: 42, airingAt: Math.floor(Date.now() / 1000) + 9420 },
+      relations: { edges: [] },
+    });
+  }
   return media;
 }
 
@@ -149,20 +181,25 @@ async function episodes(m: AniMedia): Promise<EpisodeRow[]> {
     const n = i + 1;
     const e = eps[String(n)] ?? {};
     const has = n <= s.owned;
+    const stress = m.id === STRESS_ID;
     return {
       epKey: String(n),
       number: n,
       isSpecial: false,
-      titleEn: e.title?.en ?? null,
-      titleJa: e.title?.ja ?? null,
+      titleEn:
+        e.title?.en ??
+        (stress
+          ? `The Extremely Long Episode Title That Tests How Badges Like Up Next, Playing, Filler and Recap Behave When Wrapped Across Multiple Lines (Part ${n})`
+          : null),
+      titleJa: e.title?.ja ?? (stress ? `超長エピソードタイトル検証用・バッジが潰れないことを確認するための特別テスト第${n}話` : null),
       titleRomaji: e.title?.["x-jat"] ?? null,
       overview: e.overview ?? e.summary ?? null,
       airDate: e.airdate ?? e.airDate ?? null,
       runtime: e.runtime ?? m.duration ?? null,
       thumbUrl: e.image ?? null,
       thumbPath: null,
-      filler: false,
-      recap: false,
+      filler: stress && n % 3 === 0,
+      recap: stress && n % 5 === 0,
       files: has ? [{ id: n, path: `D:\\Anime\\${m.title.romaji}\\Episode ${n}.mkv`, fileName: `Episode ${n}.mkv`, size: 1_400_000_000 }] : [],
       watchedAt: seen.has(String(n)) ? Date.now() : null,
       // Pretend the episode after the last watched one was stopped part-way.
@@ -259,6 +296,8 @@ async function detail(id: number): Promise<MediaDetail> {
     extras: [],
     otherFiles: [],
     trackPref: null,
+    anilistStatus: "CURRENT",
+    anilistProgress: watched.get(id)?.size ?? 0,
     groups: [{ id: 1, displayName: m.title.romaji, folderPath: `D:\\Anime\\${m.title.romaji}`, confidence: 0.97, manual: false }],
     franchise: (() => {
       const f = franchises(all).get(id);
@@ -287,6 +326,9 @@ export function installMock() {
   const preview = new URLSearchParams(location.search).get("preview");
   const empty = preview === "onboarding";
   const scanning = preview === "scanning";
+  if (preview === "stress" && !SAMPLE.some((s) => s.id === STRESS_ID)) {
+    SAMPLE.unshift({ id: STRESS_ID, owned: 120, watched: 41 });
+  }
 
   const library: Library = {
     id: 1,
@@ -376,8 +418,89 @@ export function installMock() {
             500,
           );
           return null;
+        case "get_anilist_account":
+          return {
+            connected: false,
+            userId: null,
+            userName: null,
+            avatarUrl: null,
+            lastSyncAt: null,
+            autoScrobble: true,
+            queuedCount: 0,
+            trackedCount: 0,
+            clientId: "",
+          };
+        case "anilist_login_token":
+          return {
+            connected: true,
+            userId: 1,
+            userName: "PreviewUser",
+            avatarUrl: null,
+            lastSyncAt: Math.floor(Date.now() / 1000),
+            autoScrobble: true,
+            queuedCount: 0,
+            trackedCount: SAMPLE.length,
+            clientId: "",
+          };
+        case "anilist_disconnect":
+          return {
+            connected: false,
+            userId: null,
+            userName: null,
+            avatarUrl: null,
+            lastSyncAt: null,
+            autoScrobble: true,
+            queuedCount: 0,
+            trackedCount: 0,
+            clientId: "",
+          };
+        case "anilist_sync_now":
+          return {
+            pulledSeries: 0,
+            pulledEpisodes: 0,
+            pushedSeries: 0,
+            flushedQueue: 0,
+            totalRemote: SAMPLE.length,
+          };
+        case "get_seasonal_calendar": {
+          const all = [...(await loadMedia()).values()];
+          const now = Math.floor(Date.now() / 1000);
+          return {
+            season: (a.season as string) || "SPRING",
+            year: Number(a.year) || new Date().getFullYear(),
+            fetchedAt: now,
+            items: all.map((m, i) => ({
+              anilistId: m.id,
+              linkId: m.id,
+              titleRomaji: m.title.romaji,
+              titleEnglish: m.title.english,
+              titleNative: m.title.native,
+              format: m.format,
+              status: m.status,
+              episodes: m.episodes,
+              duration: m.duration,
+              season: m.season,
+              seasonYear: m.seasonYear,
+              averageScore: m.averageScore,
+              genres: m.genres ?? [],
+              studios: (m.studios?.nodes ?? []).map((s: AniMedia) => s.name),
+              startDate: date(m.startDate),
+              coverUrl: m.coverImage?.extraLarge ?? m.coverImage?.large ?? null,
+              coverPath: null,
+              coverColor: m.coverImage?.color ?? null,
+              bannerUrl: m.bannerImage ?? null,
+              nextAiringEpisode: (m.watched ?? 0) + 1,
+              nextAiringAt: now + ((i + 1) * 54000),
+              inLibrary: true,
+              ownedCount: m.owned,
+              watchedCount: watched.get(m.id)?.size ?? 0,
+              anilistStatus: "CURRENT",
+              anilistProgress: watched.get(m.id)?.size ?? 0,
+            })),
+          };
+        }
         case "plugin:app|version":
-          return "0.3.7";
+          return "0.4";
         default:
           console.info("[preview] ignored command", cmd, a);
           return null;

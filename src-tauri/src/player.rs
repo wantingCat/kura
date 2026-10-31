@@ -2060,6 +2060,7 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
         if !marked && reached(pos, dur, p.threshold) {
             marked = true;
             mark_watched(&st.db(), &ep);
+            crate::anilist_sync::on_episode_watched(&app, &st, ep.anilist_id);
             let _ = app.emit("library-changed", ());
         } else if !marked && pos > 15.0 && ticks % 5 == 0 {
             save_progress(&st.db(), &ep, pos, dur);
@@ -2071,6 +2072,7 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
         if s.ended && loaded_at.elapsed() > Duration::from_secs(3) {
             if !marked && dur > 0.0 {
                 mark_watched(&st.db(), &ep);
+                crate::anilist_sync::on_episode_watched(&app, &st, ep.anilist_id);
                 let _ = app.emit("library-changed", ());
             }
             if !p.autoplay {
@@ -2106,6 +2108,7 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
     if !marked && pos > 15.0 && dur > 0.0 {
         if reached(pos, dur, p.threshold) {
             mark_watched(&st.db(), &ep);
+            crate::anilist_sync::on_episode_watched(&app, &st, ep.anilist_id);
         } else {
             save_progress(&st.db(), &ep, pos, dur);
         }

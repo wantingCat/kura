@@ -1,7 +1,7 @@
 import {
   api,
   events,
-  type Library,
+  type AnilistAccount, type Library,
   type MediaCard,
   type PlaybackEvent,
   type PlayerKind,
@@ -72,6 +72,8 @@ class AppStore {
     subFallback: "eng",
   });
   autoUpdate = $state(true);
+  airingNotifications = $state(true);
+  anilist = $state<AnilistAccount | null>(null);
   folderWatcher = $state(true);
   fanartApiKey = $state("");
   discord = $state<DiscordPrefs>({
@@ -113,6 +115,16 @@ class AppStore {
       this.scheduleRefresh();
     });
     await events.onScanError((msg) => (this.lastError = msg));
+    await events.onAiringNotification((n) => this.toast(n.message, "info", 8000));
+    await events.onAnilistChanged((acct) => {
+      const wasConnected = !!this.anilist?.connected;
+      this.anilist = acct;
+      if (!wasConnected && acct.connected) {
+        this.toast(`Connected to AniList as ${acct.userName ?? "user"}!`, "info", 6000);
+      }
+      this.scheduleRefresh();
+    });
+    api.getAnilistAccount().then((a) => (this.anilist = a)).catch(() => {});
     await events.onPlayback((p) => {
       if (p.state === "tracking") {
         this.nowPlaying = p;
@@ -148,6 +160,7 @@ class AppStore {
       this.groupSeasons = prefs.group_seasons !== "0";
       this.autoUpdate = prefs.auto_update !== "0";
       this.folderWatcher = prefs.folder_watcher !== "0";
+      this.airingNotifications = prefs.airing_notifications !== "0";
       this.fanartApiKey = prefs.fanart_api_key ?? "";
       const num = (v: string | undefined, d: number) => (v !== undefined && !isNaN(Number(v)) ? Number(v) : d);
       this.playback = {
@@ -234,6 +247,11 @@ class AppStore {
   async setAutoUpdate(on: boolean) {
     this.autoUpdate = on;
     await api.setPref("auto_update", on ? "1" : "0");
+  }
+
+  async setAiringNotifications(on: boolean) {
+    this.airingNotifications = on;
+    await api.setPref("airing_notifications", on ? "1" : "0");
   }
 
   async setFolderWatcher(on: boolean) {

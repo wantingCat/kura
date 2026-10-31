@@ -14,12 +14,13 @@ This document serves as the master planning roadmap for Kura, organizing propose
 | **v0.3.5** | **Bug Fix**: Reliable MPV detection after winget install (registry, WinGet folders, fresh PATH) | ✅ Completed |
 | **v0.3.6** | **Bug Fix**: Skip button no longer triggers on prologues (length-matched AniSkip, stricter chapter detection) + redesigned skip button & styled MPV messages | ✅ Completed |
 | **v0.3.7** | **Foundations (part 1)**: Settings Overhaul (sidebar + search), Full Backup & Restore, Diagnostics & Log, CI Checks, Startup-Hang Fix, Maximized Window | ✅ Completed |
-| **v0.4.0** | **Foundations (part 2)**: Advanced Filtering, Visual Bug Sweep | 🚧 In Progress |
-| **v0.5.0** | **Sync & Airing**: AniList Two-Way Sync + Seasonal Airing Calendar & Countdown | 💡 Planned |
-| **v0.6.0** | **Subtitles & Cast**: Jimaku.cc Japanese Subtitle Fetcher + Smart Subtitle Matcher + Characters, Seiyuu & Staff | 💡 Planned |
-| **v0.7.0** | **Watch Analytics**: Watch-Time & Immersion Hours Tracker + Yearly Activity Heatmap | 💡 Planned |
-| **v0.8.0** | **Social & Music**: Syncplay Auto-Install & Launcher + AnimeThemes OP/ED Drawer + Linux/macOS Polish | 💡 Planned |
-| **v1.0.0 (Beta)** | **Polish & Trust**: Performance, Windows Code Signing, Japanese UI Language | 💡 Future |
+| **v0.4** | **Foundations, Sync & Airing**: Advanced Library Filtering, Visual Bug Sweep, AniList Two-Way Sync + Seasonal Airing Calendar & Countdown | ✅ Completed |
+| **v0.5** | **Subtitles & Cast**: Jimaku.cc Japanese Subtitle Fetcher + Smart Subtitle Matcher + Characters, Seiyuu & Staff | 💡 Planned |
+| **v0.6** | **Watch Analytics**: Watch-Time & Immersion Hours Tracker + Yearly Activity Heatmap | 💡 Planned |
+| **v0.7** | **Social & Music**: Syncplay Auto-Install & Launcher + AnimeThemes OP/ED Drawer + Linux/macOS Polish | 💡 Planned |
+| **v1.0** | **Polish, Built-in Player & Trust (Stable)**: Integrated `libmpv` Default Player, Performance, Windows Code Signing, Japanese UI Language | 💡 Future |
+
+> **Versioning Policy**: Minor feature releases use two-part numbers (`0.4`, `0.5`, `0.6`, `0.7`), with three-part patch numbers (`0.4.1`) reserved strictly for small hotfixes. `1.0` marks the stable release.
 
 ---
 
@@ -144,71 +145,70 @@ Automatically detect new anime episodes and movies the moment they finish downlo
 ---
 
 ## 🧱 Phase 5: Foundations — Settings, Backup, Diagnostics & Filtering
-*Target: v0.4.0*
+*Target: v0.4* — **Completed**
 
 Groundwork that makes every later feature easier to ship, support and debug.
 
 ### Checklist
-- [ ] **Settings Overhaul**
-  - [ ] Replace the single long page with a **left sidebar of categories**: General, Library, Playback, Subtitles, Artwork & Metadata, Integrations (Discord / AniList / Jimaku), Backup, Updates, About & Diagnostics.
-  - [ ] **Settings search bar** that filters every option by label/keyword and jumps to it.
-  - [ ] Each category is its own component so new options don't bloat one file.
-  - [ ] Remember the last opened category.
-- [ ] **Full Backup & Restore** (extends the existing `kura_backup.json`)
-  - [ ] Include **watch history** (`watch_state`), resume positions (`watch_progress`), manual match overrides and track preferences (`media_track_prefs`) — not just settings and libraries.
-  - [ ] Debounced auto-backup after watch progress changes (not on every tick).
-  - [ ] One-click **Export** to a chosen `.json` file and **Import** with a confirmation preview ("312 episodes, 4 libraries").
-  - [ ] Versioned backup format so older backups still import after schema changes.
-- [ ] **Diagnostics**
-  - [ ] Rolling log file in the app data dir (`kura.log`, size-capped).
-  - [ ] **"Copy diagnostics"** button: app version, OS, detected players + paths, library count, last errors — paste-ready for GitHub issues.
-  - [ ] **Player detection list**: show every mpv / VLC / Syncplay path Kura found and where it found it (registry, PATH, WinGet, etc.), plus a "Re-detect" button.
-- [ ] **CI Checks**
-  - [ ] GitHub Actions workflow running `cargo check` + `cargo test` on Windows, Ubuntu and macOS, plus `npm run check`, on every push/PR — so Linux/macOS breakages are caught before a release tag.
-- [ ] **Advanced Filtering & Library Search**
-  - [ ] Filter by genres, tags, studios, format (TV, Movie, OVA, Special), airing status and watch status.
-  - [ ] Quick filter pills on the library home page.
-  - [ ] Multi-criteria sorting (Score, Date Added, Release Year, Title, Progress).
-- [ ] **Visual Bug Sweep & Layout Hardening**
-  - [ ] **Long episode titles break the badge row**: `Up next` / `Playing` / `Launching…` / `Filler` / `Recap` badges get squashed or wrap under the title. Keep badges on one line (`flex-shrink: 0`, `white-space: nowrap`) and clamp the title to 2 lines with ellipsis + full title on hover.
-  - [ ] Same treatment for long series titles on library cards, the Continue Watching hero, search results and the now-playing toast.
-  - [ ] Long Japanese titles, romaji with no spaces and very long file names: add `overflow-wrap: anywhere` where text can't break naturally.
-  - [ ] Check both themes (Comic / Manga) and narrow window widths (~900px) for overlapping or clipped elements.
-  - [ ] Stress-test fixture: a dev mock series with extreme titles, 100+ episodes, missing artwork and missing metadata, to catch these regressions early.
-  - [ ] Collect any other visual glitches reported before v0.4.0 here.
+- [x] **Settings Overhaul**
+  - [x] Replace the single long page with a **left sidebar of categories**: General, Library, Playback, Subtitles, Artwork & Metadata, Integrations (Discord / AniList / Jimaku), Backup, Updates, About & Diagnostics.
+  - [x] **Settings search bar** that filters every option by label/keyword and jumps to it.
+  - [x] Each category is its own section so new options stay organized.
+  - [x] Remember the last opened category.
+- [x] **Full Backup & Restore** (extends the existing `kura_backup.json`)
+  - [x] Include **watch history** (`watch_state`), resume positions (`watch_progress`), manual match overrides and track preferences (`media_track_prefs`) — not just settings and libraries.
+  - [x] Debounced auto-backup after watch progress changes (not on every tick).
+  - [x] One-click **Export** to a chosen `.json` file and **Import** with a confirmation preview ("312 episodes, 4 libraries").
+  - [x] Versioned backup format so older backups still import after schema changes.
+- [x] **Diagnostics**
+  - [x] Rolling log file in the app data dir (`kura.log`, size-capped).
+  - [x] **"Copy diagnostics"** button: app version, OS, detected players + paths, library count, last errors — paste-ready for GitHub issues.
+  - [x] **Player detection list**: show every mpv / VLC / Syncplay path Kura found and where it found it (registry, PATH, WinGet, etc.), plus a "Re-detect" button.
+- [x] **CI Checks**
+  - [x] GitHub Actions workflow running `cargo check` + `cargo test` on Windows, Ubuntu and macOS, plus `npm run check`, on every push/PR — so Linux/macOS breakages are caught before a release tag.
+- [x] **Advanced Filtering & Library Search**
+  - [x] Filter by genres, tags, studios, format (TV, Movie, OVA, Special), airing status and watch status.
+  - [x] Quick filter pills on the library home page.
+  - [x] Multi-criteria sorting (Score, Date Added, Release Year, Title, Progress).
+- [x] **Visual Bug Sweep & Layout Hardening**
+  - [x] **Long episode titles break the badge row**: `Up next` / `Playing` / `Launching…` / `Filler` / `Recap` badges get squashed or wrap under the title. Keep badges on one line (`flex-shrink: 0`, `white-space: nowrap`) and clamp the title to 2 lines with ellipsis + full title on hover.
+  - [x] Same treatment for long series titles on library cards, the Continue Watching hero, search results and the now-playing toast.
+  - [x] Long Japanese titles, romaji with no spaces and very long file names: add `overflow-wrap: anywhere` where text can't break naturally.
+  - [x] Check both themes (Comic / Manga) and narrow window widths (~900px) for overlapping or clipped elements.
+  - [x] Stress-test fixture: a dev mock series with extreme titles, 100+ episodes, missing artwork and missing metadata, to catch these regressions early.
 
 ---
 
 ## 🔄 Phase 6: AniList Two-Way Sync & Seasonal Airing Calendar
-*Target: v0.5.0*
+*Target: v0.4* — **Completed**
 
 ### Checklist
-- [ ] **AniList Login**
-  - [ ] AniList OAuth2 (implicit grant) via local loopback redirect (`http://localhost:port/oauth/callback`).
-  - [ ] Token stored in SQLite settings; "Disconnect" button in **Settings → Integrations**.
-- [ ] **Two-Way Synchronization Engine**
-  - [ ] Import the user's list on connect (Watching, Completed, Planning, Paused, Dropped).
-  - [ ] Auto-scrobble: when an episode reaches 90% in Kura, update progress on AniList.
-  - [ ] Safe merge rules: never regress progress on either side.
-  - [ ] Offline queue: scrobbles made offline are sent when back online.
-  - [ ] Rate limit compliance (AniList 90 req/min).
-- [ ] **Seasonal Airing Calendar & Countdown**
-  - [ ] **Weekly Broadcast Grid (Mon – Sun)** in your local timezone.
-  - [ ] **Library Highlighting**: shows already in your library vs. new seasonal discoveries.
-  - [ ] **Episode Countdown**: *"Episode 7 airs in 3h 15m"* via AniList's `nextAiringEpisode`.
-  - [ ] **Desktop Notifications** (optional): when a tracked show airs or the folder watcher picks up its file.
+- [x] **AniList Login**
+  - [x] AniList OAuth2 (implicit grant) via local loopback redirect (`http://localhost:14876/oauth/callback`) plus direct token/redirect URL paste.
+  - [x] Token stored in SQLite settings (excluded from exported backups and diagnostics); "Disconnect" button in **Settings → Integrations**.
+- [x] **Two-Way Synchronization Engine**
+  - [x] Import the user's list on connect (Watching, Completed, Planning, Paused, Dropped).
+  - [x] Auto-scrobble: when an episode reaches the watched threshold in Kura, update progress on AniList.
+  - [x] Safe merge rules: never regress progress on either side.
+  - [x] Offline queue: scrobbles made offline are saved in `anilist_scrobble_queue` and sent when back online.
+  - [x] Rate limit compliance (AniList 90 req/min).
+- [x] **Seasonal Airing Calendar & Countdown**
+  - [x] **Weekly Broadcast Grid (Mon – Sun)** in your local timezone.
+  - [x] **Library Highlighting**: shows already in your library vs. new seasonal discoveries.
+  - [x] **Episode Countdown**: *"EP 7 in 3h 15m"* via AniList's `nextAiringEpisode`.
+  - [x] **Airing & Library Notifications** (optional): when a tracked show airs or the folder watcher picks up its file.
 
 ---
 
 ## 💬 Phase 7: Jimaku Subtitle Fetcher, Subtitle Matcher & Characters / Staff
-*Target: v0.6.0*
+*Target: v0.5*
 
 ### Feasibility notes (checked against the Jimaku API)
 - Jimaku has an official REST API: `GET /api/entries/search?anilist_id=…` → `GET /api/entries/{id}/files?episode=N`. Kura already stores AniList IDs, so matching is direct — no fuzzy title search needed.
 - **Requires a free Jimaku account + API key** (sent in the `Authorization` header) → add a key field in **Settings → Integrations**, same pattern as the Fanart.tv key.
 - Rate limited per IP (~25 requests per window, `429` + `x-ratelimit-reset-after`) → cache results per series and back off.
 - Episode filtering is best-effort (filename based) and some uploads are `.zip` / `.rar` packs → always show a picker; extract `.zip` in Rust, skip `.rar` with a "download manually" link.
-- Should set a descriptive `User-Agent` (`Kura/x.y.z`).
+- Should set a descriptive `User-Agent` (`Kura/x.y`).
 
 ### Checklist
 - [ ] **Jimaku Subtitle Fetcher**
@@ -236,7 +236,7 @@ Groundwork that makes every later feature easier to ship, support and debug.
 ---
 
 ## 📊 Phase 8: Watch-Time & Immersion Analytics
-*Target: v0.7.0*
+*Target: v0.6*
 
 ### Checklist
 - [ ] **Viewing Sessions Table**: new SQLite table recording start/end, episode, audio language and subtitle language for each play session (needed for accurate stats).
@@ -248,7 +248,7 @@ Groundwork that makes every later feature easier to ship, support and debug.
 ---
 
 ## 🎉 Phase 9: Syncplay, AnimeThemes & Cross-Platform Polish
-*Target: v0.8.0*
+*Target: v0.7*
 
 ### Checklist
 - [ ] **Syncplay Integration (lightweight)**
@@ -264,13 +264,17 @@ Groundwork that makes every later feature easier to ship, support and debug.
 
 ---
 
-## ⚡ Phase 10: Polish & Trust
-*Target: v1.0.0 (Beta)*
+## ⚡ Phase 10: Built-in `libmpv` Player, Polish & Trust (Stable)
+*Target: before / in v1.0*
 
+- [ ] **Integrated Default Video Player (`libmpv`)**
+  - [ ] **Architecture (Native Surface + Transparent Webview HUD)**: Render video directly via hardware acceleration (D3D11 / Vulkan / OpenGL) onto a native child/underlay window (`--wid=<hwnd>` / `NSView` / X11-Wayland subsurface) with a transparent Kura webview region on top — zero CPU frame-copy overhead, full 10-bit HEVC/AV1 + `libass` subtitle fidelity.
+  - [ ] **Dynamic Library Loading (`libloading`)**: Dynamically load `libmpv-2.dll` / `libmpv.so.2` / `libmpv.2.dylib` so Kura works out-of-the-box with zero external setup, while still allowing power users to switch to external `mpv`, `VLC`, `MPC-HC`, or `Memento` in **Settings → Playback**.
+  - [ ] **Custom Kura Svelte Player HUD**: Comic/Manga-styled controls for play/pause, timeline scrubber with chapter markers, audio/subtitle track switcher, subtitle delay (`z`/`x`), Skip OP/ED button (AniSkip + chapter detection), and Next Episode autoplay.
+  - [ ] **Cross-Platform CI Bundling**: Bundle `shinchiro` `libmpv-2.dll` on Windows via `bundle.resources`, `libmpv2` on Linux, and Homebrew `libmpv.2.dylib` (via `dylibbundler` / `install_name_tool`) on macOS.
 - [ ] **Performance**: virtualized library grid for large collections, image cache cleanup, faster startup.
 - [ ] **Windows Code Signing**: remove SmartScreen "unknown publisher" warnings.
 - [ ] **Japanese UI Language**: optional Japanese interface (i18n groundwork for other languages).
-- [ ] **Embedded Player (research only)**: investigate embedding libmpv inside a Kura window. Note: a plain webview `<video>` player is *not* viable — no reliable MKV, HEVC 10-bit or ASS subtitle support — so this would have to be libmpv-based.
 
 ---
 

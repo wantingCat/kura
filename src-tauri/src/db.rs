@@ -163,6 +163,32 @@ ALTER TABLE media ADD COLUMN logo_url TEXT;
 ALTER TABLE media ADD COLUMN logo_path TEXT;
 "#;
 
+/// v0.4 (AniList sync & seasonal calendar): remote list mirror, offline scrobble queue, seasonal cache.
+pub const SCHEMA_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS anilist_entries (
+    anilist_id   INTEGER PRIMARY KEY,
+    entry_id     INTEGER,
+    status       TEXT NOT NULL,
+    progress     INTEGER NOT NULL DEFAULT 0,
+    score        REAL,
+    updated_at   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS anilist_scrobble_queue (
+    anilist_id   INTEGER PRIMARY KEY,
+    progress     INTEGER NOT NULL,
+    status       TEXT,
+    queued_at    INTEGER NOT NULL,
+    last_error   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS seasonal_cache (
+    season_key   TEXT PRIMARY KEY,
+    payload      TEXT NOT NULL,
+    fetched_at   INTEGER NOT NULL
+);
+"#;
+
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(
@@ -221,6 +247,8 @@ pub fn seed_default_prefs_if_missing(conn: &Connection) -> Result<()> {
         ("pref.discord_spoilers", "0"),
         ("pref.discord_buttons", "1"),
         ("pref.mpc_port", "13579"),
+        ("pref.anilist_auto_scrobble", "1"),
+        ("pref.airing_notifications", "1"),
     ];
 
     for (k, v) in defaults {
@@ -245,6 +273,11 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if version < 4 {
         conn.execute_batch(&format!("BEGIN; {SCHEMA_V4} PRAGMA user_version = 4; COMMIT;"))?;
+    }
+    if version < 6 {
+        conn.execute_batch(&format!("BEGIN; {SCHEMA_V5} PRAGMA user_version = 6; COMMIT;"))?;
+    } else {
+        conn.execute_batch(SCHEMA_V5)?;
     }
     Ok(())
 }

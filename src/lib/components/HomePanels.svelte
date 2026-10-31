@@ -77,8 +77,8 @@
           <span class="bubble">{featured.position > 0 ? "Where were we?" : "Up next!"}</span>
 
           <div class="info">
-            <a class="title" href={`/anime/${featured.anilistId}`}>{displayTitle(featured)}</a>
-            <p class="ep">
+            <a class="title" href={`/anime/${featured.anilistId}`} title={displayTitle(featured)}>{displayTitle(featured)}</a>
+            <p class="ep" title={featured.episodeTitle ? `${epLabel(featured)} · ${featured.episodeTitle}` : epLabel(featured)}>
               <strong>{epLabel(featured)}</strong>{#if featured.episodeTitle}<span> · {featured.episodeTitle}</span>{/if}
             </p>
             {#if featured.position > 0}
@@ -136,7 +136,7 @@
             </a>
             <div class="side-body">
               <span class="kicker">Just landed</span>
-              <a class="side-title" href={`/anime/${newItem.anilistId}`}>{displayTitle(newItem)}</a>
+              <a class="side-title" href={`/anime/${newItem.anilistId}`} title={displayTitle(newItem)}>{displayTitle(newItem)}</a>
               <p class="side-sub">
                 {epLabel(newItem)}{newItem.newCount > 1 ? ` + ${newItem.newCount - 1} more` : ""}
               </p>
@@ -166,7 +166,7 @@
             </span>
             <div class="side-body">
               <span class="kicker amber">Finish this!</span>
-              <span class="side-title">{displayTitle(finish.c)}</span>
+              <span class="side-title" title={displayTitle(finish.c)}>{displayTitle(finish.c)}</span>
               <p class="left">
                 Only <strong>{finish.left}</strong> episode{finish.left === 1 ? "" : "s"} left
               </p>
@@ -324,6 +324,7 @@
   .info {
     position: relative;
     z-index: 2;
+    min-width: 0;
     max-width: min(560px, 68%);
     padding: 18px 20px;
     border: var(--bw) solid var(--line);
@@ -337,6 +338,7 @@
     line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
+    overflow-wrap: anywhere;
     font-family: var(--font-display);
     font-size: 28px;
     font-weight: 600;
@@ -562,6 +564,7 @@
     line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
+    overflow-wrap: anywhere;
     font-family: var(--font-display);
     font-size: 17px;
     font-weight: 600;
@@ -603,6 +606,15 @@
     }
     .info {
       max-width: 100%;
+    }
+  }
+  @media (max-width: 860px) {
+    .side,
+    .panels.solo .side {
+      flex-direction: column;
+    }
+    .bubble {
+      display: none;
     }
   }
 </style>

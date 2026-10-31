@@ -485,6 +485,9 @@ pub struct MediaDetail {
     groups: Vec<GroupRef>,
     franchise: Vec<FranchiseEntry>,
     track_pref: Option<db::MediaTrackPref>,
+    anilist_status: Option<String>,
+    anilist_progress: Option<i64>,
+    anilist_score: Option<f64>,
 }
 
 fn file_ref(id: i64, path: String, size: i64) -> FileRef {
@@ -494,6 +497,28 @@ fn file_ref(id: i64, path: String, size: i64) -> FileRef {
 
 #[tauri::command]
 pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDetail> {
+    let (has_media, has_episodes) = {
+        let conn = st.db();
+        let _ = conn.execute_batch(db::SCHEMA_V5);
+        let hm: bool = conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM media WHERE anilist_id = ?1)", [anilist_id], |r| r.get(0))
+            .unwrap_or(false);
+        let he: bool = conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM episodes WHERE anilist_id = ?1)", [anilist_id], |r| r.get(0))
+            .unwrap_or(false);
+        (hm, he)
+    };
+    if !has_media {
+        crate::service::ensure_media(&st, anilist_id).await.map_err(err)?;
+    }
+    if !has_episodes {
+        let _ = crate::service::ensure_episodes(&st, anilist_id).await;
+    }
+    if let Some(rem) = crate::anilist_sync::get_remote_entry(&st.db(), anilist_id) {
+        if rem.progress > 0 {
+            let _ = crate::anilist_sync::apply_remote_progress_to_local(&st.db(), anilist_id, rem.progress);
+        }
+    }
     let conn = st.db();
     let mut d = conn
         .query_row(
@@ -541,6 +566,9 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
                     groups: Vec::new(),
                     franchise: Vec::new(),
                     track_pref: None,
+                    anilist_status: None,
+                    anilist_progress: None,
+                    anilist_score: None,
                 })
             },
         )
@@ -702,6 +730,35 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
     }
     // Specials are only interesting if owned or described.
     d.episode_list.retain(|e| !e.is_special || !e.files.is_empty() || e.title_en.is_some() || e.title_ja.is_some());
+    if !d.episode_list.iter().any(|e| !e.is_special) {
+        let fallback_count = d
+            .episodes
+            .or_else(|| d.next_airing_episode)
+            .unwrap_or(if d.format.as_deref() == Some("MOVIE") { 1 } else { 12 })
+            .clamp(1, 200);
+        for n in 1..=fallback_count {
+            let key = n.to_string();
+            d.episode_list.push(EpisodeRow {
+                ep_key: key.clone(),
+                number: n,
+                is_special: false,
+                title_en: None,
+                title_ja: None,
+                title_romaji: None,
+                overview: None,
+                air_date: None,
+                runtime: d.duration,
+                thumb_url: None,
+                thumb_path: None,
+                filler: false,
+                recap: false,
+                files: Vec::new(),
+                watched_at: watched.get(&key).copied(),
+                progress_pos: None,
+                progress_dur: None,
+            });
+        }
+    }
     d.episode_list.sort_by(|a, b| a.is_special.cmp(&b.is_special).then(a.number.cmp(&b.number)));
 
     // Relations
@@ -810,6 +867,11 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
         }
     }
     d.track_pref = db::get_media_track_pref(&conn, anilist_id).map_err(err)?;
+    if let Some(rem) = crate::anilist_sync::get_remote_entry(&conn, anilist_id) {
+        d.anilist_status = Some(rem.status);
+        d.anilist_progress = Some(rem.progress);
+        d.anilist_score = rem.score;
+    }
     Ok(d)
 }
 
@@ -837,6 +899,10 @@ pub async fn set_watched(app: AppHandle, st: St<'_>, anilist_id: i64, ep_keys: V
             .map_err(err)?;
     }
     tx.commit().map_err(err)?;
+    drop(conn);
+    if watched {
+        crate::anilist_sync::on_episode_watched(&app, &st, anilist_id);
+    }
     let _ = app.emit("library-changed", ());
     crate::backup::mark_dirty();
     Ok(())
@@ -1514,7 +1580,7 @@ pub async fn get_diagnostics(app: AppHandle, st: St<'_>) -> CmdResult<Diagnostic
 
     let _ = writeln!(r, "\n[Settings]");
     for (k, v) in &snap.settings {
-        let shown = if k.contains("api_key") && !v.is_empty() { "(set, hidden)" } else { v.as_str() };
+        let shown = if (k.contains("api_key") || k.contains("token")) && !v.is_empty() { "(set, hidden)" } else { v.as_str() };
         let _ = writeln!(r, "{} = {}", k.trim_start_matches("pref."), shown);
     }
 
@@ -1532,3 +1598,322 @@ pub async fn get_diagnostics(app: AppHandle, st: St<'_>) -> CmdResult<Diagnostic
 }
 
 
+
+// ---------------------------------------------------------------------------
+// AniList Two-Way Sync & Seasonal Airing Calendar
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn get_anilist_account(st: St<'_>) -> CmdResult<crate::anilist_sync::AnilistAccount> {
+    Ok(crate::anilist_sync::get_account(&st.db()))
+}
+
+#[tauri::command]
+pub async fn anilist_update_entry(
+    app: AppHandle,
+    st: St<'_>,
+    anilist_id: i64,
+    status: Option<String>,
+    progress: Option<i64>,
+    score: Option<f64>,
+) -> CmdResult<crate::anilist_sync::AnilistRemoteEntry> {
+    crate::anilist_sync::update_entry(&app, st.inner(), anilist_id, status, progress, score)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn anilist_start_oauth(app: AppHandle, st: St<'_>, client_id: Option<String>) -> CmdResult<String> {
+    crate::anilist_sync::start_oauth_flow(app, st.inner().clone(), client_id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn anilist_login_token(app: AppHandle, st: St<'_>, token: String) -> CmdResult<crate::anilist_sync::AnilistAccount> {
+    crate::anilist_sync::connect_with_token(&app, st.inner(), &token).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn anilist_disconnect(app: AppHandle, st: St<'_>) -> CmdResult<crate::anilist_sync::AnilistAccount> {
+    let acct = {
+        let conn = st.db();
+        crate::anilist_sync::disconnect(&conn).map_err(err)?;
+        crate::anilist_sync::get_account(&conn)
+    };
+    let _ = app.emit("anilist-changed", &acct);
+    Ok(acct)
+}
+
+#[tauri::command]
+pub async fn anilist_sync_now(app: AppHandle, st: St<'_>) -> CmdResult<crate::anilist_sync::AnilistSyncReport> {
+    crate::anilist_sync::sync_now(&app, st.inner()).await.map_err(err)
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SeasonalItem {
+    pub anilist_id: i64,
+    pub link_id: i64,
+    pub title_romaji: Option<String>,
+    pub title_english: Option<String>,
+    pub title_native: Option<String>,
+    pub format: Option<String>,
+    pub status: Option<String>,
+    pub episodes: Option<i64>,
+    pub duration: Option<i64>,
+    pub season: Option<String>,
+    pub season_year: Option<i64>,
+    pub average_score: Option<i64>,
+    pub genres: Vec<String>,
+    pub studios: Vec<String>,
+    pub start_date: Option<String>,
+    pub cover_url: Option<String>,
+    pub cover_path: Option<String>,
+    pub cover_color: Option<String>,
+    pub banner_url: Option<String>,
+    pub next_airing_episode: Option<i64>,
+    pub next_airing_at: Option<i64>,
+    pub in_library: bool,
+    pub owned_count: i64,
+    pub watched_count: i64,
+    pub anilist_status: Option<String>,
+    pub anilist_progress: Option<i64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeasonalCalendar {
+    pub season: String,
+    pub year: i32,
+    pub fetched_at: i64,
+    pub items: Vec<SeasonalItem>,
+}
+
+fn current_season_and_year() -> (String, i32) {
+    use chrono::Datelike;
+    let today = chrono::Local::now().date_naive();
+    let season = match today.month() {
+        1..=3 => "WINTER",
+        4..=6 => "SPRING",
+        7..=9 => "SUMMER",
+        _ => "FALL",
+    };
+    (season.to_string(), today.year())
+}
+
+#[tauri::command]
+pub async fn get_seasonal_calendar(
+    st: St<'_>,
+    season: Option<String>,
+    year: Option<i32>,
+    refresh: Option<bool>,
+) -> CmdResult<SeasonalCalendar> {
+    let (cur_season, cur_year) = current_season_and_year();
+    let season = season
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| matches!(s.as_str(), "WINTER" | "SPRING" | "SUMMER" | "FALL"))
+        .unwrap_or_else(|| cur_season.clone());
+    let year = year.unwrap_or(cur_year);
+    let is_current_season = season == cur_season && year == cur_year;
+    let key = format!("{season}_{year}");
+    let force = refresh.unwrap_or(false);
+
+    let cached: Option<(String, i64)> = {
+        let conn = st.db();
+        let _ = conn.execute_batch(db::SCHEMA_V5);
+        conn.query_row(
+            "SELECT payload, fetched_at FROM seasonal_cache WHERE season_key = ?1",
+            [&key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(err)?
+    };
+
+    let (raw_list, fetched_at): (Vec<crate::providers::AlSeasonalMedia>, i64) = match cached {
+        Some((ref payload, ts)) if !force && (now() - ts < 3 * 3600) && payload.len() > 4 => {
+            let parsed = serde_json::from_str(payload).unwrap_or_default();
+            (parsed, ts)
+        }
+        _ => match st.providers.anilist_season(&season, year).await {
+            Ok(list) => {
+                let ts = now();
+                if let Ok(json) = serde_json::to_string(&list) {
+                    let _ = st.db().execute(
+                        "INSERT INTO seasonal_cache (season_key, payload, fetched_at) VALUES (?1, ?2, ?3)
+                         ON CONFLICT(season_key) DO UPDATE SET payload = excluded.payload, fetched_at = excluded.fetched_at",
+                        params![key, json, ts],
+                    );
+                }
+                (list, ts)
+            }
+            Err(e) => {
+                crate::klog!("[kura] seasonal calendar fetch failed for {key}: {e}");
+                if let Some((payload, ts)) = cached {
+                    (serde_json::from_str(&payload).unwrap_or_default(), ts)
+                } else {
+                    (Vec::new(), now())
+                }
+            }
+        },
+    };
+
+    let conn = st.db();
+    let franchises = franchise::load(&conn).unwrap_or_default();
+
+    // Local library counts + cover paths + airing overrides
+    let mut local_map: HashMap<i64, (i64, i64, Option<String>, Option<i64>, Option<i64>)> = HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.anilist_id,
+                        (SELECT COUNT(DISTINCT f.ep_key) FROM local_files f WHERE f.anilist_id = m.anilist_id AND f.ep_key NOT LIKE 'S%' AND f.ep_key NOT LIKE 'extra:%'),
+                        (SELECT COUNT(*) FROM watch_state w WHERE w.anilist_id = m.anilist_id AND w.ep_key NOT LIKE 'S%' AND w.ep_key NOT LIKE 'extra:%'),
+                        m.cover_path,
+                        m.next_airing_episode,
+                        m.next_airing_at
+                 FROM media m",
+            )
+            .map_err(err)?;
+        for row in stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
+                ))
+            })
+            .map_err(err)?
+            .flatten()
+        {
+            local_map.insert(row.0, (row.1, row.2, row.3, row.4, row.5));
+        }
+    }
+
+    let mut remote_map: HashMap<i64, (String, i64)> = HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT anilist_id, status, progress FROM anilist_entries")
+            .map_err(err)?;
+        for row in stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))
+            .map_err(err)?
+            .flatten()
+        {
+            remote_map.insert(row.0, (row.1, row.2));
+        }
+    }
+
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut items: Vec<SeasonalItem> = Vec::new();
+
+    for m in raw_list {
+        seen_ids.insert(m.id);
+        let loc = local_map.get(&m.id);
+        let owned_count = loc.map(|x| x.0).unwrap_or(0);
+        let watched_count = loc.map(|x| x.1).unwrap_or(0);
+        let cover_path = loc.and_then(|x| x.2.clone());
+        let in_library = owned_count > 0;
+        let link_id = franchises.get(&m.id).map(|f| f.root).unwrap_or(m.id);
+        let rem = remote_map.get(&m.id);
+        let next_ep = m.next_airing_episode.as_ref().map(|a| a.episode).or_else(|| loc.and_then(|x| x.3));
+        let next_at = m.next_airing_episode.as_ref().map(|a| a.airing_at).or_else(|| loc.and_then(|x| x.4));
+
+        items.push(SeasonalItem {
+            anilist_id: m.id,
+            link_id,
+            title_romaji: m.title.romaji,
+            title_english: m.title.english,
+            title_native: m.title.native,
+            format: m.format,
+            status: m.status,
+            episodes: m.episodes,
+            duration: m.duration,
+            season: m.season,
+            season_year: m.season_year,
+            average_score: m.average_score,
+            genres: m.genres,
+            studios: m.studios.map(|s| s.nodes.into_iter().map(|n| n.name).collect()).unwrap_or_default(),
+            start_date: m.start_date.and_then(|d| d.to_string_opt()),
+            cover_url: m.cover_image.as_ref().and_then(|c| c.extra_large.clone().or_else(|| c.large.clone())),
+            cover_path,
+            cover_color: m.cover_image.and_then(|c| c.color),
+            banner_url: m.banner_image,
+            next_airing_episode: next_ep,
+            next_airing_at: next_at,
+            in_library,
+            owned_count,
+            watched_count,
+            anilist_status: rem.map(|r| r.0.clone()),
+            anilist_progress: rem.map(|r| r.1),
+        });
+    }
+
+    // Also include local library shows for this season (or continuing airing shows in the current season)
+    // so offline users and 2-cour continuing series always appear.
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.anilist_id, m.title_romaji, m.title_english, m.title_native, m.format, m.status,
+                        m.episodes, m.duration, m.season, m.season_year, m.average_score, m.genres, m.studios,
+                        m.start_date, m.cover_url, m.cover_path, m.cover_color, m.banner_url,
+                        m.next_airing_episode, m.next_airing_at
+                 FROM media m
+                 WHERE (m.season = ?1 AND m.season_year = ?2)
+                    OR (?3 = 1 AND m.status = 'RELEASING' AND EXISTS(SELECT 1 FROM local_files f WHERE f.anilist_id = m.anilist_id))",
+            )
+            .map_err(err)?;
+        let rows = stmt
+            .query_map(params![season, year, i64::from(is_current_season)], |r| {
+                let id: i64 = r.get(0)?;
+                let loc = local_map.get(&id);
+                let owned_count = loc.map(|x| x.0).unwrap_or(0);
+                let watched_count = loc.map(|x| x.1).unwrap_or(0);
+                let rem = remote_map.get(&id);
+                let link_id = franchises.get(&id).map(|f| f.root).unwrap_or(id);
+                Ok(SeasonalItem {
+                    anilist_id: id,
+                    link_id,
+                    title_romaji: r.get(1)?,
+                    title_english: r.get(2)?,
+                    title_native: r.get(3)?,
+                    format: r.get(4)?,
+                    status: r.get(5)?,
+                    episodes: r.get(6)?,
+                    duration: r.get(7)?,
+                    season: r.get(8)?,
+                    season_year: r.get(9)?,
+                    average_score: r.get(10)?,
+                    genres: json_list(r.get(11)?),
+                    studios: json_list(r.get(12)?),
+                    start_date: r.get(13)?,
+                    cover_url: r.get(14)?,
+                    cover_path: r.get(15)?,
+                    cover_color: r.get(16)?,
+                    banner_url: r.get(17)?,
+                    next_airing_episode: r.get(18)?,
+                    next_airing_at: r.get(19)?,
+                    in_library: owned_count > 0,
+                    owned_count,
+                    watched_count,
+                    anilist_status: rem.map(|x| x.0.clone()),
+                    anilist_progress: rem.map(|x| x.1),
+                })
+            })
+            .map_err(err)?;
+        for item in rows.flatten() {
+            if seen_ids.insert(item.anilist_id) {
+                items.push(item);
+            }
+        }
+    }
+
+    Ok(SeasonalCalendar {
+        season,
+        year,
+        fetched_at,
+        items,
+    })
+}

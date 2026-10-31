@@ -522,6 +522,37 @@ async fn process_ready_batch(app: &AppHandle, st: &Arc<AppState>, paths: Vec<Pat
                                 }
                                 println!("[kura-watcher] targeted ingestion: {path_s} -> ep {ep_key} (anilist {resolved_id})");
                                 let _ = crate::service::ensure_episodes(st, resolved_id).await;
+                                if existing.is_none() && !ep_key.starts_with("extra:") {
+                                    let (notify_on, title): (bool, Option<String>) = {
+                                        let conn = st.db();
+                                        let on = crate::db::get_setting(&conn, "pref.airing_notifications")
+                                            .ok()
+                                            .flatten()
+                                            .map(|v| v != "0" && v != "false")
+                                            .unwrap_or(true);
+                                        let t = conn
+                                            .query_row(
+                                                "SELECT COALESCE(title_english, title_romaji) FROM media WHERE anilist_id = ?1",
+                                                [resolved_id],
+                                                |r| r.get(0),
+                                            )
+                                            .ok()
+                                            .flatten();
+                                        (on, t)
+                                    };
+                                    if notify_on {
+                                        let name = title.unwrap_or_else(|| group.display_name.clone());
+                                        let _ = app.emit(
+                                            "airing-notification",
+                                            serde_json::json!({
+                                                "anilistId": resolved_id,
+                                                "title": name,
+                                                "episode": ep_key,
+                                                "message": format!("New episode added: {name} · Ep {ep_key}")
+                                            }),
+                                        );
+                                    }
+                                }
                                 changed = true;
                             }
                             Ok(None) => {

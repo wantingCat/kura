@@ -160,12 +160,14 @@
   }
   .info strong {
     font-weight: 600;
+    overflow-wrap: anywhere;
   }
   .info a:hover strong {
     color: var(--coral);
   }
   .info .faint {
     font-size: 12.5px;
+    overflow-wrap: anywhere;
   }
   .samples {
     display: flex;

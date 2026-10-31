@@ -5,7 +5,7 @@
   <br>
   <strong>A local-first, manga-styled desktop anime media library.</strong>
   <br>
-  <em>Current Release: <code>v0.3.7-alpha</code> · Built with AI assistance</em>
+  <em>Current Release: <code>v0.4</code> · Built with AI assistance</em>
 </p>
 
 ---
@@ -35,7 +35,14 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 
 ## ✨ Features
 
-### New in `v0.3.7-alpha`
+### New in `v0.4`
+- **AniList Two-Way Sync & Auto-Scrobble**: Sign in via browser OAuth (`http://localhost:14876/oauth/callback`) or paste a token in **Settings → Integrations**. Imports your Watching, Planning, Completed, Paused, and Dropped lists, safely merges episode progress without regressing either side, and auto-scrobbles episodes when they reach your watched threshold — with a persistent offline queue that flushes automatically when back online.
+- **Seasonal Airing Calendar & Countdowns**: A dedicated **Calendar** view in the top bar with a Mon–Sun weekly broadcast schedule in your local timezone, live episode countdowns (*"EP 7 in 3h 15m"*), library highlighting (*In Library* vs. external seasonal anime), and season/year navigation.
+- **Airing & New-Episode Notifications**: Optional notifications when a tracked seasonal show airs or when the live folder watcher ingests a newly downloaded episode.
+- **Advanced Library Filtering & Sorting**: Filter by multiple genres, non-spoiler tags, animation studios, airing status, format, and watch status, with quick removable filter pills and multi-criteria sorting (including Watch Progress and ascending/descending order).
+- **Visual Bug Sweep & Layout Hardening**: Hardened long English, Romaji, and Japanese titles across episode badges, poster cards, Continue Watching panels, search results, toasts, and narrow (`~900px`) windows.
+
+### Highlights from `v0.3.7`
 - **No more freeze on first launch**: slow/disconnected library drives and player detection no longer block the window while Kura starts.
 - **Redesigned Settings**: category sidebar plus instant settings search (`Ctrl F`).
 - **Full Backup & Restore**: export settings, libraries, watch history, progress, track preferences and manual matches; preview a backup and pick what to restore. Automatic safety copies now cover watch history too.
@@ -43,33 +50,33 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 - **Opens maximized** instead of a small centered window.
 - **Layout fix**: the "Up next" badge no longer breaks on long episode titles.
 
-### Fixed in `v0.3.6-alpha`
+### Highlights from `v0.3.6`
 - **Skip button no longer triggers on prologues**: the Skip Opening button only appears inside the actual opening/ending; AniSkip timestamps are matched to your file's exact length (TV vs. Blu-ray cuts), and prologue/recap chapters are ignored.
 - **Redesigned skip button**: a rounded Kura-styled pill with a `TAB` key hint and coral hover state.
 - **Styled MPV messages**: the now-playing banner, subtitle delay and skip notices render properly instead of showing raw formatting codes.
 
-### Fixed in `v0.3.5-alpha`
+### Highlights from `v0.3.5`
 - **macOS & Linux builds restored**: v0.3.4 failed to compile on non-Windows platforms; downloads for all platforms are back.
 - **MPV detection after winget install**: MPV installed through Kura's built-in installer (now `C:\Program Files\MPV Player`) is detected immediately, along with players found via the Windows installed-apps list, WinGet package folders and the up-to-date registry PATH.
 
-### New in `v0.3.4-alpha`
+### Highlights from `v0.3.4`
 - **Interactive Clickable Skip Button in MPV**: Floating on-screen `[ ⏭ SKIP OPENING (Click or Tab) ]` overlay rendered directly on MPV with real-time mouse hover tracking, glowing coral aesthetics, and click-to-skip.
 - **Frame-Accurate AniSkip API Integration**: Synchronizes with the AniSkip database to identify OP and ED timestamps down to the millisecond, paired with intelligent duration verification ($85\text{s}-95\text{s}$) to avoid false-positive chapter skips on cold opens and prologues.
 - **What's New Changelog Popup**: First-launch version detection presenting an in-app changelog modal on updates, with past release history tabs and a manual "What's New" button in Settings.
 - **Settings & Library Persistence Across Upgrades**: Fixed WiX `upgradeCode` and implemented automated JSON backups (`kura_backup.json`) that preserve your settings, libraries, and theme across every update or reinstall.
 - **First-Launch MPV Assistant**: Detects player readiness on initial launch and offers automated one-click installation via Winget or Chocolatey.
 
-### Highlights from `v0.3.3-alpha`
+### Highlights from `v0.3.3`
 - **Live Folder Watcher & Background Rescan**: Automatically monitors all configured library roots in the background using native recursive filesystem events (`notify`). Features a 3-second debounce window with file write lock and size stability checks to safely ingest finished downloads without premature reading.
 - **Sub-10ms Targeted Ingestion**: Automatically matches and resolves new episodes of existing series instantly (< 10ms) without full scans or redundant API requests. Also auto-cleans deleted files and detects local artwork drops (`clearlogo.png`, `fanart.jpg`).
 - **Discord Rich Presence (RPC)**: Native Tokio async IPC client broadcasting Activity Type 3 ("Watching Kura") on your Discord profile, complete with anime title, episode number/title, live remaining time countdown bar, cover artwork, and interactive AniList/GitHub action buttons.
 
-### Highlights from `v0.3.2-alpha`
+### Highlights from `v0.3.2`
 - **Transparent ClearArt / Logos on Backdrops**: Displays high-resolution series typography wordmarks and ClearArt on the cinematic backdrop, powered by Fanart.tv and local folder artwork (`clearlogo.png` / `logo.png`).
 - **Safe Metadata & Artwork Rebuild Tool**: In Settings, easily wipe and reconstruct local artwork and metadata caches from scratch while strictly preserving 100% of your watch history, progress, track preferences, and library folders.
 - **Scanning Pipeline Overhaul & Stability**: Drastically improved scan reliability and concurrency, added strict external provider timeouts, eliminated main thread mutex contention, and streamlined franchise resolution.
 
-### Highlights from `v0.3.1-alpha`
+### Highlights from `v0.3.1`
 - **Plays in your own player**: [mpv](https://mpv.io), [VLC](https://www.videolan.org/vlc/), [MPC-HC / MPC-BE](https://github.com/clsid2/mpc-hc) and [Memento](https://github.com/ripose-jp/Memento) are detected automatically (or pick the program yourself). The system default player still works too.
 - **Progress & resume**: Kura follows playback, remembers where you stopped, and resumes from there next time. Episode lists show how far into each episode you are.
 - **Auto-marked watched**: An episode counts as watched once you pass 90% of it (adjustable in Settings), so skipping the ending still counts.
@@ -103,13 +110,14 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 - [x] **Priority Artwork Engine & ClearLogos**: Strict priority pipeline (`Local > Fanart.tv/ani.zip > AniList`) with official transparent anime title logos floating over 1080p backdrops.
 - [x] **Discord Rich Presence (RPC)**: Live watching activity on your Discord profile with anime title, episode number/title, live remaining time bar, and cover thumbnails.
 - [x] **Folder Watcher / Auto-Rescan**: Automatic background scanning triggered when new episode downloads complete in monitored directories.
+- [x] **Library Export / Backup**: Portable JSON backup for watch history, track preferences, and custom matches.
+- [x] **Advanced Filtering & Search**: Filter by genres, tags, studios, format, watch status, and airing status.
+- [x] **AniList Account Sync & Airing Calendar**: OAuth2 login, list import, safe two-way watch progress synchronization, offline scrobble queue, and weekly seasonal broadcast calendar.
+- [ ] **Jimaku Subtitle Fetcher & Smart Subtitle Matcher**: Fetch Japanese subtitles from Jimaku.cc and automatically match/rename mixed-format external subtitle files.
 - [ ] **Rich Cast & Staff Metadata**: Character voice actors (Japanese seiyuu & English cast with character portraits), director, series composition, music composers, and key studio staff on the anime detail page.
-- [ ] **AniList & MyAnimeList Account Sync**: OAuth2 login, list import, and safe two-way watch progress synchronization (ensures local and remote progress never accidentally regress).
-- [ ] **Japanese Immersion & Yomitan Subtitle HUD**: Lightweight, instant-load alternative to Memento — real-time mpv subtitle streaming + transparent overlay with hoverable Yomitan dictionary lookups (readings, pitch accent, definitions).
-- [ ] **Advanced Filtering & Search**: Filter by genres, tags, studios, release seasons, voice actors, and airing status.
-- [ ] **Library Export / Backup**: Portable JSON backup for watch history, track preferences, and custom matches.
+- [ ] **Watch-Time & Immersion Analytics**: Total watch hours, Japanese immersion tracking, and GitHub-style yearly activity heatmap.
 
-> For the detailed phase-by-phase implementation specifications and engineering checklists, see **[TODO.md](TODO.md)**.
+> For the detailed milestone roadmap and implementation checklists, see **[TODO.md](TODO.md)**.
 
 ---
 
@@ -121,10 +129,10 @@ Download pre-compiled packages from the **[GitHub Releases](https://github.com/w
 - **macOS**: `.dmg` — `aarch64` for Apple Silicon (M1 and newer), `x64` for Intel Macs
 - **Linux**: `.deb` (Ubuntu / Debian), `.rpm` (Fedora / openSUSE) or `.AppImage` (any distro)
 
-From `v0.2.0` on, Kura updates itself: when a new version is out you'll see a banner with an **Update & restart** button (you can turn the check off in Settings). On Linux, self-update works with the `.AppImage`; `.deb` / `.rpm` installs are updated by downloading the new package.
+From `v0.2` on, Kura updates itself: when a new version is out you'll see a banner with an **Update & restart** button (you can turn the check off in Settings). On Linux, self-update works with the `.AppImage`; `.deb` / `.rpm` installs are updated by downloading the new package.
 
 > [!NOTE]
-> Alpha builds are not code-signed yet. On **Windows**, SmartScreen may say "Windows protected your PC" — click **More info → Run anyway**. On **macOS**, right-click the app and choose **Open** the first time.
+> Builds are not code-signed yet. On **Windows**, SmartScreen may say "Windows protected your PC" — click **More info → Run anyway**. On **macOS**, right-click the app and choose **Open** the first time.
 
 ---
 

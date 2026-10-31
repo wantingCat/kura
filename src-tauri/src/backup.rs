@@ -101,9 +101,13 @@ fn rows<T>(conn: &Connection, sql: &str, f: impl FnMut(&rusqlite::Row<'_>) -> ru
 
 /// Read every piece of user data into a [`Backup`].
 pub fn snapshot(conn: &Connection) -> Backup {
-    let settings: HashMap<String, String> = rows(conn, "SELECT key, value FROM settings", |r| Ok((r.get(0)?, r.get(1)?)))
-        .into_iter()
-        .collect();
+    let settings: HashMap<String, String> = rows(
+        conn,
+        "SELECT key, value FROM settings WHERE key != 'anilist.token'",
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .into_iter()
+    .collect();
 
     let libs: Vec<(i64, String, String)> =
         rows(conn, "SELECT id, name, kind FROM libraries ORDER BY id", |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)));
