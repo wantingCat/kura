@@ -1,7 +1,7 @@
 //! Persisting provider data into the local cache.
 
 use crate::db::now;
-use crate::providers::{AlMedia, EpisodeMeta};
+use crate::providers::{AlCharacters, AlMedia, AlStaff, EpisodeMeta};
 use anyhow::Result;
 use rusqlite::{params, Connection};
 
@@ -93,6 +93,75 @@ pub fn upsert_media(conn: &Connection, m: &AlMedia) -> Result<()> {
                 n.episodes,
                 n.season_year,
                 n.cover_image.as_ref().and_then(|c| c.large.clone()),
+            ])?;
+        }
+    }
+    if m.characters.is_some() || m.staff.is_some() {
+        let _ = upsert_credits(
+            conn,
+            m.id,
+            m.characters.as_ref(),
+            m.staff.as_ref(),
+        );
+    }
+    Ok(())
+}
+
+pub fn upsert_credits(
+    conn: &Connection,
+    anilist_id: i64,
+    characters: Option<&AlCharacters>,
+    staff: Option<&AlStaff>,
+) -> Result<()> {
+    let _ = conn.execute_batch(crate::db::SCHEMA_V6);
+    if let Some(chars) = characters {
+        conn.execute("DELETE FROM media_characters WHERE anilist_id = ?1", [anilist_id])?;
+        let mut stmt = conn.prepare(
+            "INSERT OR REPLACE INTO media_characters
+             (anilist_id, character_id, role, name_full, name_native, image_url,
+              va_id, va_name_full, va_name_native, va_image_url, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )?;
+        for (idx, edge) in chars.edges.iter().enumerate() {
+            let Some(name_full) = edge.node.name.full.as_deref().filter(|s| !s.trim().is_empty()) else {
+                continue;
+            };
+            let va = edge.voice_actors.first();
+            stmt.execute(params![
+                anilist_id,
+                edge.node.id,
+                edge.role.as_deref().unwrap_or("SUPPORTING"),
+                name_full,
+                edge.node.name.native,
+                edge.node.image.as_ref().and_then(|i| i.large.clone()),
+                va.map(|v| v.id),
+                va.and_then(|v| v.name.full.clone()),
+                va.and_then(|v| v.name.native.clone()),
+                va.and_then(|v| v.image.as_ref().and_then(|i| i.large.clone())),
+                idx as i64,
+            ])?;
+        }
+    }
+    if let Some(stf) = staff {
+        conn.execute("DELETE FROM media_staff WHERE anilist_id = ?1", [anilist_id])?;
+        let mut stmt = conn.prepare(
+            "INSERT OR REPLACE INTO media_staff
+             (anilist_id, staff_id, role, name_full, name_native, image_url, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for (idx, edge) in stf.edges.iter().enumerate() {
+            let Some(name_full) = edge.node.name.full.as_deref().filter(|s| !s.trim().is_empty()) else {
+                continue;
+            };
+            let role = edge.role.as_deref().unwrap_or("Staff").trim();
+            stmt.execute(params![
+                anilist_id,
+                edge.node.id,
+                role,
+                name_full,
+                edge.node.name.native,
+                edge.node.image.as_ref().and_then(|i| i.large.clone()),
+                idx as i64,
             ])?;
         }
     }

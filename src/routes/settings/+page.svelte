@@ -39,6 +39,25 @@
   // Artwork & Metadata ------------------------------------------------------
   let fanartKeyInput = $state(app.fanartApiKey);
   let fanartSaved = $state(false);
+  let jimakuKeyInput = $state(app.jimakuApiKey);
+  let jimakuSaved = $state(false);
+
+  $effect(() => {
+    jimakuKeyInput = app.jimakuApiKey;
+  });
+
+  async function saveJimakuKey() {
+    await app.setJimakuApiKey(jimakuKeyInput);
+    jimakuSaved = true;
+    setTimeout(() => (jimakuSaved = false), 2000);
+  }
+
+  async function clearJimakuKey() {
+    jimakuKeyInput = "";
+    await app.setJimakuApiKey("");
+    jimakuSaved = true;
+    setTimeout(() => (jimakuSaved = false), 2000);
+  }
 
   $effect(() => {
     fanartKeyInput = app.fanartApiKey;
@@ -86,7 +105,7 @@
     { kind: "system", name: "System default", blurb: "Opens normally, no tracking" },
   ];
   let detected = $state<DetectedPlayer[]>([]);
-  let version = $state("0.4");
+  let version = $state("0.5");
   let threshold = $state(app.playback.threshold);
   $effect(() => {
     threshold = app.playback.threshold;
@@ -101,7 +120,7 @@
     try {
       version = (await getVersion()).replace(/\.0$/, "");
     } catch {
-      version = "0.4";
+      version = "0.5";
     }
   });
 
@@ -534,6 +553,8 @@
     { cat: "libraries", label: "Live folder watcher", hint: "Auto-rescan when files change", target: "pref-folder-watcher", kw: "auto rescan watch sync new episodes" },
     { cat: "appearance", label: "Theme", hint: "Comicbook (dark) or Manga (light)", target: "set-theme", kw: "comic manga dark light color colour look" },
     { cat: "appearance", label: "Multi-season shows", hint: "Group seasons into one card or keep them separate", target: "set-seasons", kw: "group grouped separate season movie ova tabs" },
+    { cat: "playback", label: "App Mode (Offline vs. Streaming)", hint: "Switch between Offline Library Mode and Hayase-style Streaming & Hybrid Mode", target: "set-app-mode", kw: "mode streaming torrent hayase offline local hybrid discover" },
+    { cat: "playback", label: "Torrent Streaming & Download Action", hint: "Stream Only (Temp Cache), Stream & Save to Library, or Download First", target: "set-torrent-action", fallback: "set-app-mode", kw: "torrent stream download hybrid nyaa animetosho cache" },
     { cat: "playback", label: "Player", hint: "mpv, VLC, MPC, Memento or system default", target: "set-player", kw: "mpv vlc mpc memento system default video install" },
     { cat: "playback", label: "Program location", hint: "Point Kura at your player's executable", target: "player-path", fallback: "set-player", kw: "path exe browse custom" },
     { cat: "playback", label: "MPC web interface port", hint: "Port MPC-HC / BE listens on", target: "mpc-port", fallback: "set-player", kw: "mpc port web interface" },
@@ -551,6 +572,8 @@
     { cat: "integrations", label: "Discord spoiler protection", hint: "Hide episode titles on Discord", target: "pref-discord-spoilers", fallback: "pref-discord-rpc", kw: "discord spoiler hide title" },
     { cat: "integrations", label: "AniList Two-Way Sync", hint: "Connect your AniList account and sync progress", target: "set-anilist", kw: "anilist sync account oauth token login list track progress" },
     { cat: "integrations", label: "Auto-scrobble to AniList", hint: "Automatically update AniList when episodes are watched", target: "pref-anilist-scrobble", fallback: "set-anilist", kw: "anilist scrobble auto watched offline queue" },
+    { cat: "integrations", label: "Jimaku Japanese Subtitles", hint: "Jimaku.cc API key for downloading Japanese subtitles", target: "set-jimaku", kw: "jimaku japanese subtitle srt ass sdh cc download immersion" },
+    { cat: "integrations", label: "Automatic Subtitle Retiming", hint: "Auto-synchronize downloaded or matched subtitles to your video", target: "pref-jimaku-retime", fallback: "set-jimaku", kw: "subtitle retime sync offset alass timing delay shift" },
     { cat: "integrations", label: "Airing notifications", hint: "Desktop & in-app alerts when tracked episodes air", target: "pref-airing-notify", kw: "airing calendar countdown notification toast new episode" },
     { cat: "integrations", label: "Discord profile buttons", hint: "AniList and GitHub buttons", target: "pref-discord-buttons", fallback: "pref-discord-rpc", kw: "discord buttons anilist github" },
     { cat: "backup", label: "Export a backup", hint: "Save settings, libraries and watch history to a file", target: "set-export", kw: "backup export save transfer move computer" },
@@ -1016,6 +1039,156 @@
 
   {#if active === "playback"}
   <section class="block" id="set-playback">
+    <h2 class="section-title">App Mode & Streaming</h2>
+    <div class="card display" id="set-app-mode" style="margin-bottom: 18px;">
+      <div class="opt-head">
+        <h3>Kura Operating Mode</h3>
+        <p class="faint">
+          Choose between classic offline folder management or Hayase-style streaming &amp; catalog discovery powered by Kura's built-in BitTorrent range server.
+        </p>
+      </div>
+      <div class="choices" role="radiogroup" aria-label="App Mode">
+        <button
+          class="choice"
+          class:on={app.appMode === "local"}
+          role="radio"
+          aria-checked={app.appMode === "local"}
+          onclick={() => app.setAppMode("local")}
+          id="pref-mode-local"
+        >
+          <span class="choice-text">
+            <strong>1 · Offline Library Mode <span class="rec">Original</span></strong>
+            <small>Manage and watch anime stored in your local folders with zero torrent traffic.</small>
+          </span>
+        </button>
+        <button
+          class="choice"
+          class:on={app.appMode === "streaming"}
+          role="radio"
+          aria-checked={app.appMode === "streaming"}
+          onclick={() => app.setAppMode("streaming")}
+          id="pref-mode-streaming"
+        >
+          <span class="choice-text">
+            <strong>2 · Streaming &amp; Hybrid Mode <span class="rec">Hayase-style</span></strong>
+            <small>Browse the full AniList catalog &amp; voice actors, combine local + stream libraries, and click any episode to stream or download into mpv / Memento with auto-retimed Japanese subtitles.</small>
+          </span>
+        </button>
+      </div>
+
+      {#if app.appMode === "streaming"}
+        <div class="opt-divider"></div>
+        <div class="opt-head" id="set-torrent-action">
+          <h3>When Playing an Unowned Episode</h3>
+          <p class="faint">Choose whether Kura streams into a temporary cache, saves while streaming, or downloads to your library first.</p>
+        </div>
+        <div class="choices presets-grid" role="radiogroup" aria-label="Torrent Action">
+          <button
+            class="choice"
+            class:on={app.torrentAction === "stream"}
+            role="radio"
+            aria-checked={app.torrentAction === "stream"}
+            onclick={() => app.setTorrentAction("stream")}
+            id="pref-torrent-stream"
+          >
+            <span class="choice-text">
+              <strong>Stream Only (Temp Cache)</strong>
+              <small>Streams sequentially into mpv / Memento and deletes the temp video when you close the player.</small>
+            </span>
+          </button>
+          <button
+            class="choice"
+            class:on={app.torrentAction === "hybrid"}
+            role="radio"
+            aria-checked={app.torrentAction === "hybrid"}
+            onclick={() => app.setTorrentAction("hybrid")}
+            id="pref-torrent-hybrid"
+          >
+            <span class="choice-text">
+              <strong>Stream &amp; Save to Library</strong>
+              <small>Starts playing right away while saving the file permanently into your local library folder.</small>
+            </span>
+          </button>
+          <button
+            class="choice"
+            class:on={app.torrentAction === "download"}
+            role="radio"
+            aria-checked={app.torrentAction === "download"}
+            onclick={() => app.setTorrentAction("download")}
+            id="pref-torrent-download"
+          >
+            <span class="choice-text">
+              <strong>Download to Library First</strong>
+              <small>Downloads the episode to your library folder in the background without launching the player immediately.</small>
+            </span>
+          </button>
+        </div>
+
+        <div class="track-fields" style="margin-top: 14px;">
+          <div class="field">
+            <label for="pref-torrent-quality">Preferred Release Resolution</label>
+            <select
+              id="pref-torrent-quality"
+              class="input select"
+              value={app.torrentQuality}
+              onchange={(e) => app.setTorrentQuality(e.currentTarget.value as "1080p" | "720p" | "2160p" | "ask")}
+            >
+              <option value="1080p">1080p (Auto-pick best release)</option>
+              <option value="720p">720p (Faster buffering)</option>
+              <option value="2160p">4K / 2160p</option>
+              <option value="ask">Always show Torrent Picker dialog</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="pref-nyaa-url">Nyaa Indexer URL (or Mirror)</label>
+            <input
+              id="pref-nyaa-url"
+              class="input"
+              value={app.nyaaUrl}
+              placeholder="https://nyaa.si"
+              onchange={(e) => app.setNyaaUrl(e.currentTarget.value)}
+            />
+            <small class="faint">
+              Default is <code>https://nyaa.si</code> (searches both English-subbed &amp; Raw anime). If your ISP blocks Nyaa, enter a mirror such as <code>https://nyaa.land</code> or <code>https://nyaa.iss.one</code>.
+            </small>
+          </div>
+        </div>
+
+        <div class="rows" style="margin-top: 10px;">
+          <div class="row">
+            <div class="row-text">
+              <strong>Auto-fetch &amp; auto-retime Japanese subtitles on stream</strong>
+              <small>When streaming an episode, automatically download matching Japanese subtitles from Jimaku.cc, synchronize their timing, and pass them to mpv / Memento.</small>
+            </div>
+            <button
+              class="switch"
+              class:on={app.torrentAutoSubs}
+              role="switch"
+              aria-checked={app.torrentAutoSubs}
+              aria-label="Auto-fetch Japanese subtitles on stream"
+              onclick={() => app.setTorrentAutoSubs(!app.torrentAutoSubs)}
+              id="pref-torrent-autosubs"
+            ><span></span></button>
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <strong>Enable seeding while streaming / downloading</strong>
+              <small>Upload verified blocks back to peers while a torrent session is active (BitTorrent tit-for-tat). Off by default for zero upload traffic.</small>
+            </div>
+            <button
+              class="switch"
+              class:on={app.torrentSeeding}
+              role="switch"
+              aria-checked={app.torrentSeeding}
+              aria-label="Enable seeding while streaming or downloading"
+              onclick={() => app.setTorrentSeeding(!app.torrentSeeding)}
+              id="pref-torrent-seeding"
+            ><span></span></button>
+          </div>
+        </div>
+      {/if}
+    </div>
     <h2 class="section-title">Playback</h2>
     <div class="card playback">
       <div class="opt-head" id="set-player">
@@ -1350,6 +1523,68 @@
             </div>
           </div>
         {/if}
+      </div>
+    </div>
+
+    <div class="anilist-section" id="set-jimaku">
+      <h2 class="section-title">Jimaku Subtitles & Auto-Retimer</h2>
+      <div class="card playback">
+        <div class="opt-head">
+          <h3>Jimaku.cc Personal API Key</h3>
+          <p class="faint">
+            Fetch Japanese subtitles (<code>.srt</code>, <code>.ass</code>, and season <code>.zip</code> packs) directly from Jimaku for any anime using its AniList ID, and hot-load them straight into mpv.
+          </p>
+        </div>
+
+        <div class="field">
+          <div class="fanart-key-row">
+            <input
+              id="pref-jimaku-key"
+              type="password"
+              class="input fanart-key-input"
+              placeholder="Enter Jimaku.cc API key…"
+              bind:value={jimakuKeyInput}
+              onblur={saveJimakuKey}
+            />
+            <button class="btn btn-sm" onclick={saveJimakuKey} id="save-jimaku-key">
+              {jimakuSaved ? "Saved" : "Save key"}
+            </button>
+            {#if app.jimakuApiKey}
+              <button class="btn btn-ghost btn-sm" onclick={clearJimakuKey} id="clear-jimaku-key">
+                Clear
+              </button>
+            {/if}
+          </div>
+          <div class="fanart-help">
+            <small class="faint">
+              Generate a free API key from your
+              <a
+                href="https://jimaku.cc/account"
+                target="_blank"
+                rel="noreferrer"
+                onclick={(e) => { e.preventDefault(); openUrl("https://jimaku.cc/account"); }}
+              >jimaku.cc account page</a>.
+            </small>
+          </div>
+        </div>
+
+        <div class="rows">
+          <div class="row">
+            <div class="row-text">
+              <strong>Automatic Subtitle Retiming (Alass-style DP Sync)</strong>
+              <small>Automatically synchronize downloaded or matched external subtitles against your video's embedded dialogue cues (handling TV broadcast vs. Blu-ray OP shifts and commercial break splits) while preserving <code>.ass</code> styles.</small>
+            </div>
+            <button
+              class="switch"
+              class:on={app.jimakuAutoRetime}
+              role="switch"
+              aria-checked={app.jimakuAutoRetime}
+              aria-label="Automatic Subtitle Retiming"
+              onclick={() => app.setJimakuAutoRetime(!app.jimakuAutoRetime)}
+              id="pref-jimaku-retime"
+            ><span></span></button>
+          </div>
+        </div>
       </div>
     </div>
 

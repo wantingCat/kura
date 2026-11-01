@@ -6,6 +6,7 @@ import {
   type PlaybackEvent,
   type PlayerKind,
   type ScanProgress,
+  type TorrentSessionStatus,
   type UnmatchedGroup,
 } from "./api";
 import { updater } from "./updater.svelte";
@@ -76,6 +77,18 @@ class AppStore {
   anilist = $state<AnilistAccount | null>(null);
   folderWatcher = $state(true);
   fanartApiKey = $state("");
+  jimakuApiKey = $state("");
+  jimakuAutoRetime = $state(true);
+  /** "local" = Offline Library Mode, "streaming" = Hayase-style Streaming + Hybrid Mode. */
+  appMode = $state<"local" | "streaming">("local");
+  /** "stream" = Stream Only (Temp Cache), "hybrid" = Stream & Save to Library, "download" = Download to Library First. */
+  torrentAction = $state<"stream" | "hybrid" | "download">("stream");
+  /** Preferred resolution for auto-pick ("1080p", "720p", "2160p", or "ask"). */
+  torrentQuality = $state<"1080p" | "720p" | "2160p" | "ask">("1080p");
+  torrentAutoSubs = $state(true);
+  torrentSeeding = $state(false);
+  nyaaUrl = $state("https://nyaa.si");
+  torrentSessions = $state<TorrentSessionStatus[]>([]);
   discord = $state<DiscordPrefs>({
     enabled: true,
     spoilers: false,
@@ -116,6 +129,24 @@ class AppStore {
     });
     await events.onScanError((msg) => (this.lastError = msg));
     await events.onAiringNotification((n) => this.toast(n.message, "info", 8000));
+    await events.onTorrentProgress((s) => {
+      if (s.state === "cancelled") {
+        this.torrentSessions = this.torrentSessions.filter((x) => x.sessionId !== s.sessionId);
+        return;
+      }
+      const idx = this.torrentSessions.findIndex((x) => x.sessionId === s.sessionId);
+      if (idx >= 0) {
+        this.torrentSessions[idx] = s;
+      } else {
+        this.torrentSessions = [s, ...this.torrentSessions];
+      }
+      if (s.state === "error" && s.error) {
+        this.toast(`Torrent error: ${s.error}`, "error", 7000);
+      } else if (s.state === "completed" && s.mode !== "stream") {
+        this.scheduleRefresh();
+      }
+    });
+    api.listTorrentSessions().then((list) => (this.torrentSessions = list)).catch(() => {});
     await events.onAnilistChanged((acct) => {
       const wasConnected = !!this.anilist?.connected;
       this.anilist = acct;
@@ -133,6 +164,14 @@ class AppStore {
           if (this.#launchTimer) clearTimeout(this.#launchTimer);
         }
       } else if (p.state === "stopped") {
+        for (const s of this.torrentSessions) {
+          if (s.anilistId === p.anilistId && s.epKey === p.epKey && (s.mode === "stream" || s.mode === "hybrid")) {
+            api.cancelTorrentSession(s.sessionId).catch(() => {});
+          }
+        }
+        this.torrentSessions = this.torrentSessions.filter(
+          (s) => !(s.anilistId === p.anilistId && s.epKey === p.epKey && (s.mode === "stream" || s.mode === "hybrid")),
+        );
         this.nowPlaying = null;
         if (this.launching?.anilistId === p.anilistId && this.launching?.epKey === p.epKey) {
           this.launching = null;
@@ -162,6 +201,20 @@ class AppStore {
       this.folderWatcher = prefs.folder_watcher !== "0";
       this.airingNotifications = prefs.airing_notifications !== "0";
       this.fanartApiKey = prefs.fanart_api_key ?? "";
+      this.jimakuApiKey = prefs.jimaku_api_key ?? "";
+      this.jimakuAutoRetime = prefs.jimaku_auto_retime !== "0";
+      this.appMode = prefs.app_mode === "streaming" ? "streaming" : "local";
+      this.torrentAction =
+        prefs.torrent_action === "hybrid" || prefs.torrent_action === "download"
+          ? prefs.torrent_action
+          : "stream";
+      this.torrentQuality =
+        prefs.torrent_quality === "720p" || prefs.torrent_quality === "2160p" || prefs.torrent_quality === "ask"
+          ? prefs.torrent_quality
+          : "1080p";
+      this.torrentAutoSubs = prefs.torrent_auto_subs !== "0";
+      this.torrentSeeding = prefs.torrent_seeding === "1";
+      this.nyaaUrl = prefs.nyaa_url || "https://nyaa.si";
       const num = (v: string | undefined, d: number) => (v !== undefined && !isNaN(Number(v)) ? Number(v) : d);
       this.playback = {
         player: (prefs.player as PlayerKind) ?? "",
@@ -262,6 +315,48 @@ class AppStore {
   async setFanartApiKey(key: string) {
     this.fanartApiKey = key.trim();
     await api.setPref("fanart_api_key", this.fanartApiKey);
+  }
+
+  async setJimakuApiKey(key: string) {
+    this.jimakuApiKey = key.trim();
+    await api.setPref("jimaku_api_key", this.jimakuApiKey);
+  }
+
+  async setJimakuAutoRetime(on: boolean) {
+    this.jimakuAutoRetime = on;
+    await api.setPref("jimaku_auto_retime", on ? "1" : "0");
+  }
+
+  async setAppMode(mode: "local" | "streaming") {
+    this.appMode = mode;
+    await api.setPref("app_mode", mode);
+    await this.refresh();
+  }
+
+  async setTorrentAction(action: "stream" | "hybrid" | "download") {
+    this.torrentAction = action;
+    await api.setPref("torrent_action", action);
+  }
+
+  async setTorrentQuality(quality: "1080p" | "720p" | "2160p" | "ask") {
+    this.torrentQuality = quality;
+    await api.setPref("torrent_quality", quality);
+  }
+
+  async setTorrentAutoSubs(on: boolean) {
+    this.torrentAutoSubs = on;
+    await api.setPref("torrent_auto_subs", on ? "1" : "0");
+  }
+
+  async setTorrentSeeding(on: boolean) {
+    this.torrentSeeding = on;
+    await api.setPref("torrent_seeding", on ? "1" : "0");
+  }
+
+  async setNyaaUrl(url: string) {
+    const clean = url.trim().replace(/\/+$/, "") || "https://nyaa.si";
+    this.nyaaUrl = clean;
+    await api.setPref("nyaa_url", clean);
   }
 
   async setPlayback<K extends keyof PlaybackPrefs>(key: K, value: PlaybackPrefs[K]) {

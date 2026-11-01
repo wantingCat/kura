@@ -16,10 +16,39 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.5",
+    title: "2-Mode Streaming & Hybrid Architecture, Jimaku Subtitles & Auto-Retiming",
+    date: "November 2026",
+    badge: "Latest",
+    summary:
+      "A massive leap forward for Kura: switch between classic Offline Library Mode and Hayase-style Streaming & Hybrid Mode with built-in Nyaa BitTorrent sequential streaming into mpv & Memento, browse the full AniList catalog and Voice Actors (Seiyuu) with infinite scroll, plus the complete Japanese Immersion Suite — Jimaku.cc subtitle fetching, Smart Subtitle Matcher, and automatic Alass-style subtitle retiming.",
+    items: [
+      {
+        type: "new",
+        text: "2-Mode Operating Architecture: choose between Mode 1 (Offline Library Mode) and Mode 2 (Streaming & Hybrid Mode) in Settings → Playback, with configurable torrent actions (Stream Only in Temp Cache, Stream & Save to Library, or Download to Library First) and optional peer seeding.",
+      },
+      {
+        type: "new",
+        text: "Built-in Nyaa BitTorrent Sequential Streaming: stream any episode directly into mpv or Memento over a local HTTP 206 Range server with smart piece prioritization (MKV header + Cues seek index first), custom Nyaa mirror support, and immediate peer cleanup on playback stop.",
+      },
+      {
+        type: "new",
+        text: "Full Catalog & Voice Actor (Seiyuu) Discovery (/discover): browse the entire AniList catalog with infinite scroll, multi-filters (Genre, Format, Status, Season, Year, Sort), and search any Voice Actor or Staff member to explore all anime they worked on.",
+      },
+      {
+        type: "new",
+        text: "Jimaku.cc Japanese Subtitle Fetcher & Automatic Subtitle Retiming: fetch Japanese subtitles (.srt/.ass/.zip packs) directly from Jimaku.cc and automatically synchronize subtitle timing against your video's reference subtitle cues or MKV tracks — hot-loading straight into mpv or Memento.",
+      },
+      {
+        type: "new",
+        text: "Smart Subtitle Matcher & Characters / Voice Cast: link or rename mixed-format external subtitle files (including absolute episode numbering like S02E25 → S02E01) with a live preview, and browse full Character, Japanese Seiyuu, and Staff credits on every anime page.",
+      },
+    ],
+  },
+  {
     version: "0.4",
     title: "AniList Two-Way Sync, Airing Calendar & Advanced Filters",
     date: "October 2026",
-    badge: "Latest",
     summary:
       "A major milestone release: connect your AniList account with safe two-way sync and offline auto-scrobbling, browse the weekly Seasonal Airing Calendar with live episode countdowns, filter and sort your library by genres, tags, studios, and progress, plus a comprehensive visual layout hardening pass.",
     items: [

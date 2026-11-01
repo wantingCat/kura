@@ -12,6 +12,8 @@ pub mod providers;
 pub mod scan;
 pub mod service;
 pub mod store;
+pub mod subtitles;
+pub mod torrent;
 pub mod watcher;
 
 use std::sync::Arc;
@@ -125,6 +127,20 @@ pub fn run() {
             commands::anilist_disconnect,
             commands::anilist_sync_now,
             commands::get_seasonal_calendar,
+            commands::get_person_works,
+            commands::preview_subtitle_matches,
+            commands::apply_subtitle_matches,
+            commands::retime_episode_subtitle,
+            commands::remove_linked_subtitle,
+            commands::jimaku_search,
+            commands::jimaku_download,
+            commands::toggle_stream_library,
+            commands::browse_catalog,
+            commands::search_people,
+            commands::search_episode_torrents,
+            commands::start_torrent_session,
+            commands::list_torrent_sessions,
+            commands::cancel_torrent_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

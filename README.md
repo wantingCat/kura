@@ -5,7 +5,7 @@
   <br>
   <strong>A local-first, manga-styled desktop anime media library.</strong>
   <br>
-  <em>Current Release: <code>v0.4</code> · Built with AI assistance</em>
+  <em>Current Release: <code>v0.5</code> · Built with AI assistance</em>
 </p>
 
 ---
@@ -35,7 +35,14 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 
 ## ✨ Features
 
-### New in `v0.4`
+### New in `v0.5`
+- **2-Mode Operating Architecture (`Offline Library Mode` vs. `Streaming & Hybrid Mode`)**: Switch anytime in **Settings → Playback** between classic offline folder management (**Mode 1**) and Hayase-style catalog discovery + torrent streaming (**Mode 2**), combining your local files, bookmarked stream shows, and AniList entries into a single unified library.
+- **Built-in Nyaa BitTorrent Sequential Streaming**: Click any episode to stream directly into **mpv** or **Memento** over Kura's built-in pure-Rust BitTorrent engine and local HTTP `206 Partial Content` range server. Prioritizes Matroska EBML headers and `Cues` seek indices first, supports custom Nyaa mirror URLs, lets you choose between **Stream Only (Temp Cache)**, **Stream & Save to Library**, or **Download to Library First**, and includes an optional **Seed while streaming/downloading** toggle (off by default).
+- **Full AniList Catalog & Voice Actor (Seiyuu) Discovery (`/discover`)**: Browse the entire AniList catalog with infinite scroll, multi-filters (**Genre, Format, Status, Season, Year, Sort**), and a dedicated **Voice Actors & Staff** search tab to explore every anime a seiyuu or staff member has worked on.
+- **Jimaku.cc Japanese Subtitle Fetcher & Automatic Subtitle Retiming**: Download Japanese `.srt`/`.ass` subtitles (including automatic `.zip` season pack extraction) directly from Jimaku.cc and automatically synchronize their timing against your video's reference subtitle cues or `.mkv` tracks using Kura's Alass-style dynamic programming alignment engine — hot-loading straight into running `mpv` or `Memento` windows.
+- **Smart Subtitle Matcher & Characters / Voice Cast**: Automatically match, link (`--sub-file`), or rename mixed-format external subtitle files (including absolute episode numbering like `S02E25` → `S02E01`) with a live preview dialog, plus view full Character, Japanese Seiyuu, and Staff credits on every anime page.
+
+### Highlights from `v0.4`
 - **AniList Two-Way Sync & Auto-Scrobble**: Sign in via browser OAuth (`http://localhost:14876/oauth/callback`) or paste a token in **Settings → Integrations**. Imports your Watching, Planning, Completed, Paused, and Dropped lists, safely merges episode progress without regressing either side, and auto-scrobbles episodes when they reach your watched threshold — with a persistent offline queue that flushes automatically when back online.
 - **Seasonal Airing Calendar & Countdowns**: A dedicated **Calendar** view in the top bar with a Mon–Sun weekly broadcast schedule in your local timezone, live episode countdowns (*"EP 7 in 3h 15m"*), library highlighting (*In Library* vs. external seasonal anime), and season/year navigation.
 - **Airing & New-Episode Notifications**: Optional notifications when a tracked seasonal show airs or when the live folder watcher ingests a newly downloaded episode.
@@ -113,8 +120,9 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 - [x] **Library Export / Backup**: Portable JSON backup for watch history, track preferences, and custom matches.
 - [x] **Advanced Filtering & Search**: Filter by genres, tags, studios, format, watch status, and airing status.
 - [x] **AniList Account Sync & Airing Calendar**: OAuth2 login, list import, safe two-way watch progress synchronization, offline scrobble queue, and weekly seasonal broadcast calendar.
-- [ ] **Jimaku Subtitle Fetcher & Smart Subtitle Matcher**: Fetch Japanese subtitles from Jimaku.cc and automatically match/rename mixed-format external subtitle files.
-- [ ] **Rich Cast & Staff Metadata**: Character voice actors (Japanese seiyuu & English cast with character portraits), director, series composition, music composers, and key studio staff on the anime detail page.
+- [x] **Jimaku Subtitle Fetcher, Automatic Retiming & Smart Subtitle Matcher**: Fetch Japanese subtitles from Jimaku.cc, automatically synchronize subtitle timing, and match/rename mixed-format external subtitle files.
+- [x] **Rich Cast & Staff Metadata + Voice Actor Discovery**: Character voice actors (Japanese seiyuu with character portraits), directors, composers, and key studio staff on anime detail pages and in `/discover`.
+- [x] **2-Mode Architecture (Offline Library + Hayase-style Torrent Streaming)**: Built-in Nyaa BitTorrent sequential streaming into `mpv` & `Memento` with unified local + stream library and infinite-scroll catalog discovery.
 - [ ] **Watch-Time & Immersion Analytics**: Total watch hours, Japanese immersion tracking, and GitHub-style yearly activity heatmap.
 
 > For the detailed milestone roadmap and implementation checklists, see **[TODO.md](TODO.md)**.

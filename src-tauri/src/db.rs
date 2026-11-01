@@ -189,6 +189,66 @@ CREATE TABLE IF NOT EXISTS seasonal_cache (
 );
 "#;
 
+/// v0.5: linked subtitles, Jimaku API cache, and Characters / Seiyuu / Staff tables.
+pub const SCHEMA_V6: &str = r#"
+CREATE TABLE IF NOT EXISTS linked_subtitles (
+    id          INTEGER PRIMARY KEY,
+    anilist_id  INTEGER NOT NULL,
+    ep_key      TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    lang        TEXT NOT NULL DEFAULT 'ja',
+    cc          INTEGER NOT NULL DEFAULT 0,
+    source      TEXT NOT NULL DEFAULT 'matcher',
+    retimed     INTEGER NOT NULL DEFAULT 0,
+    offset_ms   INTEGER,
+    created_at  INTEGER NOT NULL,
+    UNIQUE(anilist_id, ep_key, path)
+);
+CREATE INDEX IF NOT EXISTS idx_linked_subs_media ON linked_subtitles(anilist_id, ep_key);
+
+CREATE TABLE IF NOT EXISTS jimaku_cache (
+    cache_key   TEXT PRIMARY KEY,
+    payload     TEXT NOT NULL,
+    fetched_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS media_characters (
+    anilist_id      INTEGER NOT NULL,
+    character_id    INTEGER NOT NULL,
+    role            TEXT NOT NULL,
+    name_full       TEXT NOT NULL,
+    name_native     TEXT,
+    image_url       TEXT,
+    va_id           INTEGER,
+    va_name_full    TEXT,
+    va_name_native  TEXT,
+    va_image_url    TEXT,
+    sort_order      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (anilist_id, character_id)
+);
+CREATE INDEX IF NOT EXISTS idx_chars_va ON media_characters(va_id);
+
+CREATE TABLE IF NOT EXISTS media_staff (
+    anilist_id      INTEGER NOT NULL,
+    staff_id        INTEGER NOT NULL,
+    role            TEXT NOT NULL,
+    name_full       TEXT NOT NULL,
+    name_native     TEXT,
+    image_url       TEXT,
+    sort_order      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (anilist_id, staff_id, role)
+);
+CREATE INDEX IF NOT EXISTS idx_staff_person ON media_staff(staff_id);
+"#;
+
+/// v0.5 (Streaming & Hybrid Mode): bookmarked stream shows in unified library.
+pub const SCHEMA_V7: &str = r#"
+CREATE TABLE IF NOT EXISTS stream_library (
+    anilist_id  INTEGER PRIMARY KEY,
+    added_at    INTEGER NOT NULL
+);
+"#;
+
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(
@@ -249,6 +309,14 @@ pub fn seed_default_prefs_if_missing(conn: &Connection) -> Result<()> {
         ("pref.mpc_port", "13579"),
         ("pref.anilist_auto_scrobble", "1"),
         ("pref.airing_notifications", "1"),
+        ("pref.jimaku_auto_retime", "1"),
+        ("pref.jimaku_auto_fetch", "0"),
+        ("pref.app_mode", "local"),
+        ("pref.torrent_action", "stream"),
+        ("pref.torrent_quality", "1080p"),
+        ("pref.torrent_auto_subs", "1"),
+        ("pref.torrent_seeding", "0"),
+        ("pref.nyaa_url", "https://nyaa.si"),
     ];
 
     for (k, v) in defaults {
@@ -278,6 +346,16 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch(&format!("BEGIN; {SCHEMA_V5} PRAGMA user_version = 6; COMMIT;"))?;
     } else {
         conn.execute_batch(SCHEMA_V5)?;
+    }
+    if version < 7 {
+        conn.execute_batch(&format!("BEGIN; {SCHEMA_V6} PRAGMA user_version = 7; COMMIT;"))?;
+    } else {
+        conn.execute_batch(SCHEMA_V6)?;
+    }
+    if version < 8 {
+        conn.execute_batch(&format!("BEGIN; {SCHEMA_V7} PRAGMA user_version = 8; COMMIT;"))?;
+    } else {
+        conn.execute_batch(SCHEMA_V7)?;
     }
     Ok(())
 }

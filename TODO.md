@@ -15,7 +15,7 @@ This document serves as the master planning roadmap for Kura, organizing propose
 | **v0.3.6** | **Bug Fix**: Skip button no longer triggers on prologues (length-matched AniSkip, stricter chapter detection) + redesigned skip button & styled MPV messages | ✅ Completed |
 | **v0.3.7** | **Foundations (part 1)**: Settings Overhaul (sidebar + search), Full Backup & Restore, Diagnostics & Log, CI Checks, Startup-Hang Fix, Maximized Window | ✅ Completed |
 | **v0.4** | **Foundations, Sync & Airing**: Advanced Library Filtering, Visual Bug Sweep, AniList Two-Way Sync + Seasonal Airing Calendar & Countdown | ✅ Completed |
-| **v0.5** | **Subtitles & Cast**: Jimaku.cc Japanese Subtitle Fetcher + Smart Subtitle Matcher + Characters, Seiyuu & Staff | 💡 Planned |
+| **v0.5** | **Streaming Mode, Subtitles & Cast**: 2-Mode Architecture (Offline vs. Hayase-style Nyaa Torrent Streaming) + Full Catalog & Seiyuu Discovery + Jimaku.cc Subtitle Fetcher + Auto-Retiming + Smart Subtitle Matcher | ✅ Completed |
 | **v0.6** | **Watch Analytics**: Watch-Time & Immersion Hours Tracker + Yearly Activity Heatmap | 💡 Planned |
 | **v0.7** | **Social & Music**: Syncplay Auto-Install & Launcher + AnimeThemes OP/ED Drawer + Linux/macOS Polish | 💡 Planned |
 | **v1.0** | **Polish, Built-in Player & Trust (Stable)**: Integrated `libmpv` Default Player, Performance, Windows Code Signing, Japanese UI Language | 💡 Future |
@@ -201,7 +201,7 @@ Groundwork that makes every later feature easier to ship, support and debug.
 ---
 
 ## 💬 Phase 7: Jimaku Subtitle Fetcher, Subtitle Matcher & Characters / Staff
-*Target: v0.5*
+*Target: v0.5* — **Completed**
 
 ### Feasibility notes (checked against the Jimaku API)
 - Jimaku has an official REST API: `GET /api/entries/search?anilist_id=…` → `GET /api/entries/{id}/files?episode=N`. Kura already stores AniList IDs, so matching is direct — no fuzzy title search needed.
@@ -211,27 +211,36 @@ Groundwork that makes every later feature easier to ship, support and debug.
 - Should set a descriptive `User-Agent` (`Kura/x.y`).
 
 ### Checklist
-- [ ] **Jimaku Subtitle Fetcher**
-  - [ ] "Find Japanese subtitles" button on the episode row and in the player menu.
-  - [ ] Picker listing matching files (name, size, date), best match first.
-  - [ ] Save next to the video (`<video>.ja.ass`) or into Kura's cache, then load into a running mpv via IPC `sub-add`.
-  - [ ] Optional **auto-fetch** for series marked "Japanese subs" when a new episode is detected.
-  - [ ] Timing fixes use the existing `z` / `x` delay shortcuts; audio-based auto-sync (`alass`) is a stretch goal only if users ask for it.
-- [ ] **Smart Subtitle Matcher** (Rust port of the Jellyfin Anime Subtitle Renamer v3 script)
-  - [ ] **Why**: mpv only auto-loads subtitles whose name starts with the video's name, so files like `薬屋のひとりごと.S02E25.猫猫と毛毛.WEBRip.Netflix.ja[cc].srt` are ignored.
-  - [ ] **Episode number styles** (mixed freely in one folder): `S01E01`, absolute `S02E25` (= S02E01), bare `25.srt` / `25.ja.srt`, `#08`, `E08`, `Show - 01` / `Show – 12 END`.
-  - [ ] **Uses Kura's own data**: match against each episode's known season/episode from the library (no `SxxExx` video names required), and resolve absolute numbers automatically from the stored `absolute_number` (ani.zip) instead of asking for "first absolute episode".
-  - [ ] **Language detection**: `ja` / `jpn` / `jp` / `japanese` / `日本語`, `en` / `eng`, `zh` / `chs` / `cht` / `sc` / `tc`, `ko`, `de`, `fr`, `es`; preserve `[cc]` / SDH as `.cc`; fallback language dropdown ("apply to all undetected").
-  - [ ] **Preview dialog**: every match (`source → target`), plus a skipped list with the reason (no episode number, ambiguous, absolute number before season start, target exists).
-  - [ ] **Two modes**: *Link without renaming* (default, stored in SQLite, passed to mpv as `--sub-files` at launch) or *Rename for Jellyfin/Plex* (`<video>.ja.cc.srt`). Never overwrite, never touch video files.
-  - [ ] Entry points: **"Match subtitles"** button on the series page, and used automatically to split **Jimaku season packs** into per-episode subtitles.
-  - [ ] Port fixes: dash pattern must not read `- 1080p` as episode 1080 (`(?![\dp])`); `cc` detection limited to tag positions (`[cc]`, `.cc.`, `SDH`) instead of any word "cc".
-  - [ ] Unit tests using the script's examples (Apothecary Diaries absolute `S02E25`, Azumanga Daioh `#08`, bare `25.ja.srt`, mixed folders).
-- [ ] **Characters, Seiyuu & Staff**
-  - [ ] AniList `characters(sort: [ROLE, RELEVANCE])` with Japanese voice actors, plus key `staff` (Director, Series Composition, Music, Character Design, Original Creator).
-  - [ ] Cached locally in SQLite for offline viewing.
-  - [ ] **Characters & Cast** tab on anime detail pages; staff credit badges.
-  - [ ] Click a voice actor / staff member to see other anime **in your library** they worked on.
+- [x] **Jimaku Subtitle Fetcher**
+  - [x] "Find Japanese subtitles" button on the episode row and in the player menu.
+  - [x] Picker listing matching files (name, size, date), best match first.
+  - [x] Save next to the video (`<video>.ja.ass`) or into Kura's cache, then load into a running mpv via IPC `sub-add`.
+  - [x] Optional **auto-fetch** for series marked "Japanese subs" when a new episode is detected.
+- [x] **Automatic Subtitle Retiming (Alass-style Dynamic Programming Engine)**
+  - [x] Pure-Rust subtitle synchronization engine supporting `.srt`, `.ass`/`.ssa`, and `.vtt` while preserving all `.ass` styles, fonts, and dialogue overrides.
+  - [x] **Reference Subtitle Alignment**: extract reference timing cues directly from `.mkv` Matroska EBML subtitle blocks (dependency-free, <100ms), `ffmpeg` demuxing, or sibling external subtitles, and compute piecewise offsets (handling commercial break / eyecatch splits, OP shifts, and constant/framerate drift).
+  - [x] **Auto-retime on Jimaku download & Smart Subtitle Matcher** (toggleable in Settings & picker dialogs) plus a 1-click **"Auto-Retime"** action on any linked/downloaded subtitle.
+- [x] **Smart Subtitle Matcher** (Rust port of the Jellyfin Anime Subtitle Renamer v3 script)
+  - [x] **Why**: mpv only auto-loads subtitles whose name starts with the video's name, so files like `薬屋のひとりごと.S02E25.猫猫と毛毛.WEBRip.Netflix.ja[cc].srt` are ignored.
+  - [x] **Episode number styles** (mixed freely in one folder): `S01E01`, absolute `S02E25` (= S02E01), bare `25.srt` / `25.ja.srt`, `#08`, `E08`, `Show - 01` / `Show – 12 END`.
+  - [x] **Uses Kura's own data**: match against each episode's known season/episode from the library (no `SxxExx` video names required), and resolve absolute numbers automatically from the stored `absolute_number` (ani.zip) instead of asking for "first absolute episode".
+  - [x] **Language detection**: `ja` / `jpn` / `jp` / `japanese` / `日本語`, `en` / `eng`, `zh` / `chs` / `cht` / `sc` / `tc`, `ko`, `de`, `fr`, `es`; preserve `[cc]` / SDH as `.cc`; fallback language dropdown ("apply to all undetected").
+  - [x] **Preview dialog**: every match (`source → target`), plus a skipped list with the reason (no episode number, ambiguous, absolute number before season start, target exists).
+  - [x] **Two modes**: *Link without renaming* (default, stored in SQLite, passed to mpv as `--sub-files` at launch) or *Rename for Jellyfin/Plex* (`<video>.ja.cc.srt`). Never overwrite, never touch video files.
+  - [x] Entry points: **"Match subtitles"** button on the series page, and used automatically to split **Jimaku season packs** into per-episode subtitles.
+  - [x] Port fixes: dash pattern must not read `- 1080p` as episode 1080 (`(?![\dp])`); `cc` detection limited to tag positions (`[cc]`, `.cc.`, `SDH`) instead of any word "cc".
+  - [x] Unit tests using the script's examples (Apothecary Diaries absolute `S02E25`, Azumanga Daioh `#08`, bare `25.ja.srt`, mixed folders).
+- [x] **Characters, Seiyuu & Staff**
+  - [x] AniList `characters(sort: [ROLE, RELEVANCE])` with Japanese voice actors, plus key `staff` (Director, Series Composition, Music, Character Design, Original Creator).
+  - [x] Cached locally in SQLite for offline viewing.
+  - [x] **Characters & Cast** tab on anime detail pages; staff credit badges.
+  - [x] Click a voice actor / staff member to see other anime **in your library** (and full AniList filmography) they worked on.
+- [x] **2-Mode Architecture: Offline Library Mode vs. Streaming & Hybrid Mode (`torrent.rs`, `/discover`)**
+  - [x] **Mode 1 (`local`)**: Original offline folder library management.
+  - [x] **Mode 2 (`streaming`)**: Hayase-style Streaming & Hybrid Mode with unified library (local folders + bookmarked `stream_library` shows + AniList entries).
+  - [x] **Built-in Nyaa BitTorrent Sequential Streaming Engine**: Pure-Rust BitTorrent peer wire (`BEP 3`) + UDP/HTTP trackers (`BEP 15`) + local HTTP `206 Partial Content` range server (`127.0.0.1:<port>`) streaming directly into `mpv` and `Memento`.
+  - [x] **Configurable Torrent Actions**: *Stream Only (Temp Cache)*, *Stream & Save to Library*, or *Download to Library First*, plus configurable Nyaa mirror URL, optional seeding while active (off by default), and automatic Jimaku Japanese subtitle fetching & retiming on stream.
+  - [x] **Full Catalog & Voice Actor Discovery (`/discover`)**: Browse all of AniList with infinite scroll, multi-filters, and Voice Actor / Staff search.
 
 ---
 

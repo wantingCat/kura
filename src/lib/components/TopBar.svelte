@@ -20,6 +20,9 @@
   );
   const playing = $derived(app.nowPlaying);
   const playingCard = $derived(playing ? app.cards.find((c) => c.anilistId === playing.anilistId) : null);
+  const activeTorrent = $derived(
+    app.torrentSessions.find((s) => s.state === "buffering" || s.state === "downloading" || s.state === "resolving") ?? null,
+  );
 
   let searchEl: HTMLInputElement | undefined = $state();
 
@@ -70,6 +73,44 @@
   </div>
 
   <div class="actions">
+    {#if app.appMode === "streaming"}
+      <a
+        class="discover-pill"
+        class:active={path.startsWith("/discover")}
+        href="/discover"
+        id="nav-discover"
+        title="Browse AniList catalog & voice actors"
+      >
+        <Icon name="sparkles" size={14} />
+        <span>Discover</span>
+      </a>
+    {/if}
+
+    {#if activeTorrent && !playing}
+      <div class="now" id="now-torrent" title={`${activeTorrent.title} · Ep ${activeTorrent.epKey}`}>
+        <span class="spinner spinner-xs"></span>
+        <a class="now-text" href={`/anime/${activeTorrent.anilistId}`}>
+          <span class="now-title">{activeTorrent.title}</span>
+          <span class="now-ep">Ep {activeTorrent.epKey} · {Math.round(activeTorrent.progressPct)}%</span>
+        </a>
+        <button
+          class="clear-torrent"
+          title="Stop torrent download"
+          aria-label="Stop torrent download"
+          onclick={async () => {
+            const id = activeTorrent.sessionId;
+            app.torrentSessions = app.torrentSessions.filter((s) => s.sessionId !== id);
+            try {
+              const { api } = await import("$lib/api");
+              await api.cancelTorrentSession(id);
+            } catch {}
+          }}
+        >
+          <Icon name="x" size={12} />
+        </button>
+      </div>
+    {/if}
+
     {#if playing}
       <a
         class="now"
@@ -283,6 +324,31 @@
     box-shadow: var(--sticker);
   }
 
+  .discover-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 36px;
+    padding: 0 13px;
+    border-radius: 99px;
+    border: var(--bw) solid var(--line);
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--font-display);
+    font-size: 13px;
+    font-weight: 700;
+    box-shadow: 2px 2px 0 var(--line);
+    transition: transform var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+  }
+  .discover-pill:hover {
+    transform: translate(-1px, -1px);
+    background: var(--surface-2);
+  }
+  .discover-pill.active {
+    background: var(--coral);
+    color: var(--on-coral);
+  }
+
   .review {
     display: inline-flex;
     align-items: center;
@@ -319,6 +385,22 @@
   }
   .now:hover {
     background: var(--surface-3);
+  }
+  .clear-torrent {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border: none;
+    border-radius: 50%;
+    background: var(--surface-3);
+    color: var(--text-2);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .clear-torrent:hover {
+    background: var(--coral);
+    color: var(--on-coral);
   }
   .now-text {
     display: flex;

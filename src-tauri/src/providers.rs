@@ -86,6 +86,24 @@ const MEDIA_FIELDS: &str = r#"
   }
 "#;
 
+const CREDITS_FIELDS: &str = r#"
+  characters(sort: [ROLE, RELEVANCE, ID], perPage: 18) {
+    edges {
+      role
+      node { id name { full native } image { large } }
+      voiceActors(language: JAPANESE, sort: [RELEVANCE, ID]) {
+        id name { full native } image { large }
+      }
+    }
+  }
+  staff(sort: [RELEVANCE, ID], perPage: 16) {
+    edges {
+      role
+      node { id name { full native } image { large } }
+    }
+  }
+"#;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AlTitle {
     pub romaji: Option<String>,
@@ -170,6 +188,71 @@ pub struct AlRelations {
     pub edges: Vec<AlRelEdge>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlPersonName {
+    pub full: Option<String>,
+    pub native: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlPersonImage {
+    pub large: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlVoiceActor {
+    pub id: i64,
+    pub name: AlPersonName,
+    pub image: Option<AlPersonImage>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlCharacterNode {
+    pub id: i64,
+    pub name: AlPersonName,
+    pub image: Option<AlPersonImage>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlCharacterEdge {
+    pub role: Option<String>,
+    pub node: AlCharacterNode,
+    #[serde(default)]
+    pub voice_actors: Vec<AlVoiceActor>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct AlCharacters {
+    #[serde(default)]
+    pub edges: Vec<AlCharacterEdge>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlStaffNode {
+    pub id: i64,
+    pub name: AlPersonName,
+    pub image: Option<AlPersonImage>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlStaffEdge {
+    pub role: Option<String>,
+    pub node: AlStaffNode,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct AlStaff {
+    #[serde(default)]
+    pub edges: Vec<AlStaffEdge>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlMedia {
@@ -199,6 +282,8 @@ pub struct AlMedia {
     pub studios: Option<AlStudios>,
     pub next_airing_episode: Option<AlAiring>,
     pub relations: Option<AlRelations>,
+    pub characters: Option<AlCharacters>,
+    pub staff: Option<AlStaff>,
 }
 
 impl AlMedia {
@@ -323,12 +408,171 @@ impl Providers {
     }
 
     pub async fn anilist_media(&self, id: i64) -> Result<AlMedia> {
-        let q = format!("query ($id: Int) {{ Media(id: $id, type: ANIME) {{ {MEDIA_FIELDS} }} }}");
+        let q = format!("query ($id: Int) {{ Media(id: $id, type: ANIME) {{ {MEDIA_FIELDS} {CREDITS_FIELDS} }} }}");
         let data = self.anilist_query(&q, json!({ "id": id })).await?;
         if data["Media"].is_null() {
             bail!("AniList media {id} not found");
         }
         Ok(serde_json::from_value(data["Media"].clone())?)
+    }
+
+    pub async fn anilist_credits(&self, id: i64) -> Result<(AlCharacters, AlStaff)> {
+        let q = format!("query ($id: Int) {{ Media(id: $id, type: ANIME) {{ {CREDITS_FIELDS} }} }}");
+        let data = self.anilist_query(&q, json!({ "id": id })).await?;
+        if data["Media"].is_null() {
+            bail!("AniList media {id} not found");
+        }
+        let chars: AlCharacters = serde_json::from_value(data["Media"]["characters"].clone()).unwrap_or_default();
+        let staff: AlStaff = serde_json::from_value(data["Media"]["staff"].clone()).unwrap_or_default();
+        Ok((chars, staff))
+    }
+
+    pub async fn anilist_person_detail(&self, staff_id: i64) -> Result<Value> {
+        let q = r#"
+            query ($id: Int) {
+              Staff(id: $id) {
+                id
+                name { full native }
+                image { large }
+                primaryOccupations
+                characterMedia(sort: [START_DATE_DESC], perPage: 24) {
+                  edges {
+                    characterRole
+                    characters { id name { full native } image { large } }
+                    node {
+                      id type format status episodes seasonYear
+                      title { romaji english native }
+                      coverImage { large }
+                    }
+                  }
+                }
+                staffMedia(sort: [START_DATE_DESC], type: ANIME, perPage: 24) {
+                  edges {
+                    staffRole
+                    node {
+                      id type format status episodes seasonYear
+                      title { romaji english native }
+                      coverImage { large }
+                    }
+                  }
+                }
+              }
+            }
+        "#;
+        let data = self.anilist_query(q, json!({ "id": staff_id })).await?;
+        if data["Staff"].is_null() {
+            bail!("AniList staff {staff_id} not found");
+        }
+        Ok(data["Staff"].clone())
+    }
+
+    pub async fn anilist_browse(
+        &self,
+        search: Option<&str>,
+        genre: Option<&str>,
+        format: Option<&str>,
+        status: Option<&str>,
+        season: Option<&str>,
+        year: Option<i64>,
+        sort: Option<&str>,
+        page: u32,
+        per_page: u32,
+    ) -> Result<Vec<AlSeasonalMedia>> {
+        let sort_val = match sort.unwrap_or("TRENDING_DESC") {
+            "POPULARITY_DESC" => "POPULARITY_DESC",
+            "SCORE_DESC" => "SCORE_DESC",
+            "START_DATE_DESC" => "START_DATE_DESC",
+            "FAVOURITES_DESC" => "FAVOURITES_DESC",
+            "SEARCH_MATCH" => "SEARCH_MATCH",
+            _ => "TRENDING_DESC",
+        };
+        let q = format!(
+            r#"
+            query (
+              $page: Int,
+              $perPage: Int,
+              $search: String,
+              $genre: String,
+              $format: MediaFormat,
+              $status: MediaStatus,
+              $season: MediaSeason,
+              $seasonYear: Int
+            ) {{
+              Page(page: $page, perPage: $perPage) {{
+                media(
+                  type: ANIME,
+                  isAdult: false,
+                  search: $search,
+                  genre: $genre,
+                  format: $format,
+                  status: $status,
+                  season: $season,
+                  seasonYear: $seasonYear,
+                  sort: [{sort_val}, POPULARITY_DESC]
+                ) {{
+                  id
+                  format
+                  status
+                  episodes
+                  duration
+                  season
+                  seasonYear
+                  averageScore
+                  genres
+                  title {{ romaji english native }}
+                  startDate {{ year month day }}
+                  coverImage {{ extraLarge large color }}
+                  bannerImage
+                  studios(isMain: true) {{ nodes {{ name }} }}
+                  nextAiringEpisode {{ episode airingAt }}
+                }}
+              }}
+            }}
+        "#
+        );
+
+        let mut vars = serde_json::Map::new();
+        vars.insert("page".into(), json!(page.max(1)));
+        vars.insert("perPage".into(), json!(per_page.clamp(1, 50)));
+        if let Some(s) = search.filter(|s| !s.trim().is_empty()) {
+            vars.insert("search".into(), json!(s.trim()));
+        }
+        if let Some(g) = genre.filter(|s| !s.trim().is_empty()) {
+            vars.insert("genre".into(), json!(g.trim()));
+        }
+        if let Some(f) = format.filter(|s| !s.trim().is_empty()) {
+            vars.insert("format".into(), json!(f.trim()));
+        }
+        if let Some(st) = status.filter(|s| !s.trim().is_empty()) {
+            vars.insert("status".into(), json!(st.trim()));
+        }
+        if let Some(sn) = season.filter(|s| !s.trim().is_empty()) {
+            vars.insert("season".into(), json!(sn.trim()));
+        }
+        if let Some(yr) = year.filter(|&y| y > 1940) {
+            vars.insert("seasonYear".into(), json!(yr));
+        }
+
+        let data = self.anilist_query(&q, Value::Object(vars)).await?;
+        let list = data["Page"]["media"].clone();
+        Ok(serde_json::from_value(list).unwrap_or_default())
+    }
+
+    pub async fn anilist_search_people(&self, query: &str) -> Result<Value> {
+        let q = r#"
+            query ($search: String) {
+              Page(page: 1, perPage: 18) {
+                staff(search: $search, sort: [SEARCH_MATCH, FAVOURITES_DESC]) {
+                  id
+                  name { full native }
+                  image { large }
+                  primaryOccupations
+                }
+              }
+            }
+        "#;
+        let data = self.anilist_query(q, json!({ "search": query.trim() })).await?;
+        Ok(data["Page"]["staff"].clone())
     }
 
     pub async fn anilist_viewer(&self, token: &str) -> Result<AlViewer> {

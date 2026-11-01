@@ -104,7 +104,7 @@
       {#each Array(12) as _, i (i)}<div class="skeleton poster-skel"></div>{/each}
     </div>
   </div>
-{:else if app.libraries.length === 0}
+{:else if app.libraries.length === 0 && app.appMode === "local"}
   <!-- First run -->
   <section class="onboarding">
     <div class="onboard-card">
@@ -119,6 +119,15 @@
         <img class="mascot form-cat" src="/brand/cat.png" alt="" width="130" />
         <div class="card form-card">
           <NewLibraryForm />
+        </div>
+        <div class="card stream-mode-promo" style="margin-top: 14px; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <div style="text-align: left;">
+            <strong>Want to stream or browse all of AniList (Hayase-style)?</strong>
+            <p class="faint" style="font-size: 12.5px; margin-top: 2px;">Switch to Streaming & Hybrid Mode to browse every show, filter by voice actors, and stream or download episodes in mpv/Memento.</p>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick={() => app.setAppMode("streaming")}>
+            Enable Streaming Mode
+          </button>
         </div>
       </div>
     </div>

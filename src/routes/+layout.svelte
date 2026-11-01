@@ -33,7 +33,7 @@
 </script>
 
 <div class="shell">
-  {#if app.loaded && app.libraries.length > 0}
+  {#if app.loaded && (app.libraries.length > 0 || app.appMode === "streaming")}
     <TopBar />
   {/if}
   <main bind:this={main} id="main-scroll">

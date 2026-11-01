@@ -88,6 +88,143 @@ export interface MediaTrackPref {
   subFallback: string | null;
 }
 
+export interface LinkedSubtitle {
+  id: number;
+  anilistId: number;
+  epKey: string;
+  path: string;
+  fileName: string;
+  lang: string;
+  cc: boolean;
+  source: string;
+  retimed: boolean;
+  offsetMs: number | null;
+  exists: boolean;
+}
+
+export interface CharacterCard {
+  characterId: number;
+  role: string;
+  nameFull: string;
+  nameNative: string | null;
+  imageUrl: string | null;
+  vaId: number | null;
+  vaNameFull: string | null;
+  vaNameNative: string | null;
+  vaImageUrl: string | null;
+}
+
+export interface StaffCard {
+  staffId: number;
+  role: string;
+  nameFull: string;
+  nameNative: string | null;
+  imageUrl: string | null;
+}
+
+export interface PersonWorkItem {
+  anilistId: number;
+  titleRomaji: string | null;
+  titleEnglish: string | null;
+  titleNative: string | null;
+  format: string | null;
+  seasonYear: number | null;
+  coverUrl: string | null;
+  coverPath: string | null;
+  role: string;
+  characterName: string | null;
+  characterImage: string | null;
+  inLibrary: boolean;
+  ownedCount: number;
+}
+
+export interface PersonDetail {
+  staffId: number;
+  nameFull: string;
+  nameNative: string | null;
+  imageUrl: string | null;
+  occupations: string[];
+  works: PersonWorkItem[];
+}
+
+export interface SubtitleMatchItem {
+  sourcePath: string;
+  sourceName: string;
+  epKey: string;
+  episodeNumber: number;
+  videoPath: string;
+  videoName: string;
+  targetPath: string;
+  targetName: string;
+  lang: string;
+  cc: boolean;
+  resolutionNote: string | null;
+  alreadyLinked: boolean;
+}
+
+export interface SubtitleSkipItem {
+  sourcePath: string;
+  sourceName: string;
+  reason: string;
+}
+
+export interface SubtitleMatchPreview {
+  anilistId: number;
+  scannedFolders: string[];
+  matches: SubtitleMatchItem[];
+  skipped: SubtitleSkipItem[];
+}
+
+export interface SubtitleApplyReport {
+  linked: number;
+  renamed: number;
+  retimed: number;
+  errors: string[];
+}
+
+export interface RetimeReport {
+  subtitlePath: string;
+  outputPath: string;
+  offsetMs: number;
+  segments: number;
+  matchedCues: number;
+  totalCues: number;
+  referenceSource: string;
+  loadedIntoMpv: boolean;
+}
+
+export interface JimakuEntry {
+  id: number;
+  name: string;
+  englishName: string | null;
+  japaneseName: string | null;
+  anilistId: number | null;
+}
+
+export interface JimakuFileItem {
+  name: string;
+  url: string;
+  size: number;
+  lastModified: string | null;
+  isArchive: boolean;
+  isRar: boolean;
+  detectedEpisode: number | null;
+  matchScore: number;
+}
+
+export interface JimakuSearchResponse {
+  configured: boolean;
+  entry: JimakuEntry | null;
+  files: JimakuFileItem[];
+}
+
+export interface JimakuDownloadResult {
+  savedPaths: string[];
+  linkedCount: number;
+  retimeReport: RetimeReport | null;
+  loadedIntoMpv: boolean;
+}
+
 export interface EpisodeRow {
   epKey: string;
   number: number;
@@ -107,6 +244,7 @@ export interface EpisodeRow {
   /** Saved resume point in seconds. */
   progressPos: number | null;
   progressDur: number | null;
+  subtitles?: LinkedSubtitle[];
 }
 
 export interface RelationCard {
@@ -185,6 +323,52 @@ export interface MediaDetail {
   anilistStatus?: string | null;
   anilistProgress?: number | null;
   anilistScore?: number | null;
+  characters?: CharacterCard[];
+  staff?: StaffCard[];
+  inStreamLibrary?: boolean;
+}
+
+export interface PersonSearchResult {
+  staffId: number;
+  nameFull: string;
+  nameNative: string | null;
+  imageUrl: string | null;
+  occupations: string[];
+}
+
+export interface TorrentCandidate {
+  title: string;
+  group: string | null;
+  resolution: string | null;
+  size: number;
+  seeders: number;
+  leechers: number;
+  torrentUrl: string | null;
+  magnetUri: string | null;
+  infoHash: string | null;
+  publishedAt: number | null;
+  source: string;
+  isBatch: boolean;
+  score: number;
+  refSubtitleUrl: string | null;
+}
+
+export interface TorrentSessionStatus {
+  sessionId: string;
+  anilistId: number;
+  epKey: string;
+  title: string;
+  fileName: string;
+  mode: "stream" | "hybrid" | "download" | string;
+  state: "initializing" | "buffering" | "streaming" | "downloading" | "completed" | "error" | string;
+  progressPct: number;
+  downloadedBytes: number;
+  totalBytes: number;
+  speedBps: number;
+  peers: number;
+  streamUrl: string | null;
+  savePath: string;
+  error: string | null;
 }
 
 export interface AnilistRemoteEntry {
@@ -448,6 +632,71 @@ export const api = {
       year: opts?.year ?? null,
       refresh: opts?.refresh ?? false,
     }),
+  getPersonWorks: (staffId: number) => invoke<PersonDetail>("get_person_works", { staffId }),
+  previewSubtitleMatches: (anilistId: number, defaultLang = "ja") =>
+    invoke<SubtitleMatchPreview>("preview_subtitle_matches", { anilistId, defaultLang }),
+  applySubtitleMatches: (opts: {
+    anilistId: number;
+    mode: "link" | "rename";
+    items: SubtitleMatchItem[];
+    autoRetime: boolean;
+  }) => invoke<SubtitleApplyReport>("apply_subtitle_matches", opts),
+  retimeEpisodeSubtitle: (opts: { anilistId: number; epKey: string; subtitlePath: string }) =>
+    invoke<RetimeReport>("retime_episode_subtitle", opts),
+  removeLinkedSubtitle: (id: number) => invoke<void>("remove_linked_subtitle", { id }),
+  jimakuSearch: (anilistId: number, episode?: number | null) =>
+    invoke<JimakuSearchResponse>("jimaku_search", { anilistId, episode: episode ?? null }),
+  jimakuDownload: (opts: {
+    anilistId: number;
+    epKey: string;
+    fileName: string;
+    fileUrl: string;
+    autoRetime: boolean;
+  }) => invoke<JimakuDownloadResult>("jimaku_download", opts),
+  toggleStreamLibrary: (anilistId: number) => invoke<boolean>("toggle_stream_library", { anilistId }),
+  browseCatalog: (opts?: {
+    search?: string | null;
+    genre?: string | null;
+    format?: string | null;
+    status?: string | null;
+    season?: string | null;
+    year?: number | null;
+    sort?: string | null;
+    page?: number | null;
+  }) =>
+    invoke<SeasonalItem[]>("browse_catalog", {
+      search: opts?.search ?? null,
+      genre: opts?.genre ?? null,
+      format: opts?.format ?? null,
+      status: opts?.status ?? null,
+      season: opts?.season ?? null,
+      year: opts?.year ?? null,
+      sort: opts?.sort ?? null,
+      page: opts?.page ?? 1,
+    }),
+  searchPeople: (query: string) => invoke<PersonSearchResult[]>("search_people", { query }),
+  searchEpisodeTorrents: (anilistId: number, episode: number, customQuery?: string | null) =>
+    invoke<TorrentCandidate[]>("search_episode_torrents", {
+      anilistId,
+      episode,
+      customQuery: customQuery ?? null,
+    }),
+  startTorrentSession: (opts: {
+    anilistId: number;
+    epKey: string;
+    episodeNum?: number | null;
+    candidate: TorrentCandidate;
+    modeOverride?: "stream" | "hybrid" | "download" | null;
+  }) =>
+    invoke<TorrentSessionStatus>("start_torrent_session", {
+      anilistId: opts.anilistId,
+      epKey: opts.epKey,
+      episodeNum: opts.episodeNum ?? null,
+      candidate: opts.candidate,
+      modeOverride: opts.modeOverride ?? null,
+    }),
+  listTorrentSessions: () => invoke<TorrentSessionStatus[]>("list_torrent_sessions"),
+  cancelTorrentSession: (sessionId: string) => invoke<void>("cancel_torrent_session", { sessionId }),
 };
 
 export const events = {
@@ -464,6 +713,8 @@ export const events = {
     listen<AnilistAccount>("anilist-changed", (e) => cb(e.payload)),
   onAiringNotification: (cb: (n: AiringNotification) => void): Promise<UnlistenFn> =>
     listen<AiringNotification>("airing-notification", (e) => cb(e.payload)),
+  onTorrentProgress: (cb: (s: TorrentSessionStatus) => void): Promise<UnlistenFn> =>
+    listen<TorrentSessionStatus>("torrent-progress", (e) => cb(e.payload)),
 };
 
 /** Prefer the locally cached image (works offline), fall back to the remote URL. */

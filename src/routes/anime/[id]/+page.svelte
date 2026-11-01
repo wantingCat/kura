@@ -2,7 +2,7 @@
   import { page } from "$app/state";
   import { goto } from "$app/navigation";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { api, img, type EpisodeRow, type ExtraFile, type MediaDetail } from "$lib/api";
+  import { api, img, type EpisodeRow, type ExtraFile, type LinkedSubtitle, type MediaDetail } from "$lib/api";
   import { app } from "$lib/app.svelte";
   import {
     cleanDescription,
@@ -20,17 +20,33 @@
   import Icon from "$lib/components/Icon.svelte";
   import FixMatchDialog from "$lib/components/FixMatchDialog.svelte";
   import TrackPrefsDialog from "$lib/components/TrackPrefsDialog.svelte";
+  import JimakuDialog from "$lib/components/JimakuDialog.svelte";
+  import SubtitleMatcherDialog from "$lib/components/SubtitleMatcherDialog.svelte";
+  import PersonModal from "$lib/components/PersonModal.svelte";
+  import TorrentPickerDialog from "$lib/components/TorrentPickerDialog.svelte";
 
   const id = $derived(Number(page.params.id));
   let d = $state<MediaDetail | null>(null);
+  let loading = $state(true);
   let error = $state<string | null>(null);
   let showFix = $state(false);
   let showTracks = $state(false);
+  let showMatcher = $state(false);
+  let jimakuTarget = $state<{ epKey: string | null; epNumber: number | null } | null>(null);
+  let torrentTarget = $state<{ epKey: string; epNumber: number; autoStart: boolean } | null>(null);
+  let togglingStreamLib = $state(false);
+  let selectedPerson = $state<{ id: number; name: string } | null>(null);
+  let retimingSubId = $state<number | null>(null);
+  let showAllChars = $state(false);
   let synopsisOpen = $state(false);
   let refreshing = $state(false);
   let expanded = $state<Set<string>>(new Set());
 
   async function load(target: number) {
+    if (!d || d.anilistId !== target) {
+      loading = true;
+      error = null;
+    }
     try {
       const res = await api.getMediaDetail(target);
       if (target === id) {
@@ -38,7 +54,13 @@
         error = null;
       }
     } catch (e) {
-      error = String(e);
+      if (target === id) {
+        error = String(e);
+      }
+    } finally {
+      if (target === id) {
+        loading = false;
+      }
     }
   }
 
@@ -52,6 +74,7 @@
   $effect(() => {
     void id;
     synopsisOpen = false;
+    showAllChars = false;
     expanded = new Set();
     logoFailed = false;
   });
@@ -65,7 +88,12 @@
   const nextUp = $derived(
     regular.find((e) => !e.watchedAt && e.files.length > 0 && (e.progressPos ?? 0) > 0) ??
       regular.find((e) => !e.watchedAt && e.files.length > 0) ??
-      null,
+      (app.appMode === "streaming"
+        ? (regular.find((e) => !e.watchedAt && (e.progressPos ?? 0) > 0) ??
+            regular.find((e) => !e.watchedAt && e.number > (d?.anilistProgress ?? 0)) ??
+            regular[0] ??
+            null)
+        : null),
   );
   const playingKey = $derived(
     app.nowPlaying && d && app.nowPlaying.anilistId === d.anilistId ? app.nowPlaying.epKey : null,
@@ -127,9 +155,32 @@
   }
 
   async function play(e: EpisodeRow) {
+    if (!d) return;
     const f = e.files[0];
-    if (!f || !d) return;
-    await app.play(d.anilistId, e.epKey, f.path);
+    if (f) {
+      await app.play(d.anilistId, e.epKey, f.path);
+    } else if (app.appMode === "streaming") {
+      torrentTarget = {
+        epKey: e.epKey,
+        epNumber: e.number,
+        autoStart: app.torrentQuality !== "ask",
+      };
+    }
+  }
+
+  async function toggleStreamLibrary() {
+    if (!d || togglingStreamLib) return;
+    togglingStreamLib = true;
+    try {
+      const next = await api.toggleStreamLibrary(d.anilistId);
+      d.inStreamLibrary = next;
+      await app.refresh();
+      app.toast(next ? `Added ${displayTitle(d)} to your library` : `Removed from stream library`, "info", 3500);
+    } catch (e) {
+      app.toast(String(e), "error", 5000);
+    } finally {
+      togglingStreamLib = false;
+    }
   }
 
   const progressPct = (e: EpisodeRow) =>
@@ -166,6 +217,41 @@
     await app.play(d.anilistId, `extra:${ex.id}`, ex.path);
   }
 
+  async function retimeSub(sub: LinkedSubtitle) {
+    if (!d || retimingSubId !== null) return;
+    retimingSubId = sub.id;
+    try {
+      const report = await api.retimeEpisodeSubtitle({
+        anilistId: d.anilistId,
+        epKey: sub.epKey,
+        subtitlePath: sub.path,
+      });
+      const sec = (report.offsetMs >= 0 ? "+" : "") + (report.offsetMs / 1000).toFixed(2) + "s";
+      app.toast(`Retimed subtitle (${sec} across ${report.matchedCues} cues)`, "info", 5000);
+      await load(d.anilistId);
+    } catch (e) {
+      app.toast(`Retime failed: ${e}`, "error", 6000);
+    } finally {
+      retimingSubId = null;
+    }
+  }
+
+  async function unlinkSub(subId: number) {
+    if (!d) return;
+    try {
+      await api.removeLinkedSubtitle(subId);
+      await load(d.anilistId);
+    } catch (e) {
+      app.toast(String(e), "error", 5000);
+    }
+  }
+
+  function formatOffsetMs(ms: number | null) {
+    if (ms === null || ms === undefined) return "";
+    const s = (ms / 1000).toFixed(1);
+    return ms >= 0 ? `+${s}s` : `${s}s`;
+  }
+
   function extraBadge(kind: ExtraFile["kind"]) {
     switch (kind) {
       case "opening": return "OP";
@@ -182,15 +268,36 @@
   <title>{d ? `${displayTitle(d)} · Kura` : "Kura"}</title>
 </svelte:head>
 
-{#if error && !d}
+{#if error && (!d || d.anilistId !== id)}
   <div class="page center">
     <Icon name="alert" size={32} />
     <h2>Couldn't load this entry</h2>
     <p class="muted">{error}</p>
     <a class="btn" href="/">Back to library</a>
   </div>
-{:else if !d}
-  <div class="banner skeleton"></div>
+{:else if !d || d.anilistId !== id || loading}
+  <div class="detail loading-detail">
+    <section class="banner skeleton">
+      <button class="btn btn-ghost back" onclick={() => history.back()} id="detail-back-loading">
+        <Icon name="arrow-left" size={16} /> Back
+      </button>
+      <div class="loading-banner-pill">
+        <span class="spinner"></span>
+        <span>Loading anime details…</span>
+      </div>
+    </section>
+    <div class="page body">
+      <header class="head">
+        <div class="poster skeleton-box"></div>
+        <div class="head-info skeleton-info">
+          <div class="skeleton-line w-30"></div>
+          <div class="skeleton-line w-70 h-lg"></div>
+          <div class="skeleton-line w-45"></div>
+          <div class="skeleton-line w-90 h-md"></div>
+        </div>
+      </header>
+    </div>
+  </div>
 {:else}
   {#key d.anilistId}
     <div class="detail">
@@ -283,17 +390,53 @@
                     {#if nextUp.progressPos}
                       Resume · {d.format === "MOVIE" ? "" : `Ep ${nextUp.number} · `}{clock(nextUp.progressPos)}
                     {:else}
-                      {d.format === "MOVIE" ? "Play" : `${effectiveWatched > 0 ? "Continue" : "Start"} · Ep ${nextUp.number}`}
+                      {nextUp.files.length === 0 ? "Stream" : d.format === "MOVIE" ? "Play" : `${effectiveWatched > 0 ? "Continue" : "Start"}`} · {d.format === "MOVIE" ? "Movie" : `Ep ${nextUp.number}`}
                     {/if}
                   {/if}
                 </button>
               {/if}
-              {#if owned > 0 || d.groups.length > 0}
+              {#if app.appMode === "streaming" && owned === 0}
+                <button
+                  class="btn"
+                  onclick={toggleStreamLibrary}
+                  disabled={togglingStreamLib}
+                  id="detail-toggle-stream-lib"
+                  title={d.inStreamLibrary ? "Remove from your Kura library" : "Bookmark this show in your Kura library"}
+                >
+                  <Icon name={d.inStreamLibrary ? "check" : "plus"} size={15} />
+                  {d.inStreamLibrary ? "In Library" : "Add to Library"}
+                </button>
+              {/if}
+              {#if app.appMode === "streaming" && (nextUp || regular[0])}
+                <button
+                  class="btn"
+                  onclick={() => {
+                    const target = nextUp ?? regular[0];
+                    if (target) torrentTarget = { epKey: target.epKey, epNumber: target.number, autoStart: false };
+                  }}
+                  id="detail-pick-torrent"
+                  title="Choose a torrent release to stream or download"
+                >
+                  <Icon name="download" size={15} /> Torrents
+                </button>
+              {/if}
+              {#if owned > 0 || d.groups.length > 0 || app.appMode === "streaming"}
                 <button class="btn" onclick={() => (showTracks = true)} id="detail-track-prefs" title="Audio & Subtitles">
                   <Icon name="subtitles" size={15} /> Audio & Subs
                   {#if d.trackPref}
                     <span class="custom-track-badge">Custom</span>
                   {/if}
+                </button>
+                <button class="btn" onclick={() => (showMatcher = true)} id="detail-match-subs" title="Match external subtitle files & auto-retime">
+                  <Icon name="languages" size={15} /> Match Subtitles
+                </button>
+                <button
+                  class="btn"
+                  onclick={() => (jimakuTarget = { epKey: nextUp?.epKey ?? regular[0]?.epKey ?? null, epNumber: nextUp?.number ?? regular[0]?.number ?? null })}
+                  id="detail-jimaku-subs"
+                  title="Download Japanese subtitles from Jimaku.cc"
+                >
+                  <Icon name="download" size={15} /> Jimaku Subs
                 </button>
                 <button class="btn" onclick={() => (showFix = true)} id="detail-fix-match">
                   <Icon name="link" size={15} /> Fix match
@@ -469,20 +612,25 @@
                   {@const isPlayingThis = playingKey === e.epKey}
                   <li
                     class="ep"
-                    class:missing={!has}
+                    class:missing={!has && app.appMode !== "streaming"}
                     class:watched={!!e.watchedAt}
                     class:next={isNext}
                     style:--i={Math.min(i, 30)}
                     id={`ep-${e.epKey}`}
                   >
-                    <button class="ep-thumb" onclick={() => play(e)} disabled={!has || isLaunchingThis} aria-label={`Play ${epTitle(e)}`}>
+                    <button
+                      class="ep-thumb"
+                      onclick={() => play(e)}
+                      disabled={(!has && app.appMode !== "streaming") || isLaunchingThis}
+                      aria-label={`Play ${epTitle(e)}`}
+                    >
                       {#if thumb}<img src={thumb} alt="" loading="lazy" class:fallback={!e.thumbUrl} />{/if}
                       <span class="ep-num">{e.isSpecial ? "SP" : ""}{e.number}</span>
                       {#if isLaunchingThis}
                         <span class="play-ov active"><span class="spinner spinner-sm"></span></span>
                       {:else if isPlayingThis}
                         <span class="play-ov active"><span class="eq-bars"><span class="eq-bar"></span><span class="eq-bar"></span><span class="eq-bar"></span></span></span>
-                      {:else if has}
+                      {:else if has || app.appMode === "streaming"}
                         <span class="play-ov"><Icon name="play" size={20} fill /></span>
                       {/if}
                       {#if e.watchedAt}<span class="seen"><Icon name="check" size={12} stroke={3} /></span>{/if}
@@ -527,13 +675,72 @@
                             {formatBytes(e.files[0].size)}
                             {#if e.files.length > 1}· {e.files.length} files{/if}
                           </button>
+                        {:else if app.appMode === "streaming"}
+                          <button
+                            class="file-chip"
+                            onclick={() => (torrentTarget = { epKey: e.epKey, epNumber: e.number, autoStart: false })}
+                            title="Stream or download via BitTorrent"
+                          >
+                            <Icon name="sparkles" size={12} /> Stream ready
+                          </button>
                         {:else}
                           <span class="no-file"><Icon name="file-missing" size={12} /> Not in library</span>
                         {/if}
                       </div>
+                      {#if e.subtitles && e.subtitles.length > 0}
+                        <div class="ep-subs">
+                          {#each e.subtitles as sub (sub.id)}
+                            <span class="sub-pill" title={sub.fileName}>
+                              <Icon name="subtitles" size={11} />
+                              <strong>{sub.lang.toUpperCase()}</strong>
+                              {#if sub.cc}<span class="sub-tag">CC</span>{/if}
+                              <span class="sub-ext">.{sub.fileName.split(".").pop()?.toLowerCase() ?? "srt"}</span>
+                              {#if sub.offsetMs !== null}
+                                <span class="sub-offset" title="Auto-retimed offset">{formatOffsetMs(sub.offsetMs)}</span>
+                              {/if}
+                              {#if has}
+                                <button
+                                  class="sub-act"
+                                  disabled={retimingSubId === sub.id}
+                                  onclick={() => retimeSub(sub)}
+                                  title="Auto-retime this subtitle against the episode video"
+                                >
+                                  {retimingSubId === sub.id ? "…" : "Retime"}
+                                </button>
+                              {/if}
+                              <button
+                                class="sub-act danger"
+                                onclick={() => unlinkSub(sub.id)}
+                                title="Unlink subtitle"
+                                aria-label="Unlink subtitle"
+                              >
+                                ×
+                              </button>
+                            </span>
+                          {/each}
+                        </div>
+                      {/if}
                     </div>
 
                     <div class="ep-actions">
+                      {#if app.appMode === "streaming"}
+                        <button
+                          class="btn btn-ghost btn-sm upto"
+                          onclick={() => (torrentTarget = { epKey: e.epKey, epNumber: e.number, autoStart: false })}
+                          title="Choose torrent release to stream or download"
+                        >
+                          <Icon name="download" size={13} /> Torrent
+                        </button>
+                      {/if}
+                      {#if has || app.appMode === "streaming"}
+                        <button
+                          class="btn btn-ghost btn-sm upto"
+                          onclick={() => (jimakuTarget = { epKey: e.epKey, epNumber: e.number })}
+                          title="Fetch & auto-retime Japanese subtitles from Jimaku"
+                        >
+                          <Icon name="subtitles" size={13} /> Subs
+                        </button>
+                      {/if}
                       {#if !e.isSpecial && !e.watchedAt && e.number > 1}
                         <button class="btn btn-ghost btn-sm upto" onclick={() => watchedUpTo(e)} title="Mark all episodes up to here as watched">
                           Up to here
@@ -636,6 +843,76 @@
                 </ul>
               </section>
             {/if}
+
+            {#if d.characters && d.characters.length > 0}
+              {@const shownChars = showAllChars ? d.characters : d.characters.slice(0, 8)}
+              <section class="block" id="detail-characters">
+                <h2 class="section-title">
+                  Characters & Voice Cast <span class="count">{d.characters.length}</span>
+                </h2>
+                <div class="chars-grid">
+                  {#each shownChars as ch (ch.characterId + "-" + (ch.vaId ?? 0))}
+                    <div class="char-card">
+                      <div class="char-side">
+                        <div class="char-avatar">
+                          {#if ch.imageUrl}<img src={ch.imageUrl} alt={ch.nameFull} loading="lazy" />{/if}
+                        </div>
+                        <div class="char-text">
+                          <strong title={ch.nameFull}>{ch.nameFull}</strong>
+                          {#if ch.role}<span class="char-role">{ch.role.charAt(0) + ch.role.slice(1).toLowerCase()}</span>{/if}
+                        </div>
+                      </div>
+
+                      {#if ch.vaId && ch.vaNameFull}
+                        <button
+                          class="va-side"
+                          onclick={() => (selectedPerson = { id: ch.vaId!, name: ch.vaNameFull! })}
+                          title={`View other anime with ${ch.vaNameFull}`}
+                        >
+                          <div class="va-text">
+                            <strong title={ch.vaNameFull}>{ch.vaNameFull}</strong>
+                            {#if ch.vaNameNative}<span class="char-role jp">{ch.vaNameNative}</span>{:else}<span class="char-role">Japanese VA</span>{/if}
+                          </div>
+                          <div class="char-avatar va-avatar">
+                            {#if ch.vaImageUrl}<img src={ch.vaImageUrl} alt={ch.vaNameFull} loading="lazy" />{/if}
+                          </div>
+                        </button>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+                {#if d.characters.length > 8}
+                  <button class="more" onclick={() => (showAllChars = !showAllChars)}>
+                    {showAllChars ? "Show fewer characters" : `Show all ${d.characters.length} characters`}
+                  </button>
+                {/if}
+              </section>
+            {/if}
+
+            {#if d.staff && d.staff.length > 0}
+              <section class="block" id="detail-staff">
+                <h2 class="section-title">
+                  Staff <span class="count">{d.staff.length}</span>
+                </h2>
+                <div class="staff-grid">
+                  {#each d.staff as st, idx (st.staffId + "-" + idx)}
+                    <button
+                      class="staff-card"
+                      onclick={() => (selectedPerson = { id: st.staffId, name: st.nameFull })}
+                      title={`View other anime by ${st.nameFull}`}
+                    >
+                      <div class="char-avatar">
+                        {#if st.imageUrl}<img src={st.imageUrl} alt={st.nameFull} loading="lazy" />{/if}
+                      </div>
+                      <div class="char-text">
+                        <strong title={st.nameFull}>{st.nameFull}</strong>
+                        <span class="char-role" title={st.role ?? ""}>{st.role ?? "Staff"}</span>
+                      </div>
+                    </button>
+                  {/each}
+                </div>
+              </section>
+            {/if}
           </div>
 
           <aside class="side-col">
@@ -726,6 +1003,46 @@
         }}
       />
     {/if}
+
+    {#if showMatcher}
+      <SubtitleMatcherDialog
+        anilistId={d.anilistId}
+        title={displayTitle(d)}
+        onclose={() => (showMatcher = false)}
+        onapplied={() => load(d!.anilistId)}
+      />
+    {/if}
+
+    {#if jimakuTarget}
+      <JimakuDialog
+        anilistId={d.anilistId}
+        title={displayTitle(d)}
+        epKey={jimakuTarget.epKey ?? "1"}
+        episodeNumber={jimakuTarget.epNumber}
+        hasLocalVideo={owned > 0}
+        onclose={() => (jimakuTarget = null)}
+        ondownloaded={() => load(d!.anilistId)}
+      />
+    {/if}
+
+    {#if selectedPerson !== null}
+      <PersonModal
+        staffId={selectedPerson.id}
+        initialName={selectedPerson.name}
+        onclose={() => (selectedPerson = null)}
+      />
+    {/if}
+
+    {#if torrentTarget !== null}
+      <TorrentPickerDialog
+        anilistId={d.anilistId}
+        title={displayTitle(d)}
+        epKey={torrentTarget.epKey}
+        episodeNumber={torrentTarget.epNumber}
+        autoStart={torrentTarget.autoStart}
+        onclose={() => (torrentTarget = null)}
+      />
+    {/if}
   {/key}
 {/if}
 
@@ -756,7 +1073,74 @@
     overflow: hidden;
   }
   .banner.skeleton {
-    background: var(--surface);
+    background: linear-gradient(
+      110deg,
+      var(--surface) 25%,
+      var(--surface-2) 37%,
+      var(--surface) 63%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.4s ease infinite;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .loading-banner-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 18px;
+    border-radius: 999px;
+    background: var(--bg-elev);
+    border: var(--bw) solid var(--line);
+    box-shadow: var(--sticker);
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--text);
+  }
+  .skeleton-box {
+    background: linear-gradient(
+      110deg,
+      var(--surface) 25%,
+      var(--surface-2) 37%,
+      var(--surface) 63%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.4s ease infinite;
+  }
+  .skeleton-info {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding-top: 8px;
+  }
+  .skeleton-line {
+    height: 16px;
+    border-radius: 8px;
+    background: linear-gradient(
+      110deg,
+      var(--surface) 25%,
+      var(--surface-2) 37%,
+      var(--surface) 63%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.4s ease infinite;
+    border: 1.5px solid var(--border);
+  }
+  .skeleton-line.h-lg {
+    height: 38px;
+  }
+  .skeleton-line.h-md {
+    height: 64px;
+  }
+  .skeleton-line.w-30 { width: 30%; }
+  .skeleton-line.w-45 { width: 45%; }
+  .skeleton-line.w-70 { width: 70%; }
+  .skeleton-line.w-90 { width: 90%; }
+  @keyframes shimmer {
+    0% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
   }
   .banner img {
     width: 100%;
@@ -1872,6 +2256,181 @@
   .score-picker select option {
     background: var(--surface);
     color: var(--text);
+  }
+
+  /* Linked Episode Subtitles -------------------------------------------- */
+  .ep-subs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 2px;
+  }
+  .sub-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 7px;
+    border-radius: 6px;
+    background: var(--surface-2);
+    border: 1.5px solid var(--border-strong);
+    font-size: 11px;
+    color: var(--text-2);
+  }
+  .sub-pill strong {
+    color: var(--text);
+    font-weight: 800;
+  }
+  .sub-tag {
+    padding: 0 4px;
+    border-radius: 4px;
+    background: var(--bg-elev);
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--amber);
+  }
+  .sub-ext {
+    color: var(--text-3);
+    font-family: var(--font-mono);
+  }
+  .sub-offset {
+    padding: 0 4px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--mint) 18%, transparent);
+    color: var(--mint);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 700;
+  }
+  .sub-act {
+    background: var(--bg-elev);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--text-2);
+    cursor: pointer;
+    transition: all var(--t-fast) var(--ease);
+  }
+  .sub-act:hover:not(:disabled) {
+    background: var(--coral);
+    color: var(--on-coral);
+    border-color: var(--line);
+  }
+  .sub-act.danger:hover {
+    background: var(--danger);
+    color: #fff;
+  }
+
+  /* Characters & Staff -------------------------------------------------- */
+  .chars-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+    gap: 10px;
+  }
+  .char-card {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 8px;
+    background: var(--surface);
+    border: var(--bw) solid var(--line);
+    border-radius: var(--r-md);
+    box-shadow: var(--sticker-sm);
+    overflow: hidden;
+  }
+  .char-side {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px;
+    min-width: 0;
+    flex: 1;
+  }
+  .va-side {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 8px;
+    min-width: 0;
+    flex: 1;
+    background: var(--bg-elev);
+    border: 0;
+    border-left: 1.5px solid var(--border);
+    text-align: right;
+    color: inherit;
+    cursor: pointer;
+    transition: background var(--t-fast) var(--ease);
+  }
+  .va-side:hover {
+    background: var(--surface-2);
+  }
+  .va-side:hover strong {
+    color: var(--coral);
+  }
+  .char-avatar {
+    width: 46px;
+    height: 60px;
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--surface-2);
+    border: 1.5px solid var(--line);
+    flex-shrink: 0;
+  }
+  .char-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .char-text,
+  .va-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .char-text strong,
+  .va-text strong {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .char-role {
+    font-size: 11px;
+    color: var(--text-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .staff-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 10px;
+  }
+  .staff-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px;
+    background: var(--surface);
+    border: var(--bw) solid var(--line);
+    border-radius: var(--r-md);
+    box-shadow: var(--sticker-sm);
+    text-align: left;
+    color: inherit;
+    cursor: pointer;
+    transition: transform var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+  }
+  .staff-card:hover {
+    background: var(--surface-2);
+    transform: translate(-1px, -1px);
+  }
+  .staff-card:hover strong {
+    color: var(--coral);
   }
   @media (max-width: 900px) {
     .head {

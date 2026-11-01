@@ -19,6 +19,8 @@ pub struct AppState {
     pub rescan_requested: AtomicBool,
     /// Bumped on every play; a tracker stops once its session is no longer current.
     pub play_session: AtomicU64,
+    /// Active mpv IPC socket `(anilist_id, ep_key, ipc_addr)` so newly fetched/retimed subtitles can be hot-loaded.
+    pub active_mpv_ipc: Mutex<Option<(i64, String, String)>>,
     pub discord: crate::discord::DiscordHandle,
     pub watcher: crate::watcher::WatcherHandle,
 }
@@ -32,6 +34,7 @@ impl AppState {
             scanning: AtomicBool::new(false),
             rescan_requested: AtomicBool::new(false),
             play_session: AtomicU64::new(0),
+            active_mpv_ipc: Mutex::new(None),
             discord: crate::discord::start_service(),
             watcher,
         }
@@ -71,6 +74,27 @@ pub async fn ensure_media(st: &AppState, id: i64) -> Result<()> {
         }
         Err(e) => Err(e),
     }
+}
+
+pub async fn ensure_credits(st: &AppState, id: i64) -> Result<()> {
+    let has_credits: bool = {
+        let conn = st.db();
+        let _ = conn.execute_batch(db::SCHEMA_V6);
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM media_characters WHERE anilist_id = ?1)
+             OR EXISTS(SELECT 1 FROM media_staff WHERE anilist_id = ?1)",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap_or(false)
+    };
+    if has_credits {
+        return Ok(());
+    }
+    if let Ok((chars, staff)) = st.providers.anilist_credits(id).await {
+        let _ = store::upsert_credits(&st.db(), id, Some(&chars), Some(&staff));
+    }
+    Ok(())
 }
 
 pub async fn ensure_episodes(st: &AppState, id: i64) -> Result<()> {

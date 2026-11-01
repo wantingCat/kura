@@ -1,6 +1,6 @@
 [package]
 name = "kura"
-version = "0.4.0"
+version = "0.5.0"
 description = "A local-first anime library"
 authors = ["Kura contributors"]
 license = "GPL-3.0-or-later"
@@ -34,6 +34,7 @@ strsim = "0.11"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 notify = "6"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

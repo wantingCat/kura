@@ -23,7 +23,8 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 }
 
 fn json_list(s: Option<String>) -> Vec<String> {
-    s.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    s.and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -63,11 +64,15 @@ pub async fn list_libraries(st: St<'_>) -> CmdResult<Vec<Library>> {
             )
             .map_err(err)?;
         let libs: Vec<(i64, String, String, i64, i64)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
             .map_err(err)?
             .collect::<Result<_, _>>()
             .map_err(err)?;
-        let mut fs = conn.prepare("SELECT id, library_id, path FROM library_folders ORDER BY id").map_err(err)?;
+        let mut fs = conn
+            .prepare("SELECT id, library_id, path FROM library_folders ORDER BY id")
+            .map_err(err)?;
         let folder_rows: Vec<(i64, i64, String)> = fs
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .map_err(err)?
@@ -101,9 +106,20 @@ pub async fn list_libraries(st: St<'_>) -> CmdResult<Vec<Library>> {
             .iter()
             .zip(&exists)
             .filter(|((_, lib, _), _)| *lib == id)
-            .map(|((fid, _, path), ok)| Folder { id: *fid, path: path.clone(), exists: *ok })
+            .map(|((fid, _, path), ok)| Folder {
+                id: *fid,
+                path: path.clone(),
+                exists: *ok,
+            })
             .collect();
-        out.push(Library { id, name, kind, folders, file_count, media_count });
+        out.push(Library {
+            id,
+            name,
+            kind,
+            folders,
+            file_count,
+            media_count,
+        });
     }
     Ok(out)
 }
@@ -111,12 +127,18 @@ pub async fn list_libraries(st: St<'_>) -> CmdResult<Vec<Library>> {
 #[tauri::command]
 pub async fn create_library(st: St<'_>, name: String, folders: Vec<String>) -> CmdResult<i64> {
     let conn = st.db();
-    conn.execute("INSERT INTO libraries (name, kind, created_at) VALUES (?1, 'anime', ?2)", params![name.trim(), now()])
-        .map_err(err)?;
+    conn.execute(
+        "INSERT INTO libraries (name, kind, created_at) VALUES (?1, 'anime', ?2)",
+        params![name.trim(), now()],
+    )
+    .map_err(err)?;
     let id = conn.last_insert_rowid();
     for f in folders {
-        conn.execute("INSERT OR IGNORE INTO library_folders (library_id, path) VALUES (?1, ?2)", params![id, f])
-            .map_err(err)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO library_folders (library_id, path) VALUES (?1, ?2)",
+            params![id, f],
+        )
+        .map_err(err)?;
     }
     st.watcher.reload();
     drop(conn);
@@ -126,14 +148,21 @@ pub async fn create_library(st: St<'_>, name: String, folders: Vec<String>) -> C
 
 #[tauri::command]
 pub async fn rename_library(st: St<'_>, id: i64, name: String) -> CmdResult<()> {
-    st.db().execute("UPDATE libraries SET name = ?2 WHERE id = ?1", params![id, name.trim()]).map_err(err)?;
+    st.db()
+        .execute(
+            "UPDATE libraries SET name = ?2 WHERE id = ?1",
+            params![id, name.trim()],
+        )
+        .map_err(err)?;
     crate::backup::mark_dirty();
     Ok(())
 }
 
 #[tauri::command]
 pub async fn delete_library(app: AppHandle, st: St<'_>, id: i64) -> CmdResult<()> {
-    st.db().execute("DELETE FROM libraries WHERE id = ?1", [id]).map_err(err)?;
+    st.db()
+        .execute("DELETE FROM libraries WHERE id = ?1", [id])
+        .map_err(err)?;
     st.watcher.reload();
     let _ = app.emit("library-changed", ());
     crate::backup::mark_dirty();
@@ -143,7 +172,10 @@ pub async fn delete_library(app: AppHandle, st: St<'_>, id: i64) -> CmdResult<()
 #[tauri::command]
 pub async fn add_folder(st: St<'_>, library_id: i64, path: String) -> CmdResult<()> {
     st.db()
-        .execute("INSERT OR IGNORE INTO library_folders (library_id, path) VALUES (?1, ?2)", params![library_id, path])
+        .execute(
+            "INSERT OR IGNORE INTO library_folders (library_id, path) VALUES (?1, ?2)",
+            params![library_id, path],
+        )
         .map_err(err)?;
     st.watcher.reload();
     crate::backup::mark_dirty();
@@ -154,11 +186,16 @@ pub async fn add_folder(st: St<'_>, library_id: i64, path: String) -> CmdResult<
 pub async fn remove_folder(app: AppHandle, st: St<'_>, folder_id: i64) -> CmdResult<()> {
     let conn = st.db();
     let row: Option<(i64, String)> = conn
-        .query_row("SELECT library_id, path FROM library_folders WHERE id = ?1", [folder_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_row(
+            "SELECT library_id, path FROM library_folders WHERE id = ?1",
+            [folder_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()
         .map_err(err)?;
     if let Some((lib, path)) = row {
-        conn.execute("DELETE FROM library_folders WHERE id = ?1", [folder_id]).map_err(err)?;
+        conn.execute("DELETE FROM library_folders WHERE id = ?1", [folder_id])
+            .map_err(err)?;
         conn.execute(
             "DELETE FROM local_files WHERE library_id = ?1 AND substr(path, 1, length(?2)) = ?2",
             params![lib, path],
@@ -277,7 +314,11 @@ pub async fn get_library(st: St<'_>, library_id: Option<i64>) -> CmdResult<Vec<M
                 owned_count: r.get(18)?,
                 added_at: r.get::<_, Option<i64>>(19)?.unwrap_or(0),
                 needs_review: conf < matcher::REVIEW_THRESHOLD,
-                library_ids: libs.unwrap_or_default().split(',').filter_map(|s| s.parse().ok()).collect(),
+                library_ids: libs
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter_map(|s| s.parse().ok())
+                    .collect(),
                 watched_count: r.get(22)?,
                 last_watched_at: r.get(23)?,
                 logo_url: r.get(24)?,
@@ -290,6 +331,86 @@ pub async fn get_library(st: St<'_>, library_id: Option<i64>) -> CmdResult<Vec<M
         .map_err(err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(err)?;
+    for c in &mut rows {
+        match franchises.get(&c.anilist_id) {
+            Some(p) => {
+                c.franchise_id = p.root;
+                c.franchise_index = p.index;
+                c.franchise_size = p.size;
+            }
+            None => c.franchise_id = c.anilist_id,
+        }
+    }
+    let app_mode = db::get_setting(&conn, "pref.app_mode")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "local".to_string());
+    if app_mode == "streaming" && library_id.is_none() {
+        let _ = conn.execute_batch(db::SCHEMA_V5);
+        let _ = conn.execute_batch(db::SCHEMA_V7);
+        let existing_ids: std::collections::HashSet<i64> =
+            rows.iter().map(|c| c.anilist_id).collect();
+        if let Ok(mut s_stmt) = conn.prepare(
+            "SELECT m.anilist_id, m.title_romaji, m.title_english, m.title_native, m.synonyms, m.format, m.status,
+                    m.episodes, m.season, m.season_year, m.genres, m.average_score, m.cover_url, m.cover_path,
+                    m.cover_color, m.banner_url, m.banner_path, m.description,
+                    COALESCE(sl.added_at, ae.updated_at, m.fetched_at) AS added,
+                    MAX(
+                      (SELECT COUNT(*) FROM watch_state w WHERE w.anilist_id = m.anilist_id AND w.ep_key NOT LIKE 'S%'),
+                      COALESCE(ae.progress, 0)
+                    ) AS watched,
+                    (SELECT MAX(watched_at) FROM watch_state w WHERE w.anilist_id = m.anilist_id) AS last_watched,
+                    NULLIF(m.logo_url, ''), m.logo_path, m.tags, m.studios
+             FROM media m
+             LEFT JOIN stream_library sl ON sl.anilist_id = m.anilist_id
+             LEFT JOIN anilist_entries ae ON ae.anilist_id = m.anilist_id
+             WHERE sl.anilist_id IS NOT NULL
+                OR (ae.anilist_id IS NOT NULL AND ae.status IN ('CURRENT', 'PLANNING', 'COMPLETED', 'PAUSED', 'REPEATING'))",
+        ) {
+            if let Ok(extra_iter) = s_stmt.query_map([], |r: &Row| {
+                let id: i64 = r.get(0)?;
+                Ok(MediaCard {
+                    anilist_id: id,
+                    title_romaji: r.get(1)?,
+                    title_english: r.get(2)?,
+                    title_native: r.get(3)?,
+                    synonyms: json_list(r.get(4)?),
+                    format: r.get(5)?,
+                    status: r.get(6)?,
+                    episodes: r.get(7)?,
+                    season: r.get(8)?,
+                    season_year: r.get(9)?,
+                    genres: json_list(r.get(10)?),
+                    average_score: r.get(11)?,
+                    cover_url: r.get(12)?,
+                    cover_path: r.get(13)?,
+                    cover_color: r.get(14)?,
+                    banner_url: r.get(15)?,
+                    banner_path: r.get(16)?,
+                    description: r.get(17)?,
+                    owned_count: 0,
+                    added_at: r.get::<_, Option<i64>>(18)?.unwrap_or(0),
+                    watched_count: r.get::<_, Option<i64>>(19)?.unwrap_or(0),
+                    last_watched_at: r.get(20)?,
+                    logo_url: r.get(21)?,
+                    logo_path: r.get(22)?,
+                    tags: json_list(r.get(23)?),
+                    studios: json_list(r.get(24)?),
+                    needs_review: false,
+                    library_ids: Vec::new(),
+                    franchise_id: id,
+                    franchise_index: 0,
+                    franchise_size: 1,
+                })
+            }) {
+                for card in extra_iter.flatten() {
+                    if !existing_ids.contains(&card.anilist_id) {
+                        rows.push(card);
+                    }
+                }
+            }
+        }
+    }
     for c in &mut rows {
         match franchises.get(&c.anilist_id) {
             Some(p) => {
@@ -346,12 +467,19 @@ pub async fn get_unmatched(st: St<'_>) -> CmdResult<Vec<UnmatchedGroup>> {
         .collect::<Result<_, _>>()
         .map_err(err)?;
     for g in &mut groups {
-        let mut s = conn.prepare("SELECT path FROM local_files WHERE group_id = ?1 ORDER BY path LIMIT 3").map_err(err)?;
+        let mut s = conn
+            .prepare("SELECT path FROM local_files WHERE group_id = ?1 ORDER BY path LIMIT 3")
+            .map_err(err)?;
         g.sample_files = s
             .query_map([g.id], |r| r.get::<_, String>(0))
             .map_err(err)?
             .filter_map(|r| r.ok())
-            .map(|p| std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or(p))
+            .map(|p| {
+                std::path::Path::new(&p)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or(p)
+            })
             .collect();
     }
     Ok(groups)
@@ -391,6 +519,7 @@ pub struct EpisodeRow {
     /// Saved playback position / duration in seconds (resume point).
     progress_pos: Option<f64>,
     progress_dur: Option<f64>,
+    subtitles: Vec<crate::subtitles::LinkedSubtitle>,
 }
 
 #[derive(Serialize)]
@@ -448,6 +577,30 @@ pub struct ExtraFile {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CharacterCard {
+    pub character_id: i64,
+    pub role: String,
+    pub name_full: String,
+    pub name_native: Option<String>,
+    pub image_url: Option<String>,
+    pub va_id: Option<i64>,
+    pub va_name_full: Option<String>,
+    pub va_name_native: Option<String>,
+    pub va_image_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StaffCard {
+    pub staff_id: i64,
+    pub role: String,
+    pub name_full: String,
+    pub name_native: Option<String>,
+    pub image_url: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaDetail {
     anilist_id: i64,
     id_mal: Option<i64>,
@@ -488,11 +641,22 @@ pub struct MediaDetail {
     anilist_status: Option<String>,
     anilist_progress: Option<i64>,
     anilist_score: Option<f64>,
+    characters: Vec<CharacterCard>,
+    staff: Vec<StaffCard>,
+    in_stream_library: bool,
 }
 
 fn file_ref(id: i64, path: String, size: i64) -> FileRef {
-    let file_name = std::path::Path::new(&path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| path.clone());
-    FileRef { id, path, file_name, size }
+    let file_name = std::path::Path::new(&path)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    FileRef {
+        id,
+        path,
+        file_name,
+        size,
+    }
 }
 
 #[tauri::command]
@@ -501,22 +665,37 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
         let conn = st.db();
         let _ = conn.execute_batch(db::SCHEMA_V5);
         let hm: bool = conn
-            .query_row("SELECT EXISTS(SELECT 1 FROM media WHERE anilist_id = ?1)", [anilist_id], |r| r.get(0))
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM media WHERE anilist_id = ?1)",
+                [anilist_id],
+                |r| r.get(0),
+            )
             .unwrap_or(false);
         let he: bool = conn
-            .query_row("SELECT EXISTS(SELECT 1 FROM episodes WHERE anilist_id = ?1)", [anilist_id], |r| r.get(0))
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM episodes WHERE anilist_id = ?1)",
+                [anilist_id],
+                |r| r.get(0),
+            )
             .unwrap_or(false);
         (hm, he)
     };
     if !has_media {
-        crate::service::ensure_media(&st, anilist_id).await.map_err(err)?;
+        crate::service::ensure_media(&st, anilist_id)
+            .await
+            .map_err(err)?;
     }
     if !has_episodes {
         let _ = crate::service::ensure_episodes(&st, anilist_id).await;
     }
+    let _ = crate::service::ensure_credits(&st, anilist_id).await;
     if let Some(rem) = crate::anilist_sync::get_remote_entry(&st.db(), anilist_id) {
         if rem.progress > 0 {
-            let _ = crate::anilist_sync::apply_remote_progress_to_local(&st.db(), anilist_id, rem.progress);
+            let _ = crate::anilist_sync::apply_remote_progress_to_local(
+                &st.db(),
+                anilist_id,
+                rem.progress,
+            );
         }
     }
     let conn = st.db();
@@ -569,6 +748,9 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
                     anilist_status: None,
                     anilist_progress: None,
                     anilist_score: None,
+                    characters: Vec::new(),
+                    staff: Vec::new(),
+                    in_stream_library: false,
                 })
             },
         )
@@ -594,7 +776,8 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
             .map_err(err)?;
         for row in rows.flatten() {
             let (id, path, size, key, special_hint, parsed_str) = row;
-            let is_extra = special_hint.as_deref() == Some("extra") || parsed_str.contains("\"extra\":true");
+            let is_extra =
+                special_hint.as_deref() == Some("extra") || parsed_str.contains("\"extra\":true");
             if is_extra {
                 let file_name = std::path::Path::new(&path)
                     .file_name()
@@ -619,7 +802,10 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
                 });
             } else {
                 match key {
-                    Some(k) => files_by_key.entry(k).or_default().push(file_ref(id, path, size)),
+                    Some(k) => files_by_key
+                        .entry(k)
+                        .or_default()
+                        .push(file_ref(id, path, size)),
                     None => d.other_files.push(file_ref(id, path, size)),
                 }
             }
@@ -633,23 +819,40 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
                 "bonus" => 5,
                 _ => 6,
             };
-            order(&a.kind).cmp(&order(&b.kind)).then_with(|| a.title.cmp(&b.title))
+            order(&a.kind)
+                .cmp(&order(&b.kind))
+                .then_with(|| a.title.cmp(&b.title))
         });
     }
 
     let mut watched: HashMap<String, i64> = HashMap::new();
     {
-        let mut stmt = conn.prepare("SELECT ep_key, watched_at FROM watch_state WHERE anilist_id = ?1").map_err(err)?;
-        for row in stmt.query_map([anilist_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).map_err(err)?.flatten() {
+        let mut stmt = conn
+            .prepare("SELECT ep_key, watched_at FROM watch_state WHERE anilist_id = ?1")
+            .map_err(err)?;
+        for row in stmt
+            .query_map([anilist_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(err)?
+            .flatten()
+        {
             watched.insert(row.0, row.1);
         }
     }
     let mut progress: HashMap<String, (f64, f64)> = HashMap::new();
     {
-        let mut stmt =
-            conn.prepare("SELECT ep_key, position, duration FROM watch_progress WHERE anilist_id = ?1").map_err(err)?;
+        let mut stmt = conn
+            .prepare("SELECT ep_key, position, duration FROM watch_progress WHERE anilist_id = ?1")
+            .map_err(err)?;
         for row in stmt
-            .query_map([anilist_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?, r.get::<_, f64>(2)?)))
+            .query_map([anilist_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, f64>(2)?,
+                ))
+            })
             .map_err(err)?
             .flatten()
         {
@@ -683,6 +886,7 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
                     recap: r.get::<_, i64>(12)? != 0,
                     files: Vec::new(),
                     watched_at: None,
+                    subtitles: Vec::new(),
                     progress_pos: None,
                     progress_dur: None,
                 })
@@ -694,7 +898,8 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
     }
 
     // Files mapped to keys that have no metadata row (e.g. episode 13 of a "12 episode" show).
-    let known: std::collections::HashSet<String> = d.episode_list.iter().map(|e| e.ep_key.clone()).collect();
+    let known: std::collections::HashSet<String> =
+        d.episode_list.iter().map(|e| e.ep_key.clone()).collect();
     for key in files_by_key.keys() {
         if !known.contains(key) {
             let is_special = key.starts_with('S');
@@ -715,6 +920,7 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
                 recap: false,
                 files: Vec::new(),
                 watched_at: None,
+                subtitles: Vec::new(),
                 progress_pos: None,
                 progress_dur: None,
             });
@@ -729,12 +935,18 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
         }
     }
     // Specials are only interesting if owned or described.
-    d.episode_list.retain(|e| !e.is_special || !e.files.is_empty() || e.title_en.is_some() || e.title_ja.is_some());
+    d.episode_list.retain(|e| {
+        !e.is_special || !e.files.is_empty() || e.title_en.is_some() || e.title_ja.is_some()
+    });
     if !d.episode_list.iter().any(|e| !e.is_special) {
         let fallback_count = d
             .episodes
             .or_else(|| d.next_airing_episode)
-            .unwrap_or(if d.format.as_deref() == Some("MOVIE") { 1 } else { 12 })
+            .unwrap_or(if d.format.as_deref() == Some("MOVIE") {
+                1
+            } else {
+                12
+            })
             .clamp(1, 200);
         for n in 1..=fallback_count {
             let key = n.to_string();
@@ -756,10 +968,26 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
                 watched_at: watched.get(&key).copied(),
                 progress_pos: None,
                 progress_dur: None,
+                subtitles: Vec::new(),
             });
         }
     }
-    d.episode_list.sort_by(|a, b| a.is_special.cmp(&b.is_special).then(a.number.cmp(&b.number)));
+    d.episode_list.sort_by(|a, b| {
+        a.is_special
+            .cmp(&b.is_special)
+            .then(a.number.cmp(&b.number))
+    });
+    {
+        let mut subs_by_ep: HashMap<String, Vec<crate::subtitles::LinkedSubtitle>> = HashMap::new();
+        for s in crate::subtitles::list_linked_subtitles(&conn, anilist_id).unwrap_or_default() {
+            subs_by_ep.entry(s.ep_key.clone()).or_default().push(s);
+        }
+        for e in &mut d.episode_list {
+            if let Some(subs) = subs_by_ep.remove(&e.ep_key) {
+                e.subtitles = subs;
+            }
+        }
+    }
 
     // Relations
     {
@@ -798,8 +1026,15 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
             "SUMMARY" => 6,
             _ => 9,
         };
-        let mut rels: Vec<RelationCard> = rows.flatten().filter(|r| r.relation_type != "CHARACTER").collect();
-        rels.sort_by(|a, b| order(&a.relation_type).cmp(&order(&b.relation_type)).then(a.season_year.cmp(&b.season_year)));
+        let mut rels: Vec<RelationCard> = rows
+            .flatten()
+            .filter(|r| r.relation_type != "CHARACTER")
+            .collect();
+        rels.sort_by(|a, b| {
+            order(&a.relation_type)
+                .cmp(&order(&b.relation_type))
+                .then(a.season_year.cmp(&b.season_year))
+        });
         d.relations = rels;
     }
 
@@ -830,8 +1065,11 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
     {
         let franchises = franchise::load(&conn).map_err(err)?;
         if let Some(me) = franchises.get(&anilist_id).filter(|p| p.size > 1) {
-            let mut members: Vec<(usize, i64)> =
-                franchises.iter().filter(|(_, p)| p.root == me.root).map(|(id, p)| (p.index, *id)).collect();
+            let mut members: Vec<(usize, i64)> = franchises
+                .iter()
+                .filter(|(_, p)| p.root == me.root)
+                .map(|(id, p)| (p.index, *id))
+                .collect();
             members.sort();
             let mut stmt = conn
                 .prepare(
@@ -867,10 +1105,58 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
         }
     }
     d.track_pref = db::get_media_track_pref(&conn, anilist_id).map_err(err)?;
+    let _ = conn.execute_batch(db::SCHEMA_V7);
+    d.in_stream_library = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM stream_library WHERE anilist_id = ?1)",
+            [anilist_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
     if let Some(rem) = crate::anilist_sync::get_remote_entry(&conn, anilist_id) {
         d.anilist_status = Some(rem.status);
         d.anilist_progress = Some(rem.progress);
         d.anilist_score = rem.score;
+    }
+    {
+        let _ = conn.execute_batch(db::SCHEMA_V6);
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT character_id, role, name_full, name_native, image_url,
+                    va_id, va_name_full, va_name_native, va_image_url
+             FROM media_characters WHERE anilist_id = ?1 ORDER BY sort_order, character_id",
+        ) {
+            if let Ok(rows) = stmt.query_map([anilist_id], |r| {
+                Ok(CharacterCard {
+                    character_id: r.get(0)?,
+                    role: r.get(1)?,
+                    name_full: r.get(2)?,
+                    name_native: r.get(3)?,
+                    image_url: r.get(4)?,
+                    va_id: r.get(5)?,
+                    va_name_full: r.get(6)?,
+                    va_name_native: r.get(7)?,
+                    va_image_url: r.get(8)?,
+                })
+            }) {
+                d.characters = rows.flatten().collect();
+            }
+        }
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT staff_id, role, name_full, name_native, image_url
+             FROM media_staff WHERE anilist_id = ?1 ORDER BY sort_order, staff_id",
+        ) {
+            if let Ok(rows) = stmt.query_map([anilist_id], |r| {
+                Ok(StaffCard {
+                    staff_id: r.get(0)?,
+                    role: r.get(1)?,
+                    name_full: r.get(2)?,
+                    name_native: r.get(3)?,
+                    image_url: r.get(4)?,
+                })
+            }) {
+                d.staff = rows.flatten().collect();
+            }
+        }
     }
     Ok(d)
 }
@@ -880,7 +1166,13 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn set_watched(app: AppHandle, st: St<'_>, anilist_id: i64, ep_keys: Vec<String>, watched: bool) -> CmdResult<()> {
+pub async fn set_watched(
+    app: AppHandle,
+    st: St<'_>,
+    anilist_id: i64,
+    ep_keys: Vec<String>,
+    watched: bool,
+) -> CmdResult<()> {
     let mut conn = st.db();
     let tx = conn.transaction().map_err(err)?;
     for key in ep_keys {
@@ -891,12 +1183,18 @@ pub async fn set_watched(app: AppHandle, st: St<'_>, anilist_id: i64, ep_keys: V
             )
             .map_err(err)?;
         } else {
-            tx.execute("DELETE FROM watch_state WHERE anilist_id = ?1 AND ep_key = ?2", params![anilist_id, key])
-                .map_err(err)?;
+            tx.execute(
+                "DELETE FROM watch_state WHERE anilist_id = ?1 AND ep_key = ?2",
+                params![anilist_id, key],
+            )
+            .map_err(err)?;
         }
         // Either way the saved resume point is no longer meaningful.
-        tx.execute("DELETE FROM watch_progress WHERE anilist_id = ?1 AND ep_key = ?2", params![anilist_id, key])
-            .map_err(err)?;
+        tx.execute(
+            "DELETE FROM watch_progress WHERE anilist_id = ?1 AND ep_key = ?2",
+            params![anilist_id, key],
+        )
+        .map_err(err)?;
     }
     tx.commit().map_err(err)?;
     drop(conn);
@@ -954,7 +1252,11 @@ pub async fn fix_match(
     group_id: Option<i64>,
     from_anilist_id: Option<i64>,
 ) -> CmdResult<()> {
-    let m = st.providers.anilist_media(new_anilist_id).await.map_err(err)?;
+    let m = st
+        .providers
+        .anilist_media(new_anilist_id)
+        .await
+        .map_err(err)?;
     {
         let conn = st.db();
         store::upsert_media(&conn, &m).map_err(err)?;
@@ -964,7 +1266,11 @@ pub async fn fix_match(
             let mut stmt = conn
                 .prepare("SELECT DISTINCT group_id FROM local_files WHERE anilist_id = ?1 AND group_id IS NOT NULL")
                 .map_err(err)?;
-            let rows = stmt.query_map([from], |r| r.get(0)).map_err(err)?.flatten().collect();
+            let rows = stmt
+                .query_map([from], |r| r.get(0))
+                .map_err(err)?
+                .flatten()
+                .collect();
             rows
         } else {
             return Err("nothing to fix".into());
@@ -975,7 +1281,11 @@ pub async fn fix_match(
                 params![g, new_anilist_id],
             )
             .map_err(err)?;
-            conn.execute("UPDATE local_files SET anilist_id = NULL, ep_key = NULL WHERE group_id = ?1", [g]).map_err(err)?;
+            conn.execute(
+                "UPDATE local_files SET anilist_id = NULL, ep_key = NULL WHERE group_id = ?1",
+                [g],
+            )
+            .map_err(err)?;
         }
     }
     let _ = app.emit("library-changed", ());
@@ -989,8 +1299,12 @@ pub async fn fix_match(
 pub async fn refresh_media(app: AppHandle, st: St<'_>, anilist_id: i64) -> CmdResult<()> {
     let m = st.providers.anilist_media(anilist_id).await.map_err(err)?;
     store::upsert_media(&st.db(), &m).map_err(err)?;
-    let lite = db::media_lite(&st.db(), anilist_id).map_err(err)?.ok_or("missing media")?;
-    crate::service::fetch_episodes(&st, &lite).await.map_err(err)?;
+    let lite = db::media_lite(&st.db(), anilist_id)
+        .map_err(err)?
+        .ok_or("missing media")?;
+    crate::service::fetch_episodes(&st, &lite)
+        .await
+        .map_err(err)?;
     let _ = app.emit("library-changed", ());
     scan::spawn_scan(app, st.inner().clone(), None);
     Ok(())
@@ -1003,7 +1317,9 @@ pub async fn refresh_media(app: AppHandle, st: St<'_>, anilist_id: i64) -> CmdRe
 fn known_file(st: &AppState, path: &str) -> CmdResult<()> {
     let ok: Option<i64> = st
         .db()
-        .query_row("SELECT id FROM local_files WHERE path = ?1", [path], |r| r.get(0))
+        .query_row("SELECT id FROM local_files WHERE path = ?1", [path], |r| {
+            r.get(0)
+        })
         .optional()
         .map_err(err)?;
     ok.map(|_| ()).ok_or_else(|| "unknown file".to_string())
@@ -1029,24 +1345,45 @@ pub async fn reveal_file(st: St<'_>, path: String) -> CmdResult<()> {
 // run it on a blocking thread so it can never freeze the window.
 #[tauri::command]
 pub async fn detect_players() -> Vec<player::Detected> {
-    tauri::async_runtime::spawn_blocking(player::detect_all).await.unwrap_or_default()
+    tauri::async_runtime::spawn_blocking(player::detect_all)
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
 pub async fn check_mpv_status() -> CmdResult<player::MpvStatus> {
-    tauri::async_runtime::spawn_blocking(player::check_mpv_status).await.map_err(err)
+    tauri::async_runtime::spawn_blocking(player::check_mpv_status)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
 pub async fn install_mpv(app: AppHandle, st: St<'_>) -> CmdResult<player::InstallMpvResult> {
-    player::install_mpv(app, st.inner().clone()).await.map_err(err)
+    player::install_mpv(app, st.inner().clone())
+        .await
+        .map_err(err)
 }
 
 /// Play an episode with the configured external player, tracking progress where possible.
 #[tauri::command]
-pub async fn play_episode(app: AppHandle, st: St<'_>, anilist_id: i64, ep_key: String, path: String) -> CmdResult<()> {
+pub async fn play_episode(
+    app: AppHandle,
+    st: St<'_>,
+    anilist_id: i64,
+    ep_key: String,
+    path: String,
+) -> CmdResult<()> {
     known_file(&st, &path)?;
-    player::play(app, st.inner().clone(), player::Ep { anilist_id, ep_key, path }).map_err(|e| {
+    player::play(
+        app,
+        st.inner().clone(),
+        player::Ep {
+            anilist_id,
+            ep_key,
+            path,
+        },
+    )
+    .map_err(|e| {
         crate::klog!("[kura] play failed: {e:#}");
         err(e)
     })
@@ -1157,8 +1494,11 @@ pub async fn get_up_next(st: St<'_>, limit: Option<usize>) -> CmdResult<Vec<UpNe
              ) GROUP BY anilist_id ORDER BY last DESC LIMIT 60",
         )
         .map_err(err)?;
-    let active: Vec<(i64, i64)> =
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?.flatten().collect();
+    let active: Vec<(i64, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(err)?
+        .flatten()
+        .collect();
     let franchises = franchise::load(&conn).map_err(err)?;
     let root = |id: i64| franchises.get(&id).map(|p| p.root).unwrap_or(id);
 
@@ -1178,7 +1518,13 @@ pub async fn get_up_next(st: St<'_>, limit: Option<usize>) -> CmdResult<Vec<UpNe
                  JOIN local_files f ON f.anilist_id = p.anilist_id AND f.ep_key = p.ep_key
                  WHERE p.anilist_id = ?1 ORDER BY p.updated_at DESC, f.path LIMIT 1",
                 [id],
-                |r| Ok(player::Ep { anilist_id: id, ep_key: r.get(0)?, path: r.get(1)? }),
+                |r| {
+                    Ok(player::Ep {
+                        anilist_id: id,
+                        ep_key: r.get(0)?,
+                        path: r.get(1)?,
+                    })
+                },
             )
             .optional()
             .map_err(err)?;
@@ -1195,7 +1541,11 @@ pub async fn get_up_next(st: St<'_>, limit: Option<usize>) -> CmdResult<Vec<UpNe
                     )
                     .optional()
                     .map_err(err)?;
-                let mut cur = player::Ep { anilist_id: id, ep_key: last.unwrap_or_else(|| "0".into()), path: String::new() };
+                let mut cur = player::Ep {
+                    anilist_id: id,
+                    ep_key: last.unwrap_or_else(|| "0".into()),
+                    path: String::new(),
+                };
                 let mut found = None;
                 for _ in 0..500 {
                     match player::next_episode(&conn, &cur) {
@@ -1234,7 +1584,9 @@ pub async fn get_new_episodes(st: St<'_>, limit: Option<usize>) -> CmdResult<Vec
         ))
         .map_err(err)?;
     let rows: Vec<(i64, i64, i64)> = stmt
-        .query_map(params![since, limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .query_map(params![since, limit], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
         .map_err(err)?
         .flatten()
         .collect();
@@ -1247,7 +1599,13 @@ pub async fn get_new_episodes(st: St<'_>, limit: Option<usize>) -> CmdResult<Vec
     let mut out = Vec::new();
     for (id, at, count) in rows {
         let ep: Option<player::Ep> = first
-            .query_row(params![since, id], |r| Ok(player::Ep { anilist_id: id, ep_key: r.get(0)?, path: r.get(1)? }))
+            .query_row(params![since, id], |r| {
+                Ok(player::Ep {
+                    anilist_id: id,
+                    ep_key: r.get(0)?,
+                    path: r.get(1)?,
+                })
+            })
             .optional()
             .map_err(err)?;
         if let Some(mut item) = ep.and_then(|e| up_next_item(&conn, &e, at)) {
@@ -1267,7 +1625,9 @@ pub async fn get_new_episodes(st: St<'_>, limit: Option<usize>) -> CmdResult<Vec
 pub async fn get_prefs(st: St<'_>) -> CmdResult<HashMap<String, String>> {
     let conn = st.db();
     let _ = db::seed_default_prefs_if_missing(&conn);
-    let mut stmt = conn.prepare("SELECT key, value FROM settings WHERE key LIKE 'pref.%'").map_err(err)?;
+    let mut stmt = conn
+        .prepare("SELECT key, value FROM settings WHERE key LIKE 'pref.%'")
+        .map_err(err)?;
     let mut rows: HashMap<String, String> = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
         .map_err(err)?
@@ -1314,12 +1674,20 @@ pub async fn set_pref(st: St<'_>, key: String, value: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
-pub async fn get_media_track_pref(st: St<'_>, anilist_id: i64) -> CmdResult<Option<db::MediaTrackPref>> {
+pub async fn get_media_track_pref(
+    st: St<'_>,
+    anilist_id: i64,
+) -> CmdResult<Option<db::MediaTrackPref>> {
     db::get_media_track_pref(&st.db(), anilist_id).map_err(err)
 }
 
 #[tauri::command]
-pub async fn set_media_track_pref(app: AppHandle, st: St<'_>, anilist_id: i64, pref: Option<db::MediaTrackPref>) -> CmdResult<()> {
+pub async fn set_media_track_pref(
+    app: AppHandle,
+    st: St<'_>,
+    anilist_id: i64,
+    pref: Option<db::MediaTrackPref>,
+) -> CmdResult<()> {
     db::set_media_track_pref(&st.db(), anilist_id, pref).map_err(err)?;
     let _ = app.emit("library-changed", ());
     crate::backup::mark_dirty();
@@ -1400,14 +1768,20 @@ pub async fn import_backup(
     path: String,
     options: backup::ImportOptions,
 ) -> CmdResult<backup::ImportReport> {
-    let b = tauri::async_runtime::spawn_blocking(move || backup::read_file(std::path::Path::new(&path)))
-        .await
-        .map_err(err)?
-        .map_err(|e| format!("{e:#}"))?;
+    let b = tauri::async_runtime::spawn_blocking(move || {
+        backup::read_file(std::path::Path::new(&path))
+    })
+    .await
+    .map_err(err)?
+    .map_err(|e| format!("{e:#}"))?;
     let report = backup::apply(&st.db(), &b, &options).map_err(|e| format!("{e:#}"))?;
 
     if options.settings {
-        let rpc_off = db::get_setting(&st.db(), "pref.discord_rpc").ok().flatten().as_deref() == Some("0");
+        let rpc_off = db::get_setting(&st.db(), "pref.discord_rpc")
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("0");
         if rpc_off {
             st.discord.clear();
         }
@@ -1442,7 +1816,10 @@ pub async fn backup_status(st: St<'_>) -> CmdResult<Vec<SafetyCopy>> {
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64);
-                SafetyCopy { path: p.to_string_lossy().to_string(), modified }
+                SafetyCopy {
+                    path: p.to_string_lossy().to_string(),
+                    modified,
+                }
             })
             .collect()
     })
@@ -1514,7 +1891,9 @@ pub async fn get_diagnostics(app: AppHandle, st: St<'_>) -> CmdResult<Diagnostic
             libs: list("SELECT id, name FROM libraries ORDER BY id"),
             folders: list("SELECT library_id, path FROM library_folders ORDER BY id"),
             files: count("SELECT COUNT(*) FROM local_files"),
-            matched: count("SELECT COUNT(DISTINCT anilist_id) FROM local_files WHERE anilist_id IS NOT NULL"),
+            matched: count(
+                "SELECT COUNT(DISTINCT anilist_id) FROM local_files WHERE anilist_id IS NOT NULL",
+            ),
             unmatched: count("SELECT COUNT(*) FROM match_groups WHERE anilist_id IS NULL"),
             watched: count("SELECT COUNT(*) FROM watch_state"),
             progress: count("SELECT COUNT(*) FROM watch_progress"),
@@ -1524,12 +1903,16 @@ pub async fn get_diagnostics(app: AppHandle, st: St<'_>) -> CmdResult<Diagnostic
 
     let folder_paths: Vec<String> = snap.folders.iter().map(|(_, p)| p.clone()).collect();
     let reachable = folders_reachable(&folder_paths).await;
-    let players = tauri::async_runtime::spawn_blocking(player::detect_all).await.unwrap_or_default();
+    let players = tauri::async_runtime::spawn_blocking(player::detect_all)
+        .await
+        .unwrap_or_default();
     let data_dir = st.data_dir.clone();
     let (db_size, log_tail) = {
         let dir = data_dir.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            let db = std::fs::metadata(dir.join("kura.db")).map(|m| m.len()).unwrap_or(0);
+            let db = std::fs::metadata(dir.join("kura.db"))
+                .map(|m| m.len())
+                .unwrap_or(0);
             (db, crate::logging::tail(&dir, 120))
         })
         .await
@@ -1537,15 +1920,27 @@ pub async fn get_diagnostics(app: AppHandle, st: St<'_>) -> CmdResult<Diagnostic
     };
 
     let mut r = String::new();
-    let _ = writeln!(r, "Kura diagnostics — {}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
+    let _ = writeln!(
+        r,
+        "Kura diagnostics — {}",
+        chrono::Local::now().format("%Y-%m-%d %H:%M")
+    );
     let _ = writeln!(
         r,
         "App: Kura {} ({})",
         app.package_info().version,
-        if cfg!(debug_assertions) { "debug" } else { "release" }
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
     );
     let _ = writeln!(r, "OS: {} {}", std::env::consts::OS, std::env::consts::ARCH);
-    let _ = writeln!(r, "WebView: {}", tauri::webview_version().unwrap_or_else(|_| "unknown".into()));
+    let _ = writeln!(
+        r,
+        "WebView: {}",
+        tauri::webview_version().unwrap_or_else(|_| "unknown".into())
+    );
     let _ = writeln!(r, "Data folder: {}", data_dir.display());
     let _ = writeln!(r, "Database: {:.1} MB", db_size as f64 / 1_048_576.0);
 
@@ -1568,7 +1963,11 @@ pub async fn get_diagnostics(app: AppHandle, st: St<'_>) -> CmdResult<Diagnostic
         "Files: {} · matched shows: {} · unmatched groups: {}",
         snap.files, snap.matched, snap.unmatched
     );
-    let _ = writeln!(r, "Watched episodes: {} · resume points: {}", snap.watched, snap.progress);
+    let _ = writeln!(
+        r,
+        "Watched episodes: {} · resume points: {}",
+        snap.watched, snap.progress
+    );
 
     let _ = writeln!(r, "\n[Playback]");
     if players.is_empty() {
@@ -1580,24 +1979,35 @@ pub async fn get_diagnostics(app: AppHandle, st: St<'_>) -> CmdResult<Diagnostic
 
     let _ = writeln!(r, "\n[Settings]");
     for (k, v) in &snap.settings {
-        let shown = if (k.contains("api_key") || k.contains("token")) && !v.is_empty() { "(set, hidden)" } else { v.as_str() };
+        let shown = if (k.contains("api_key") || k.contains("token")) && !v.is_empty() {
+            "(set, hidden)"
+        } else {
+            v.as_str()
+        };
         let _ = writeln!(r, "{} = {}", k.trim_start_matches("pref."), shown);
     }
 
     let _ = writeln!(r, "\n[Recent log]");
-    for l in log_tail.iter().rev().take(60).collect::<Vec<_>>().into_iter().rev() {
+    for l in log_tail
+        .iter()
+        .rev()
+        .take(60)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
         let _ = writeln!(r, "{l}");
     }
 
     Ok(Diagnostics {
         report: r,
-        log_path: crate::logging::log_path(&data_dir).to_string_lossy().to_string(),
+        log_path: crate::logging::log_path(&data_dir)
+            .to_string_lossy()
+            .to_string(),
         players,
         log_tail,
     })
 }
-
-
 
 // ---------------------------------------------------------------------------
 // AniList Two-Way Sync & Seasonal Airing Calendar
@@ -1623,17 +2033,30 @@ pub async fn anilist_update_entry(
 }
 
 #[tauri::command]
-pub async fn anilist_start_oauth(app: AppHandle, st: St<'_>, client_id: Option<String>) -> CmdResult<String> {
+pub async fn anilist_start_oauth(
+    app: AppHandle,
+    st: St<'_>,
+    client_id: Option<String>,
+) -> CmdResult<String> {
     crate::anilist_sync::start_oauth_flow(app, st.inner().clone(), client_id).map_err(err)
 }
 
 #[tauri::command]
-pub async fn anilist_login_token(app: AppHandle, st: St<'_>, token: String) -> CmdResult<crate::anilist_sync::AnilistAccount> {
-    crate::anilist_sync::connect_with_token(&app, st.inner(), &token).await.map_err(err)
+pub async fn anilist_login_token(
+    app: AppHandle,
+    st: St<'_>,
+    token: String,
+) -> CmdResult<crate::anilist_sync::AnilistAccount> {
+    crate::anilist_sync::connect_with_token(&app, st.inner(), &token)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
-pub async fn anilist_disconnect(app: AppHandle, st: St<'_>) -> CmdResult<crate::anilist_sync::AnilistAccount> {
+pub async fn anilist_disconnect(
+    app: AppHandle,
+    st: St<'_>,
+) -> CmdResult<crate::anilist_sync::AnilistAccount> {
     let acct = {
         let conn = st.db();
         crate::anilist_sync::disconnect(&conn).map_err(err)?;
@@ -1644,8 +2067,13 @@ pub async fn anilist_disconnect(app: AppHandle, st: St<'_>) -> CmdResult<crate::
 }
 
 #[tauri::command]
-pub async fn anilist_sync_now(app: AppHandle, st: St<'_>) -> CmdResult<crate::anilist_sync::AnilistSyncReport> {
-    crate::anilist_sync::sync_now(&app, st.inner()).await.map_err(err)
+pub async fn anilist_sync_now(
+    app: AppHandle,
+    st: St<'_>,
+) -> CmdResult<crate::anilist_sync::AnilistSyncReport> {
+    crate::anilist_sync::sync_now(&app, st.inner())
+        .await
+        .map_err(err)
 }
 
 #[derive(Serialize, Clone)]
@@ -1761,7 +2189,8 @@ pub async fn get_seasonal_calendar(
     let franchises = franchise::load(&conn).unwrap_or_default();
 
     // Local library counts + cover paths + airing overrides
-    let mut local_map: HashMap<i64, (i64, i64, Option<String>, Option<i64>, Option<i64>)> = HashMap::new();
+    let mut local_map: HashMap<i64, (i64, i64, Option<String>, Option<i64>, Option<i64>)> =
+        HashMap::new();
     {
         let mut stmt = conn
             .prepare(
@@ -1798,7 +2227,13 @@ pub async fn get_seasonal_calendar(
             .prepare("SELECT anilist_id, status, progress FROM anilist_entries")
             .map_err(err)?;
         for row in stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })
             .map_err(err)?
             .flatten()
         {
@@ -1818,8 +2253,16 @@ pub async fn get_seasonal_calendar(
         let in_library = owned_count > 0;
         let link_id = franchises.get(&m.id).map(|f| f.root).unwrap_or(m.id);
         let rem = remote_map.get(&m.id);
-        let next_ep = m.next_airing_episode.as_ref().map(|a| a.episode).or_else(|| loc.and_then(|x| x.3));
-        let next_at = m.next_airing_episode.as_ref().map(|a| a.airing_at).or_else(|| loc.and_then(|x| x.4));
+        let next_ep = m
+            .next_airing_episode
+            .as_ref()
+            .map(|a| a.episode)
+            .or_else(|| loc.and_then(|x| x.3));
+        let next_at = m
+            .next_airing_episode
+            .as_ref()
+            .map(|a| a.airing_at)
+            .or_else(|| loc.and_then(|x| x.4));
 
         items.push(SeasonalItem {
             anilist_id: m.id,
@@ -1835,9 +2278,15 @@ pub async fn get_seasonal_calendar(
             season_year: m.season_year,
             average_score: m.average_score,
             genres: m.genres,
-            studios: m.studios.map(|s| s.nodes.into_iter().map(|n| n.name).collect()).unwrap_or_default(),
+            studios: m
+                .studios
+                .map(|s| s.nodes.into_iter().map(|n| n.name).collect())
+                .unwrap_or_default(),
             start_date: m.start_date.and_then(|d| d.to_string_opt()),
-            cover_url: m.cover_image.as_ref().and_then(|c| c.extra_large.clone().or_else(|| c.large.clone())),
+            cover_url: m
+                .cover_image
+                .as_ref()
+                .and_then(|c| c.extra_large.clone().or_else(|| c.large.clone())),
             cover_path,
             cover_color: m.cover_image.and_then(|c| c.color),
             banner_url: m.banner_image,
@@ -1916,4 +2365,685 @@ pub async fn get_seasonal_calendar(
         fetched_at,
         items,
     })
+}
+
+// ---------------------------------------------------------------------------
+// v0.5: Characters, Seiyuu & Staff Person Works
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonWorkItem {
+    pub anilist_id: i64,
+    pub title_romaji: Option<String>,
+    pub title_english: Option<String>,
+    pub title_native: Option<String>,
+    pub format: Option<String>,
+    pub season_year: Option<i64>,
+    pub cover_url: Option<String>,
+    pub cover_path: Option<String>,
+    pub role: String,
+    pub character_name: Option<String>,
+    pub character_image: Option<String>,
+    pub in_library: bool,
+    pub owned_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonDetail {
+    pub staff_id: i64,
+    pub name_full: String,
+    pub name_native: Option<String>,
+    pub image_url: Option<String>,
+    pub occupations: Vec<String>,
+    pub works: Vec<PersonWorkItem>,
+}
+
+#[tauri::command]
+pub async fn get_person_works(st: St<'_>, staff_id: i64) -> CmdResult<PersonDetail> {
+    let (mut name_full, mut name_native, mut image_url, local_map, mut works) = {
+        let conn = st.db();
+        let _ = conn.execute_batch(db::SCHEMA_V6);
+
+        let mut local_map: HashMap<i64, (i64, Option<String>)> = HashMap::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT m.anilist_id,
+                            (SELECT COUNT(DISTINCT f.ep_key) FROM local_files f WHERE f.anilist_id = m.anilist_id AND f.ep_key NOT LIKE 'S%'),
+                            m.cover_path
+                     FROM media m",
+                )
+                .map_err(err)?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .map_err(err)?;
+            for row in rows.flatten() {
+                local_map.insert(row.0, (row.1, row.2));
+            }
+        }
+
+        let mut nf = String::new();
+        let mut nn = None;
+        let mut img = None;
+        let mut local_works: Vec<PersonWorkItem> = Vec::new();
+
+        // 1. Check voice actor roles in local DB
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT c.anilist_id, m.title_romaji, m.title_english, m.title_native, m.format, m.season_year,
+                            m.cover_url, m.cover_path, c.role, c.name_full, c.image_url,
+                            c.va_name_full, c.va_name_native, c.va_image_url
+                     FROM media_characters c
+                     JOIN media m ON m.anilist_id = c.anilist_id
+                     WHERE c.va_id = ?1
+                     ORDER BY COALESCE(m.season_year, 0) DESC",
+                )
+                .map_err(err)?;
+            let rows = stmt
+                .query_map([staff_id], |r| {
+                    let aid: i64 = r.get(0)?;
+                    let owned = local_map.get(&aid).map(|x| x.0).unwrap_or(0);
+                    Ok((
+                        PersonWorkItem {
+                            anilist_id: aid,
+                            title_romaji: r.get(1)?,
+                            title_english: r.get(2)?,
+                            title_native: r.get(3)?,
+                            format: r.get(4)?,
+                            season_year: r.get(5)?,
+                            cover_url: r.get(6)?,
+                            cover_path: r.get(7)?,
+                            role: r.get(8)?,
+                            character_name: r.get(9)?,
+                            character_image: r.get(10)?,
+                            in_library: owned > 0,
+                            owned_count: owned,
+                        },
+                        r.get::<_, Option<String>>(11)?,
+                        r.get::<_, Option<String>>(12)?,
+                        r.get::<_, Option<String>>(13)?,
+                    ))
+                })
+                .map_err(err)?;
+            for (item, v_nf, v_nn, v_img) in rows.flatten() {
+                if nf.is_empty() {
+                    if let Some(s) = v_nf {
+                        nf = s;
+                    }
+                    nn = v_nn;
+                    img = v_img;
+                }
+                local_works.push(item);
+            }
+        }
+
+        // 2. Check staff roles in local DB
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT s.anilist_id, m.title_romaji, m.title_english, m.title_native, m.format, m.season_year,
+                            m.cover_url, m.cover_path, s.role, s.name_full, s.name_native, s.image_url
+                     FROM media_staff s
+                     JOIN media m ON m.anilist_id = s.anilist_id
+                     WHERE s.staff_id = ?1
+                     ORDER BY COALESCE(m.season_year, 0) DESC",
+                )
+                .map_err(err)?;
+            let rows = stmt
+                .query_map([staff_id], |r| {
+                    let aid: i64 = r.get(0)?;
+                    let owned = local_map.get(&aid).map(|x| x.0).unwrap_or(0);
+                    Ok((
+                        PersonWorkItem {
+                            anilist_id: aid,
+                            title_romaji: r.get(1)?,
+                            title_english: r.get(2)?,
+                            title_native: r.get(3)?,
+                            format: r.get(4)?,
+                            season_year: r.get(5)?,
+                            cover_url: r.get(6)?,
+                            cover_path: r.get(7)?,
+                            role: r.get(8)?,
+                            character_name: None,
+                            character_image: None,
+                            in_library: owned > 0,
+                            owned_count: owned,
+                        },
+                        r.get::<_, String>(9)?,
+                        r.get::<_, Option<String>>(10)?,
+                        r.get::<_, Option<String>>(11)?,
+                    ))
+                })
+                .map_err(err)?;
+            for (item, s_nf, s_nn, s_img) in rows.flatten() {
+                if nf.is_empty() {
+                    nf = s_nf;
+                    nn = s_nn;
+                    img = s_img;
+                }
+                if !local_works
+                    .iter()
+                    .any(|w| w.anilist_id == item.anilist_id && w.role == item.role)
+                {
+                    local_works.push(item);
+                }
+            }
+        }
+
+        (nf, nn, img, local_map, local_works)
+    };
+
+    let mut occupations = Vec::new();
+    // 3. Also query AniList for full filmography so non-cached credits are visible too
+    if let Ok(remote) = st.providers.anilist_person_detail(staff_id).await {
+        if let Some(s) = remote["name"]["full"].as_str() {
+            name_full = s.to_string();
+        }
+        if let Some(s) = remote["name"]["native"].as_str() {
+            name_native = Some(s.to_string());
+        }
+        if let Some(s) = remote["image"]["large"].as_str() {
+            image_url = Some(s.to_string());
+        }
+        if let Some(arr) = remote["primaryOccupations"].as_array() {
+            occupations = arr
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect();
+        }
+        if let Some(edges) = remote["characterMedia"]["edges"].as_array() {
+            for e in edges {
+                let node = &e["node"];
+                let Some(aid) = node["id"].as_i64() else {
+                    continue;
+                };
+                if node["type"].as_str().unwrap_or("ANIME") != "ANIME" {
+                    continue;
+                }
+                if works.iter().any(|w| w.anilist_id == aid) {
+                    continue;
+                }
+                let loc = local_map.get(&aid);
+                let owned = loc.map(|x| x.0).unwrap_or(0);
+                let ch = e["characters"].as_array().and_then(|a| a.first());
+                works.push(PersonWorkItem {
+                    anilist_id: aid,
+                    title_romaji: node["title"]["romaji"].as_str().map(String::from),
+                    title_english: node["title"]["english"].as_str().map(String::from),
+                    title_native: node["title"]["native"].as_str().map(String::from),
+                    format: node["format"].as_str().map(String::from),
+                    season_year: node["seasonYear"].as_i64(),
+                    cover_url: node["coverImage"]["large"].as_str().map(String::from),
+                    cover_path: loc.and_then(|x| x.1.clone()),
+                    role: e["characterRole"].as_str().unwrap_or("MAIN").to_string(),
+                    character_name: ch.and_then(|c| c["name"]["full"].as_str().map(String::from)),
+                    character_image: ch
+                        .and_then(|c| c["image"]["large"].as_str().map(String::from)),
+                    in_library: owned > 0,
+                    owned_count: owned,
+                });
+            }
+        }
+        if let Some(edges) = remote["staffMedia"]["edges"].as_array() {
+            for e in edges {
+                let node = &e["node"];
+                let Some(aid) = node["id"].as_i64() else {
+                    continue;
+                };
+                if works.iter().any(|w| w.anilist_id == aid) {
+                    continue;
+                }
+                let loc = local_map.get(&aid);
+                let owned = loc.map(|x| x.0).unwrap_or(0);
+                works.push(PersonWorkItem {
+                    anilist_id: aid,
+                    title_romaji: node["title"]["romaji"].as_str().map(String::from),
+                    title_english: node["title"]["english"].as_str().map(String::from),
+                    title_native: node["title"]["native"].as_str().map(String::from),
+                    format: node["format"].as_str().map(String::from),
+                    season_year: node["seasonYear"].as_i64(),
+                    cover_url: node["coverImage"]["large"].as_str().map(String::from),
+                    cover_path: loc.and_then(|x| x.1.clone()),
+                    role: e["staffRole"].as_str().unwrap_or("Staff").to_string(),
+                    character_name: None,
+                    character_image: None,
+                    in_library: owned > 0,
+                    owned_count: owned,
+                });
+            }
+        }
+    }
+
+    works.sort_by(|a, b| {
+        b.in_library
+            .cmp(&a.in_library)
+            .then_with(|| b.season_year.unwrap_or(0).cmp(&a.season_year.unwrap_or(0)))
+    });
+
+    Ok(PersonDetail {
+        staff_id,
+        name_full,
+        name_native,
+        image_url,
+        occupations,
+        works,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// v0.5: Smart Subtitle Matcher, Auto-Retimer & Jimaku Fetcher
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn preview_subtitle_matches(
+    st: St<'_>,
+    anilist_id: i64,
+    default_lang: Option<String>,
+) -> CmdResult<crate::subtitles::SubtitleMatchPreview> {
+    let lang = default_lang.unwrap_or_else(|| "ja".to_string());
+    crate::subtitles::preview_subtitle_matches(&st.db(), anilist_id, None, &lang).map_err(err)
+}
+
+#[tauri::command]
+pub async fn apply_subtitle_matches(
+    app: AppHandle,
+    st: St<'_>,
+    anilist_id: i64,
+    mode: String,
+    items: Vec<crate::subtitles::SubtitleMatchItem>,
+    auto_retime: bool,
+) -> CmdResult<crate::subtitles::SubtitleApplyReport> {
+    let st_arc = st.inner().clone();
+    let res = tokio::task::spawn_blocking(move || {
+        crate::subtitles::apply_subtitle_matches(&st_arc, anilist_id, &mode, items, auto_retime)
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    let _ = app.emit("library-changed", ());
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn retime_episode_subtitle(
+    app: AppHandle,
+    st: St<'_>,
+    anilist_id: i64,
+    ep_key: String,
+    subtitle_path: String,
+) -> CmdResult<crate::subtitles::RetimeReport> {
+    let video_path: String = {
+        let conn = st.db();
+        conn.query_row(
+            "SELECT path FROM local_files WHERE anilist_id = ?1 AND ep_key = ?2 ORDER BY id LIMIT 1",
+            params![anilist_id, ep_key],
+            |r| r.get(0),
+        )
+        .map_err(|_| "No local video file found for this episode to align against.".to_string())?
+    };
+
+    let sub_pb = std::path::PathBuf::from(&subtitle_path);
+    if !sub_pb.is_file() {
+        return Err("Subtitle file does not exist on disk.".into());
+    }
+    let ext = sub_pb
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("srt")
+        .to_ascii_lowercase();
+    let stem = sub_pb
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("sub")
+        .trim_end_matches(".retimed");
+
+    let cache_dir = st.data_dir.join("subtitles").join(anilist_id.to_string());
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let out_pb = cache_dir.join(format!("ep{}_{}.retimed.{}", ep_key, stem, ext));
+    let vid_pb = std::path::PathBuf::from(&video_path);
+
+    let sub_clone = sub_pb.clone();
+    let out_clone = out_pb.clone();
+    let mut report = tokio::task::spawn_blocking(move || {
+        crate::subtitles::retime_subtitle_file(&sub_clone, &vid_pb, &out_clone)
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+
+    {
+        let conn = st.db();
+        let lang = crate::subtitles::detect_sub_language(stem).unwrap_or_else(|| "ja".into());
+        let cc = crate::subtitles::detect_cc_tag(stem);
+        // Replace old un-retimed link if it pointed to `subtitle_path`
+        let _ = conn.execute(
+            "DELETE FROM linked_subtitles WHERE anilist_id = ?1 AND ep_key = ?2 AND path = ?3",
+            params![anilist_id, ep_key, subtitle_path],
+        );
+        let _ = crate::subtitles::upsert_linked_subtitle(
+            &conn,
+            anilist_id,
+            &ep_key,
+            &report.output_path,
+            &lang,
+            cc,
+            "retimed",
+            true,
+            Some(report.offset_ms),
+        );
+    }
+
+    report.loaded_into_mpv =
+        crate::player::try_hotload_subtitle_in_mpv(&st, anilist_id, &ep_key, &report.output_path)
+            .await;
+    let _ = app.emit("library-changed", ());
+    Ok(report)
+}
+
+#[tauri::command]
+pub async fn remove_linked_subtitle(app: AppHandle, st: St<'_>, id: i64) -> CmdResult<()> {
+    crate::subtitles::remove_linked_subtitle(&st.db(), id).map_err(err)?;
+    let _ = app.emit("library-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn jimaku_search(
+    st: St<'_>,
+    anilist_id: i64,
+    episode: Option<i64>,
+) -> CmdResult<crate::subtitles::JimakuSearchResponse> {
+    crate::subtitles::jimaku_search_files(&st, anilist_id, episode)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn jimaku_download(
+    app: AppHandle,
+    st: St<'_>,
+    anilist_id: i64,
+    ep_key: String,
+    file_name: String,
+    file_url: String,
+    auto_retime: bool,
+) -> CmdResult<crate::subtitles::JimakuDownloadResult> {
+    let res = crate::subtitles::jimaku_download_and_process(
+        &st,
+        anilist_id,
+        &ep_key,
+        &file_name,
+        &file_url,
+        auto_retime,
+    )
+    .await
+    .map_err(err)?;
+    let _ = app.emit("library-changed", ());
+    Ok(res)
+}
+
+
+// ---------------------------------------------------------------------------
+// Phase 8: Streaming & Hybrid Mode, Catalog Browser, and Torrent Engine
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonSearchResult {
+    pub staff_id: i64,
+    pub name_full: String,
+    pub name_native: Option<String>,
+    pub image_url: Option<String>,
+    pub occupations: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn toggle_stream_library(
+    app: AppHandle,
+    st: St<'_>,
+    anilist_id: i64,
+) -> CmdResult<bool> {
+    let has_media: bool = {
+        let conn = st.db();
+        let _ = conn.execute_batch(db::SCHEMA_V7);
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM media WHERE anilist_id = ?1)",
+            [anilist_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(false)
+    };
+    if !has_media {
+        crate::service::ensure_media(&st, anilist_id)
+            .await
+            .map_err(err)?;
+    }
+
+    let now_in_lib = {
+        let conn = st.db();
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM stream_library WHERE anilist_id = ?1)",
+                [anilist_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if exists {
+            conn.execute("DELETE FROM stream_library WHERE anilist_id = ?1", [anilist_id])
+                .map_err(err)?;
+            false
+        } else {
+            conn.execute(
+                "INSERT OR REPLACE INTO stream_library (anilist_id, added_at) VALUES (?1, ?2)",
+                params![anilist_id, db::now()],
+            )
+            .map_err(err)?;
+            true
+        }
+    };
+
+    let _ = app.emit("library-changed", ());
+    Ok(now_in_lib)
+}
+
+#[tauri::command]
+pub async fn browse_catalog(
+    st: St<'_>,
+    search: Option<String>,
+    genre: Option<String>,
+    format: Option<String>,
+    status: Option<String>,
+    season: Option<String>,
+    year: Option<i64>,
+    sort: Option<String>,
+    page: Option<u32>,
+) -> CmdResult<Vec<SeasonalItem>> {
+    let media = st
+        .providers
+        .anilist_browse(
+            search.as_deref(),
+            genre.as_deref(),
+            format.as_deref(),
+            status.as_deref(),
+            season.as_deref(),
+            year,
+            sort.as_deref(),
+            page.unwrap_or(1),
+            30,
+        )
+        .await
+        .map_err(err)?;
+
+    let conn = st.db();
+    let _ = conn.execute_batch(db::SCHEMA_V5);
+    let _ = conn.execute_batch(db::SCHEMA_V7);
+
+    let mut items = Vec::with_capacity(media.len());
+    for m in media {
+        let id = m.id;
+        let owned_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT ep_key) FROM local_files WHERE anilist_id = ?1 AND ep_key NOT LIKE 'S%'",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let in_stream: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM stream_library WHERE anilist_id = ?1)",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        let watched_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM watch_state WHERE anilist_id = ?1 AND ep_key NOT LIKE 'S%'",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let cover_path: Option<String> = conn
+            .query_row(
+                "SELECT cover_path FROM media WHERE anilist_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        let rem = crate::anilist_sync::get_remote_entry(&conn, id);
+
+        items.push(SeasonalItem {
+            anilist_id: id,
+            link_id: id,
+            title_romaji: m.title.romaji,
+            title_english: m.title.english,
+            title_native: m.title.native,
+            format: m.format,
+            status: m.status,
+            episodes: m.episodes,
+            duration: m.duration,
+            season: m.season,
+            season_year: m.season_year,
+            average_score: m.average_score,
+            genres: m.genres,
+            studios: m
+                .studios
+                .map(|s| s.nodes.into_iter().map(|n| n.name).collect())
+                .unwrap_or_default(),
+            start_date: m.start_date.and_then(|d| d.to_string_opt()),
+            cover_url: m
+                .cover_image
+                .as_ref()
+                .and_then(|c| c.extra_large.clone().or_else(|| c.large.clone())),
+            cover_path,
+            cover_color: m.cover_image.and_then(|c| c.color),
+            banner_url: m.banner_image,
+            next_airing_episode: m.next_airing_episode.as_ref().map(|a| a.episode),
+            next_airing_at: m.next_airing_episode.as_ref().map(|a| a.airing_at),
+            in_library: owned_count > 0 || in_stream,
+            owned_count,
+            watched_count,
+            anilist_status: rem.as_ref().map(|r| r.status.clone()),
+            anilist_progress: rem.as_ref().map(|r| r.progress),
+        });
+    }
+
+    Ok(items)
+}
+
+#[tauri::command]
+pub async fn search_people(st: St<'_>, query: String) -> CmdResult<Vec<PersonSearchResult>> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let val = st
+        .providers
+        .anilist_search_people(&query)
+        .await
+        .map_err(err)?;
+    let mut out = Vec::new();
+    if let Some(arr) = val.as_array() {
+        for item in arr {
+            let Some(staff_id) = item["id"].as_i64() else {
+                continue;
+            };
+            let name_full = item["name"]["full"]
+                .as_str()
+                .unwrap_or("Unknown")
+                .to_string();
+            let name_native = item["name"]["native"].as_str().map(|s| s.to_string());
+            let image_url = item["image"]["large"].as_str().map(|s| s.to_string());
+            let occupations = item["primaryOccupations"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.push(PersonSearchResult {
+                staff_id,
+                name_full,
+                name_native,
+                image_url,
+                occupations,
+            });
+        }
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn search_episode_torrents(
+    st: St<'_>,
+    anilist_id: i64,
+    episode: i64,
+    custom_query: Option<String>,
+) -> CmdResult<Vec<crate::torrent::TorrentCandidate>> {
+    crate::torrent::search_episode_torrents(&st, anilist_id, episode, custom_query)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn start_torrent_session(
+    app: AppHandle,
+    st: St<'_>,
+    anilist_id: i64,
+    ep_key: String,
+    episode_num: Option<i64>,
+    candidate: crate::torrent::TorrentCandidate,
+    mode_override: Option<String>,
+) -> CmdResult<crate::torrent::TorrentSessionStatus> {
+    crate::torrent::start_torrent_session(
+        app,
+        st.inner().clone(),
+        anilist_id,
+        ep_key,
+        episode_num,
+        candidate,
+        mode_override,
+    )
+    .await
+    .map_err(err)
+}
+
+#[tauri::command]
+pub async fn list_torrent_sessions() -> CmdResult<Vec<crate::torrent::TorrentSessionStatus>> {
+    Ok(crate::torrent::list_active_sessions())
+}
+
+#[tauri::command]
+pub async fn cancel_torrent_session(session_id: String) -> CmdResult<()> {
+    crate::torrent::cancel_session(&session_id);
+    Ok(())
 }

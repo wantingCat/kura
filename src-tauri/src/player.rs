@@ -1519,7 +1519,7 @@ impl Controller {
     }
 
     /// Load another file into the same player window (autoplay).
-    async fn load(&mut self, path: &str, start: f64, tracks: &EffectiveTrackPrefs) -> bool {
+    async fn load(&mut self, path: &str, start: f64, tracks: &EffectiveTrackPrefs, extra_subs: &[String]) -> bool {
         match self {
             Controller::Mpv(m) => {
                 let start_opt = if start > 0.0 { format!("+{start:.0}") } else { "none".into() };
@@ -1554,6 +1554,13 @@ impl Controller {
                     _ => {}
                 }
                 let ok = m.call(serde_json::json!(["loadfile", path, "replace"])).await.is_some();
+                if ok && !extra_subs.is_empty() {
+                    tokio::time::sleep(Duration::from_millis(450)).await;
+                    for (idx, sub_path) in extra_subs.iter().enumerate() {
+                        let flag = if idx == 0 { "select" } else { "auto" };
+                        let _ = m.call(serde_json::json!(["sub-add", sub_path, flag])).await;
+                    }
+                }
                 let _ = m.call(serde_json::json!(["set_property", "pause", false])).await;
                 ok
             }
@@ -1756,12 +1763,13 @@ pub fn sync_discord_activity(st: &AppState, ep: &Ep, pos: f64, dur: f64, is_play
 
 /// Start playing an episode with the configured player. Returns immediately; tracking runs in the background.
 pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
-    let (p, start, track_prefs) = {
+    let (p, start, track_prefs, linked_subs) = {
         let conn = st.db();
         let p = prefs(&conn);
         let start = if p.resume { resume_point(saved_progress(&conn, ep.anilist_id, &ep.ep_key), p.threshold) } else { 0.0 };
         let track_prefs = effective_track_prefs(&conn, ep.anilist_id);
-        (p, start, track_prefs)
+        let linked_subs = crate::subtitles::episode_subtitle_paths(&conn, ep.anilist_id, &ep.ep_key);
+        (p, start, track_prefs, linked_subs)
     };
     // Supersede any previous tracking session.
     let session = st.play_session.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1854,6 +1862,9 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             if let Ok(script_path) = ensure_kura_mpv_script(&st.data_dir) {
                 cmd.arg(format!("--script={}", script_path.display()));
             }
+            for sub_path in &linked_subs {
+                cmd.arg(format!("--sub-file={sub_path}"));
+            }
             cmd.args([
                 "--osd-font=sans-serif",
                 "--osd-font-size=28",
@@ -1898,11 +1909,17 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
                 }
                 SubArg::Default => {}
             }
+            if let Some(sub_path) = linked_subs.first() {
+                cmd.arg(format!("--sub-file={sub_path}"));
+            }
             cmd.arg(&ep.path);
             Pending::Vlc { base: format!("http://127.0.0.1:{port}"), password }
         }
         Kind::Mpc => {
             cmd.arg(&ep.path);
+            for sub_path in &linked_subs {
+                cmd.arg("/sub").arg(sub_path);
+            }
             if start > 0.0 {
                 cmd.arg("/start").arg(((start * 1000.0) as i64).to_string());
             }
@@ -1985,6 +2002,7 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(500)).await;
         if !alive(&st) {
+            crate::torrent::on_player_stopped(ep.anilist_id, &ep.ep_key);
             return;
         }
         if let Some(c) = connect(&pending).await {
@@ -2002,10 +2020,20 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
             _ => Some("Couldn't connect to the player to track progress.".into()),
         };
         emit(&app, "untracked", p.kind, &ep, 0.0, 0.0, hint);
+        if !matches!(pending, Pending::Mpc { .. }) {
+            while alive(&st) && matches!(child.try_wait(), Ok(None)) {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+        crate::torrent::on_player_stopped(ep.anilist_id, &ep.ep_key);
         return;
     };
 
     // Dispatch AniSkip frame-perfect skip times to MPV
+    if let Pending::Mpv(ref addr) = pending {
+        *st.active_mpv_ipc.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((ep.anilist_id, ep.ep_key.clone(), addr.clone()));
+    }
     sync_aniskip_to_player(&mut ctl, &st, &ep).await;
 
     // 2. Poll.
@@ -2022,6 +2050,9 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
         if !alive(&st) {
+            break;
+        }
+        if matches!(child.try_wait(), Ok(Some(_))) && !matches!(pending, Pending::Mpc { .. }) {
             break;
         }
         ticks += 1;
@@ -2088,11 +2119,21 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
             };
             let start = if p.resume { resume_point(saved_progress(&st.db(), next.anilist_id, &next.ep_key), p.threshold) } else { 0.0 };
             ctl.notify(&format!("Up next: episode {}", next.ep_key)).await;
-            let next_tracks = effective_track_prefs(&st.db(), next.anilist_id);
-            if !ctl.load(&next.path, start, &next_tracks).await {
+            let (next_tracks, next_subs) = {
+                let conn = st.db();
+                (
+                    effective_track_prefs(&conn, next.anilist_id),
+                    crate::subtitles::episode_subtitle_paths(&conn, next.anilist_id, &next.ep_key),
+                )
+            };
+            if !ctl.load(&next.path, start, &next_tracks, &next_subs).await {
                 break;
             }
             ep = next;
+            if let Pending::Mpv(ref addr) = pending {
+                *st.active_mpv_ipc.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((ep.anilist_id, ep.ep_key.clone(), addr.clone()));
+            }
             sync_aniskip_to_player(&mut ctl, &st, &ep).await;
             (pos, dur, marked) = (0.0, 0.0, false);
             loaded_at = std::time::Instant::now();
@@ -2115,10 +2156,34 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
     }
     let _ = child.try_wait();
     if alive(&st) {
+        *st.active_mpv_ipc.lock().unwrap_or_else(|e| e.into_inner()) = None;
         st.discord.clear();
     }
     emit(&app, "stopped", p.kind, &ep, pos, dur, None);
+    crate::torrent::on_player_stopped(ep.anilist_id, &ep.ep_key);
     let _ = app.emit("library-changed", ());
+}
+
+/// Hot-load a newly fetched or retimed subtitle file into a running mpv window over JSON IPC.
+pub async fn try_hotload_subtitle_in_mpv(st: &AppState, anilist_id: i64, ep_key: &str, sub_path: &str) -> bool {
+    let addr = {
+        let g = st.active_mpv_ipc.lock().unwrap_or_else(|e| e.into_inner());
+        match g.as_ref() {
+            Some((id, k, a)) if *id == anilist_id && k == ep_key => Some(a.clone()),
+            _ => None,
+        }
+    };
+    let Some(addr) = addr else { return false };
+    let Ok(mut mpv) = Mpv::connect(&addr).await else { return false };
+    let res = mpv.call(serde_json::json!(["sub-add", sub_path, "select"])).await;
+    let fname = std::path::Path::new(sub_path)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| sub_path.to_string());
+    let _ = mpv
+        .call(serde_json::json!(["show-text", format!("Kura · Loaded subtitle: {fname}"), 3500]))
+        .await;
+    res.is_some()
 }
 
 #[cfg(test)]
