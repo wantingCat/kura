@@ -810,7 +810,7 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
                 if SESSION_COUNTER.load(Ordering::SeqCst) != session_id {
                     return;
                 }
-                let mut dur_for_aniskip = 0.0;
+                let dur_for_aniskip;
                 {
                     let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
                     if !g.state.active || SESSION_COUNTER.load(Ordering::SeqCst) != session_id {

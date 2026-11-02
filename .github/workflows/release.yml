@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   release:
     permissions:
@@ -17,14 +21,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: 'macos-latest' # Apple Silicon
-            args: '--target aarch64-apple-darwin'
-          - platform: 'macos-latest' # Intel
-            args: '--target x86_64-apple-darwin'
-          - platform: 'ubuntu-22.04'
-            args: ''
           - platform: 'windows-latest'
             args: ''
+            stagger: 0
+          - platform: 'ubuntu-22.04'
+            args: ''
+            stagger: 15
+          - platform: 'macos-latest' # Apple Silicon
+            args: '--target aarch64-apple-darwin'
+            stagger: 35
+          - platform: 'macos-latest' # Intel
+            args: '--target x86_64-apple-darwin'
+            stagger: 80
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -66,16 +74,20 @@ jobs:
           $repos = @("zhongfly/mpv-winbuild", "shinchiro/mpv-winbuild-cmake")
           foreach ($repo in $repos) {
             try {
-              Write-Host "Checking latest portable mpv release from $repo..."
-              $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers @{
+              Write-Host "Checking recent portable mpv releases from $repo..."
+              $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=5" -Headers @{
                 Authorization = "Bearer $env:GH_TOKEN"
                 "User-Agent"  = "Kura-Release-Builder"
               }
-              $asset = $rel.assets | Where-Object {
+              $allAssets = @()
+              foreach ($r in $releases) {
+                if ($r.assets) { $allAssets += $r.assets }
+              }
+              $asset = $allAssets | Where-Object {
                 $_.name -match "^mpv-x86_64-20.*\.7z$" -and $_.name -notmatch "v3" -and $_.name -notmatch "dev"
               } | Select-Object -First 1
               if (-not $asset) {
-                $asset = $rel.assets | Where-Object {
+                $asset = $allAssets | Where-Object {
                   $_.name -match "^mpv-x86_64.*\.7z$" -and $_.name -notmatch "dev"
                 } | Select-Object -First 1
               }
@@ -89,8 +101,12 @@ jobs:
                 $mpvExe = Get-ChildItem -Path $extractDir -Filter "mpv.exe" -Recurse | Select-Object -First 1
                 if ($mpvExe) {
                   $srcFolder = $mpvExe.Directory.FullName
-                  Copy-Item -Path "$srcFolder\*" -Destination $dest -Recurse -Force
-                  Write-Host "Bundled mpv.exe from $($asset.name) into $dest"
+                  Copy-Item -Path (Join-Path $srcFolder "mpv.exe") -Destination $dest -Force
+                  Get-ChildItem -Path $srcFolder -Filter "*.dll" -File | ForEach-Object {
+                    Copy-Item -Path $_.FullName -Destination $dest -Force
+                  }
+                  $bundledSize = [math]::Round((Get-Item (Join-Path $dest "mpv.exe")).Length / 1MB, 1)
+                  Write-Host "Bundled mpv.exe ($bundledSize MB) from $($asset.name) into $dest"
                   $downloaded = $true
                   break
                 }
@@ -99,9 +115,14 @@ jobs:
               Write-Warning "Failed to fetch mpv from ${repo}: $_"
             }
           }
-          if (-not $downloaded) {
+          if (-not $downloaded -or -not (Test-Path (Join-Path $dest "mpv.exe"))) {
             throw "Could not download portable mpv.exe from any release mirror"
           }
+
+      - name: Stagger matrix upload to prevent latest.json race condition
+        if: matrix.stagger > 0
+        shell: bash
+        run: sleep ${{ matrix.stagger }}
 
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0

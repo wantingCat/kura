@@ -154,16 +154,9 @@ const C_VK: u32 = 1 << 3;       // Kuru verb (くる)
 const C_VZ: u32 = 1 << 4;       // Zuru verb (ずる)
 const C_ADJ_I: u32 = 1 << 5;    // I-adjective (形容詞)
 const C_IRU: u32 = 1 << 6;      // -iru / -eru auxiliary (ている, てある, etc.)
-const C_MASU: u32 = 1 << 7;     // Polite -masu stem
 const C_TE: u32 = 1 << 8;       // -te / -de form
 const C_TA: u32 = 1 << 9;       // -ta / -da past form
-const C_NAI: u32 = 1 << 10;     // -nai negative form (behaves like adj-i)
-const C_TAI: u32 = 1 << 11;     // -tai desiderative form (behaves like adj-i)
-const C_SOU: u32 = 1 << 12;     // -sou appearance form
 const C_N: u32 = 1 << 13;       // Noun / suru-noun prefix
-
-const C_VERB: u32 = C_V1 | C_V5 | C_VS | C_VK | C_VZ | C_IRU;
-const C_ADJ_LIKE: u32 = C_ADJ_I | C_NAI | C_TAI;
 
 #[derive(Clone, Copy)]
 struct TransformRule {
