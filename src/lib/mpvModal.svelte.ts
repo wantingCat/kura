@@ -45,6 +45,11 @@ class MpvModalState {
   }
 
   async checkInitialLaunch() {
+    // Kura defaults to the built-in player (and bundles mpv in release installers),
+    // so only prompt if the user explicitly switched to external mpv and it wasn't found.
+    if (!app.playback.player || app.playback.player === "builtin") {
+      return;
+    }
     // Check local storage fast-path
     if (typeof localStorage !== "undefined" && localStorage.getItem("kura_mpv_prompt_dismissed") === "true") {
       return;

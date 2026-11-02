@@ -48,6 +48,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": [
+      "resources/mpv/**/*"
+    ],
+    "linux": {
+      "deb": {
+        "depends": ["mpv"]
+      }
+    },
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico",

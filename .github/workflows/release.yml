@@ -52,6 +52,57 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Bundle portable mpv (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dest = "src-tauri/resources/mpv"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+
+          $downloaded = $false
+          $repos = @("zhongfly/mpv-winbuild", "shinchiro/mpv-winbuild-cmake")
+          foreach ($repo in $repos) {
+            try {
+              Write-Host "Checking latest portable mpv release from $repo..."
+              $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers @{
+                Authorization = "Bearer $env:GH_TOKEN"
+                "User-Agent"  = "Kura-Release-Builder"
+              }
+              $asset = $rel.assets | Where-Object {
+                $_.name -match "^mpv-x86_64-20.*\.7z$" -and $_.name -notmatch "v3" -and $_.name -notmatch "dev"
+              } | Select-Object -First 1
+              if (-not $asset) {
+                $asset = $rel.assets | Where-Object {
+                  $_.name -match "^mpv-x86_64.*\.7z$" -and $_.name -notmatch "dev"
+                } | Select-Object -First 1
+              }
+              if ($asset) {
+                $archive = Join-Path $env:RUNNER_TEMP $asset.name
+                Write-Host "Downloading $($asset.name) ($([math]::Round($asset.size / 1MB, 1)) MB)..."
+                Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive
+                $extractDir = Join-Path $env:RUNNER_TEMP "mpv-extract"
+                if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
+                7z x $archive "-o$extractDir" -y | Out-Null
+                $mpvExe = Get-ChildItem -Path $extractDir -Filter "mpv.exe" -Recurse | Select-Object -First 1
+                if ($mpvExe) {
+                  $srcFolder = $mpvExe.Directory.FullName
+                  Copy-Item -Path "$srcFolder\*" -Destination $dest -Recurse -Force
+                  Write-Host "Bundled mpv.exe from $($asset.name) into $dest"
+                  $downloaded = $true
+                  break
+                }
+              }
+            } catch {
+              Write-Warning "Failed to fetch mpv from ${repo}: $_"
+            }
+          }
+          if (-not $downloaded) {
+            throw "Could not download portable mpv.exe from any release mirror"
+          }
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:

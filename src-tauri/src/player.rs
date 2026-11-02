@@ -408,10 +408,44 @@ mod win {
     }
 }
 
+pub fn bundled_player_path(kind: Kind) -> Option<PathBuf> {
+    let exes = exe_names(kind);
+    if exes.is_empty() {
+        return None;
+    }
+    let exe_path = std::env::current_exe().ok()?;
+    let exe_dir = exe_path.parent()?;
+
+    let mut candidate_dirs = vec![
+        exe_dir.join("resources").join("mpv"),
+        exe_dir.join("mpv"),
+        exe_dir.to_path_buf(),
+    ];
+    if let Some(parent) = exe_dir.parent() {
+        candidate_dirs.push(parent.join("Resources").join("resources").join("mpv"));
+        candidate_dirs.push(parent.join("lib").join("kura").join("resources").join("mpv"));
+        candidate_dirs.push(parent.join("resources").join("mpv"));
+    }
+
+    for dir in candidate_dirs {
+        for exe in exes {
+            let p = dir.join(exe);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 pub fn detect(kind: Kind) -> Option<PathBuf> {
     let exes = exe_names(kind);
     if exes.is_empty() {
         return None;
+    }
+
+    if let Some(p) = bundled_player_path(kind) {
+        return Some(p);
     }
 
     #[cfg(windows)]
