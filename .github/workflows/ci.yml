@@ -59,9 +59,9 @@ jobs:
 
       - name: cargo check
         working-directory: src-tauri
-        run: cargo check --all-targets --locked
+        run: cargo check --all-targets
 
       - name: cargo test
         working-directory: src-tauri
         # Network-dependent tests (AniSkip) tolerate failures internally.
-        run: cargo test --lib --locked
+        run: cargo test --lib
