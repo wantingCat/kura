@@ -8,11 +8,13 @@
     api, events, type AnilistAccount, type AnilistSyncReport, type BackupSummary,
     type DetectedPlayer,
     type Diagnostics,
+    type DictionaryInfo,
     type ImportOptions,
     type ImportReport,
     type Library,
     type PlayerKind,
     type SafetyCopy,
+    type TorrentExtension,
   } from "$lib/api";
   import { relativeTime } from "$lib/format";
   import { app } from "$lib/app.svelte";
@@ -41,6 +43,56 @@
   let fanartSaved = $state(false);
   let jimakuKeyInput = $state(app.jimakuApiKey);
   let jimakuSaved = $state(false);
+
+  // Modular Torrent Extensions (Hayase-style bring-your-own indexer)
+  let torrentExtensions = $state<TorrentExtension[]>([]);
+  let extUrlInput = $state("");
+  let extImporting = $state(false);
+
+  async function refreshTorrentExtensions() {
+    try {
+      torrentExtensions = await api.listTorrentExtensions();
+    } catch {
+      // ignore
+    }
+  }
+
+  async function importExtension() {
+    const val = extUrlInput.trim();
+    if (!val || extImporting) return;
+    extImporting = true;
+    try {
+      torrentExtensions = await api.importTorrentExtension(val);
+      extUrlInput = "";
+      app.toast(`Imported extension (${torrentExtensions.filter((e) => e.enabled).length} active)`, "info", 4000);
+    } catch (e) {
+      app.toast(String(e), "error", 6000);
+    } finally {
+      extImporting = false;
+    }
+  }
+
+  async function toggleExtension(ext: TorrentExtension) {
+    try {
+      torrentExtensions = await api.toggleTorrentExtension(ext.id, !ext.enabled);
+    } catch (e) {
+      app.toast(String(e), "error", 5000);
+    }
+  }
+
+  async function removeExtension(id: string) {
+    try {
+      torrentExtensions = await api.removeTorrentExtension(id);
+    } catch (e) {
+      app.toast(String(e), "error", 5000);
+    }
+  }
+
+  $effect(() => {
+    if (active === "playback") {
+      void refreshTorrentExtensions();
+    }
+  });
 
   $effect(() => {
     jimakuKeyInput = app.jimakuApiKey;
@@ -98,14 +150,18 @@
 
   // Playback ----------------------------------------------------------------
   const PLAYERS: { kind: PlayerKind; name: string; blurb: string }[] = [
-    { kind: "mpv", name: "mpv", blurb: "Full tracking + autoplay" },
-    { kind: "vlc", name: "VLC", blurb: "Full tracking + autoplay" },
+    { kind: "builtin", name: "Kura Built-In (Memento)", blurb: "In-app player · Pause-to-hover Yomitan + OP/ED skip" },
+    { kind: "mpv", name: "mpv", blurb: "External window · Full tracking + autoplay" },
+    { kind: "vlc", name: "VLC", blurb: "External window · Full tracking + autoplay" },
     { kind: "mpc", name: "MPC-HC / BE", blurb: "Needs its web interface on" },
-    { kind: "memento", name: "Memento", blurb: "Full tracking + autoplay" },
+    { kind: "memento", name: "Memento", blurb: "External window · Full tracking + autoplay" },
     { kind: "system", name: "System default", blurb: "Opens normally, no tracking" },
   ];
   let detected = $state<DetectedPlayer[]>([]);
-  let version = $state("0.5");
+  let dictionaries = $state<DictionaryInfo[]>([]);
+  let dictBusy = $state(false);
+  let dictStatusMsg = $state<string | null>(null);
+  let version = $state("0.6");
   let threshold = $state(app.playback.threshold);
   $effect(() => {
     threshold = app.playback.threshold;
@@ -118,16 +174,74 @@
       detected = [];
     }
     try {
+      dictionaries = await api.listDictionaries();
+    } catch {
+      dictionaries = [];
+    }
+    void events.onDictionaryProgress((p) => {
+      dictStatusMsg = p.message;
+    });
+    try {
       version = (await getVersion()).replace(/\.0$/, "");
     } catch {
-      version = "0.5";
+      version = "0.6";
     }
   });
+
+  async function importYomitanZip() {
+    const picked = await open({
+      multiple: false,
+      directory: false,
+      title: "Select a Yomitan .zip dictionary",
+      filters: [{ name: "Yomitan Dictionary", extensions: ["zip"] }],
+    });
+    if (typeof picked !== "string" || !picked) return;
+    dictBusy = true;
+    dictStatusMsg = "Importing Yomitan dictionary archive…";
+    try {
+      const info = await api.importYomitanDictionary(picked);
+      dictionaries = await api.listDictionaries();
+      app.toast(`Imported ${info.title} (${info.termCount.toLocaleString()} terms, ${info.kanjiCount.toLocaleString()} kanji)`);
+      dictStatusMsg = null;
+    } catch (e) {
+      app.toast(String(e), "error", 8000);
+      dictStatusMsg = `Import error: ${e}`;
+    } finally {
+      dictBusy = false;
+    }
+  }
+
+  async function downloadRecommendedDicts() {
+    if (dictBusy) return;
+    dictBusy = true;
+    dictStatusMsg = "Connecting to GitHub releases for JMdict & KANJIDIC…";
+    try {
+      const list = await api.downloadRecommendedDictionaries();
+      dictionaries = await api.listDictionaries();
+      app.toast(`Installed ${list.length} Yomitan dictionaries!`);
+      dictStatusMsg = "Full JMdict + KANJIDIC ready for Memento hover lookup!";
+    } catch (e) {
+      app.toast(String(e), "error", 8000);
+      dictStatusMsg = `Error: ${e}`;
+    } finally {
+      dictBusy = false;
+    }
+  }
+
+  async function deleteDictionary(id: number, title: string) {
+    try {
+      await api.removeDictionary(id);
+      dictionaries = await api.listDictionaries();
+      app.toast(`Removed ${title}`);
+    } catch (e) {
+      app.toast(String(e), "error");
+    }
+  }
 
   const found = (k: PlayerKind) => detected.find((d) => d.kind === k) ?? null;
   /** What the backend will actually use when nothing was picked yet. */
   const effective = $derived<PlayerKind>(
-    app.playback.player || ((["mpv", "vlc", "mpc"] as PlayerKind[]).find((k) => found(k)) ?? "system"),
+    app.playback.player || "builtin",
   );
   const auto = $derived(!app.playback.player);
 
@@ -1140,18 +1254,58 @@
             </select>
           </div>
 
-          <div class="field">
-            <label for="pref-nyaa-url">Nyaa Indexer URL (or Mirror)</label>
-            <input
-              id="pref-nyaa-url"
-              class="input"
-              value={app.nyaaUrl}
-              placeholder="https://nyaa.si"
-              onchange={(e) => app.setNyaaUrl(e.currentTarget.value)}
-            />
+          <div class="field" id="set-torrent-extensions">
+            <label for="pref-ext-url">Torrent Extensions &amp; Indexer Repositories</label>
+            <div class="fanart-key-row">
+              <input
+                id="pref-ext-url"
+                class="input fanart-key-input"
+                placeholder="Paste extension manifest URL (Hayase index.json) or RSS / API URL…"
+                bind:value={extUrlInput}
+                onkeydown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void importExtension();
+                  }
+                }}
+              />
+              <button class="btn btn-primary btn-sm" disabled={extImporting || !extUrlInput.trim()} onclick={importExtension}>
+                {extImporting ? "Importing…" : "+ Add Extension"}
+              </button>
+            </div>
             <small class="faint">
-              Default is <code>https://nyaa.si</code> (searches both English-subbed &amp; Raw anime). If your ISP blocks Nyaa, enter a mirror such as <code>https://nyaa.land</code> or <code>https://nyaa.iss.one</code>.
+              Kura ships with zero built-in piracy domains so the app stays safe on GitHub. Paste a Hayase-compatible extension manifest URL (<code>index.json</code>), a Kura JSON manifest, or a direct RSS / SubsPlease JSON / SeaDex API URL.
             </small>
+
+            {#if torrentExtensions.length > 0}
+              <div class="rows" style="margin-top: 10px;">
+                {#each torrentExtensions as ext (ext.id)}
+                  <div class="row">
+                    <div class="row-text">
+                      <strong>{ext.name} <span class="badge">{ext.kind}</span></strong>
+                      <small><code>{ext.url}</code></small>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                      <button
+                        class="switch"
+                        class:on={ext.enabled}
+                        role="switch"
+                        aria-checked={ext.enabled}
+                        aria-label={`Toggle ${ext.name}`}
+                        onclick={() => void toggleExtension(ext)}
+                      ><span></span></button>
+                      <button
+                        class="btn btn-ghost btn-sm"
+                        onclick={() => void removeExtension(ext.id)}
+                        title="Remove extension"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
           </div>
         </div>
 
@@ -1197,7 +1351,7 @@
       </div>
       <div class="players" role="radiogroup" aria-label="Player">
         {#each PLAYERS as p (p.kind)}
-          {@const hit = p.kind === "system" ? true : !!found(p.kind)}
+          {@const hit = p.kind === "system" || p.kind === "builtin" ? true : !!found(p.kind)}
           <button
             class="player"
             class:on={effective === p.kind}
@@ -1208,10 +1362,12 @@
           >
             <span class="p-name">
               {p.name}
-              {#if effective === p.kind && auto}<span class="rec">Auto</span>{/if}
+              {#if effective === p.kind && auto}<span class="rec">Default</span>{/if}
             </span>
             <small>{p.blurb}</small>
-            {#if p.kind !== "system"}
+            {#if p.kind === "builtin"}
+              <span class="badge badge-ok">Built-In · Yomitan</span>
+            {:else if p.kind !== "system"}
               <span class="badge" class:badge-ok={hit}>{hit ? "Detected" : "Not found"}</span>
             {/if}
           </button>
@@ -1233,7 +1389,7 @@
         </div>
       {/if}
 
-      {#if effective !== "system"}
+      {#if effective !== "system" && effective !== "builtin"}
         <div class="field">
           <label for="player-path">Program location</label>
           <div class="path-row">
@@ -1425,6 +1581,68 @@
         <Icon name="languages" size={15} />
         <span>Active priority: <strong>{trackSummary}</strong></span>
       </div>
+    </div>
+
+    <h2 class="section-title" style="margin-top: 22px;">Japanese Dictionary (Memento / Yomitan Engine)</h2>
+    <div class="card playback" id="set-yomitan">
+      <div class="opt-head">
+        <h3>Pause-to-Hover Yomitan Dictionary</h3>
+        <p class="faint">
+          When watching in <strong>Kura Built-In (Memento)</strong> mode, pause the video and hover over any Japanese subtitle character to deinflect conjugated verbs/adjectives and view definitions, furigana, pitch accent, and Kanji breakdowns.
+        </p>
+      </div>
+
+      <div class="rebuild-box" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+        <button
+          class="btn btn-primary"
+          onclick={downloadRecommendedDicts}
+          disabled={dictBusy}
+          id="btn-download-yomitan"
+        >
+          {#if dictBusy}
+            <span class="spinner"></span>
+            <span>Working…</span>
+          {:else}
+            <Icon name="download" size={15} />
+            <span>1-Click Download Full JMdict + KANJIDIC</span>
+          {/if}
+        </button>
+
+        <button
+          class="btn"
+          onclick={importYomitanZip}
+          disabled={dictBusy}
+          id="btn-import-yomitan"
+        >
+          <Icon name="folder-open" size={15} />
+          <span>Import Yomitan .zip…</span>
+        </button>
+
+        {#if dictStatusMsg}
+          <span class="rebuild-note">{dictStatusMsg}</span>
+        {/if}
+      </div>
+
+      {#if dictionaries.length > 0}
+        <div class="rows" style="margin-top: 14px;">
+          {#each dictionaries as d (d.id)}
+            <div class="row">
+              <div class="row-text">
+                <strong>{d.title} <span class="badge badge-ok" style="margin-left: 6px;">v{d.revision}</span></strong>
+                <small>
+                  {d.termCount.toLocaleString()} terms · {d.kanjiCount.toLocaleString()} kanji · {d.metaCount.toLocaleString()} pitch/freq entries
+                </small>
+              </div>
+              <button
+                class="btn btn-ghost btn-sm btn-danger"
+                onclick={() => deleteDictionary(d.id, d.title)}
+              >
+                Remove
+              </button>
+            </div>
+          {/each}
+        </div>
+      {/if}
     </div>
   </section>
   {/if}

@@ -3,14 +3,14 @@
 <p align="center">
   <img src="assets/brand/logo.png" alt="Kura Logo" width="128" />
   <br>
-  <strong>A local-first, manga-styled desktop anime media library.</strong>
+  <strong>A local-first, manga-styled desktop anime library, streaming hub & Japanese immersion player.</strong>
   <br>
-  <em>Current Release: <code>v0.5</code> · Built with AI assistance</em>
+  <em>Current Release: <code>v0.6</code> · Built with AI assistance</em>
 </p>
 
 ---
 
-Point **Kura** at your local anime folders and it takes care of the rest: parses complex fansub release names, matches series to [AniList](https://anilist.co), pulls rich episode metadata and thumbnails via [ani.zip](https://api.ani.zip) (with [Jikan](https://jikan.moe) fallback), and organizes everything into an offline-ready, comic-inspired library interface.
+**Kura** combines a local-first anime library with a built-in **Memento-style video player**, **pause-to-hover Yomitan Japanese dictionary**, **modular bring-your-own torrent extensions**, and **two-way AniList sync**. Point Kura at your local folders or switch to **Streaming & Hybrid Mode** to browse the full AniList catalog, stream or download episodes with automatic **Jimaku.cc** Japanese subtitle fetching and live subtitle retiming, and look up any Japanese word on hover — all inside a comic-inspired desktop interface.
 
 ---
 
@@ -35,11 +35,19 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 
 ## ✨ Features
 
-### New in `v0.5`
-- **2-Mode Operating Architecture (`Offline Library Mode` vs. `Streaming & Hybrid Mode`)**: Switch anytime in **Settings → Playback** between classic offline folder management (**Mode 1**) and Hayase-style catalog discovery + torrent streaming (**Mode 2**), combining your local files, bookmarked stream shows, and AniList entries into a single unified library.
-- **Built-in Nyaa BitTorrent Sequential Streaming**: Click any episode to stream directly into **mpv** or **Memento** over Kura's built-in pure-Rust BitTorrent engine and local HTTP `206 Partial Content` range server. Prioritizes Matroska EBML headers and `Cues` seek indices first, supports custom Nyaa mirror URLs, lets you choose between **Stream Only (Temp Cache)**, **Stream & Save to Library**, or **Download to Library First**, and includes an optional **Seed while streaming/downloading** toggle (off by default).
+### New in `v0.6`
+- **Built-In Memento Video Player (`Kura Built-In (Memento)`)**: Watch episodes directly inside Kura without launching an external window. Includes a local HTTP byte-range media server with automatic live `mpv` H.264/AAC stream transcoding fallback for 10-bit HEVC/AC3, pure-Rust Matroska (`.mkv`) embedded subtitle & chapter extraction, AniSkip OP/ED skip, playback speed controls, and a live top-bar torrent HUD (`% downloaded`, `MB downloaded / total`, `↓ download speed`, `↑ upload speed`, and `connected peers`).
+- **Pause-to-Hover Yomitan Japanese Dictionary Engine**: Pause any video and hover over Japanese subtitle characters to instantly deinflect conjugated verbs and adjectives (`食べさせられた` → `食べる`) and view readings/furigana, pitch accent downsteps, frequency badges, definitions, audio pronunciation (`🔊`), and Kanji breakdowns (On/Kun readings, meanings, stroke count, JLPT/grade). Ships with a built-in starter dictionary plus a **1-Click Full JMdict + KANJIDIC Downloader** and custom Yomitan `.zip` importer in **Settings → Audio & Subtitles**.
+- **Modular Torrent Extensions (Zero Built-In Piracy Domains)**: Kura ships with **zero hardcoded piracy domains** so the repository stays 100% safe on GitHub. In **Settings → Playback**, paste any Hayase-compatible extension manifest (`index.json`), Kura JSON manifest, or custom RSS / SubsPlease JSON / SeaDex API URL to enable your own indexers.
+- **Sub-Second Concurrent Search, SeaDex Curated Scoring & Full BitTorrent Swarm Engine**: Queries all enabled extensions concurrently in a single wave with early straggler cancellation, highlights **★ SeaDex Best** and **SubsPlease** verified releases, and powers playback with Mainline DHT (`BEP 5`), Peer Exchange (`BEP 11` `ut_pex`), Tracker Scrape (`BEP 48`), WebSeeds (`BEP 19`), and sliding-window piece pipelining.
+- **Live Streaming Subtitle Auto-Sync (Intro Bumper & Commercial Shift Alignment)**: Automatically synchronizes external Jimaku Japanese subtitles against the video's embedded dialogue track even while a torrent is still sequentially streaming — accurately compensating for Viz Media, Crunchyroll, Netflix, and Aniplex intro bumpers before Episode dialogue begins.
+- **AniList Status Library Tabs**: Full library status tabs (**Watching, Planning, Completed, Paused, Dropped, All**) that import and organize your entire AniList collection alongside local and bookmarked shows.
+
+### Highlights from `v0.5`
+- **2-Mode Operating Architecture (`Offline Library Mode` vs. `Streaming & Hybrid Mode`)**: Switch anytime in **Settings → Playback** between classic offline folder management (**Mode 1**) and catalog discovery + sequential torrent streaming (**Mode 2**), combining your local files, bookmarked stream shows, and AniList entries into a single unified library.
+- **Built-in BitTorrent Sequential Streaming**: Click any episode to stream directly into **Kura Built-In (Memento)**, **mpv**, or **Memento** over Kura's pure-Rust BitTorrent engine and local HTTP `206 Partial Content` range server. Prioritizes Matroska EBML headers and `Cues` seek indices first, lets you choose between **Stream Only (Temp Cache)**, **Stream & Save to Library**, or **Download to Library First**, and includes an optional **Seed while streaming/downloading** toggle (off by default).
 - **Full AniList Catalog & Voice Actor (Seiyuu) Discovery (`/discover`)**: Browse the entire AniList catalog with infinite scroll, multi-filters (**Genre, Format, Status, Season, Year, Sort**), and a dedicated **Voice Actors & Staff** search tab to explore every anime a seiyuu or staff member has worked on.
-- **Jimaku.cc Japanese Subtitle Fetcher & Automatic Subtitle Retiming**: Download Japanese `.srt`/`.ass` subtitles (including automatic `.zip` season pack extraction) directly from Jimaku.cc and automatically synchronize their timing against your video's reference subtitle cues or `.mkv` tracks using Kura's Alass-style dynamic programming alignment engine — hot-loading straight into running `mpv` or `Memento` windows.
+- **Jimaku.cc Japanese Subtitle Fetcher & Automatic Subtitle Retiming**: Download Japanese `.srt`/`.ass` subtitles (including automatic `.zip` season pack extraction) directly from Jimaku.cc and automatically synchronize their timing against your video's reference subtitle cues or `.mkv` tracks using Kura's Alass-style dynamic programming alignment engine.
 - **Smart Subtitle Matcher & Characters / Voice Cast**: Automatically match, link (`--sub-file`), or rename mixed-format external subtitle files (including absolute episode numbering like `S02E25` → `S02E01`) with a live preview dialog, plus view full Character, Japanese Seiyuu, and Staff credits on every anime page.
 
 ### Highlights from `v0.4`
@@ -122,7 +130,8 @@ Individual episode thumbnails, Japanese and English titles, air dates, runtimes,
 - [x] **AniList Account Sync & Airing Calendar**: OAuth2 login, list import, safe two-way watch progress synchronization, offline scrobble queue, and weekly seasonal broadcast calendar.
 - [x] **Jimaku Subtitle Fetcher, Automatic Retiming & Smart Subtitle Matcher**: Fetch Japanese subtitles from Jimaku.cc, automatically synchronize subtitle timing, and match/rename mixed-format external subtitle files.
 - [x] **Rich Cast & Staff Metadata + Voice Actor Discovery**: Character voice actors (Japanese seiyuu with character portraits), directors, composers, and key studio staff on anime detail pages and in `/discover`.
-- [x] **2-Mode Architecture (Offline Library + Hayase-style Torrent Streaming)**: Built-in Nyaa BitTorrent sequential streaming into `mpv` & `Memento` with unified local + stream library and infinite-scroll catalog discovery.
+- [x] **2-Mode Architecture (Offline Library + Modular Torrent Extensions)**: Bring-your-own Hayase/RSS/API torrent extensions with pure-Rust sequential BitTorrent streaming (`DHT`, `PEX`, `WebSeeds`, `SeaDex` scoring), unified local + stream library, and infinite-scroll catalog discovery.
+- [x] **Built-In Memento Player & Pause-to-Hover Yomitan Dictionary**: In-app video player with interactive Japanese subtitles, deinflection engine, furigana, pitch accent, Kanji breakdowns, 1-click JMdict + KANJIDIC installer, and live streaming subtitle auto-sync.
 - [ ] **Watch-Time & Immersion Analytics**: Total watch hours, Japanese immersion tracking, and GitHub-style yearly activity heatmap.
 
 > For the detailed milestone roadmap and implementation checklists, see **[TODO.md](TODO.md)**.

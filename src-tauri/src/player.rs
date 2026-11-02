@@ -32,6 +32,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    Builtin,
     System,
     Mpv,
     Memento,
@@ -42,6 +43,7 @@ pub enum Kind {
 impl Kind {
     pub fn parse(s: &str) -> Kind {
         match s {
+            "builtin" => Kind::Builtin,
             "mpv" => Kind::Mpv,
             "memento" => Kind::Memento,
             "vlc" => Kind::Vlc,
@@ -51,6 +53,7 @@ impl Kind {
     }
     pub fn id(self) -> &'static str {
         match self {
+            Kind::Builtin => "builtin",
             Kind::System => "system",
             Kind::Mpv => "mpv",
             Kind::Memento => "memento",
@@ -74,7 +77,7 @@ fn exe_names(kind: Kind) -> &'static [&'static str] {
             Kind::Memento => &["memento.exe"],
             Kind::Vlc => &["vlc.exe"],
             Kind::Mpc => &["mpc-hc64.exe", "mpc-hc.exe", "mpc-be64.exe", "mpc-be.exe"],
-            Kind::System => &[],
+            Kind::Builtin | Kind::System => &[],
         }
     } else {
         match kind {
@@ -82,7 +85,7 @@ fn exe_names(kind: Kind) -> &'static [&'static str] {
             Kind::Memento => &["memento"],
             Kind::Vlc => &["vlc"],
             Kind::Mpc => &[],
-            Kind::System => &[],
+            Kind::Builtin | Kind::System => &[],
         }
     }
 }
@@ -121,7 +124,7 @@ fn known_locations(kind: Kind) -> Vec<PathBuf> {
             Kind::Memento => &["Memento", ""],
             Kind::Vlc => &["VideoLAN\\VLC", ""],
             Kind::Mpc => &["MPC-HC", "MPC-HC x64", "MPC-BE x64", "MPC-BE", "K-Lite Codec Pack\\MPC-HC64", ""],
-            Kind::System => &[],
+            Kind::Builtin | Kind::System => &[],
         };
         for r in &roots {
             for s in sub {
@@ -159,7 +162,7 @@ fn known_locations(kind: Kind) -> Vec<PathBuf> {
                     Kind::Vlc => name.contains("vlc"),
                     Kind::Mpc => name.contains("mpc-"),
                     Kind::Memento => name.contains("memento"),
-                    Kind::System => false,
+                    Kind::Builtin | Kind::System => false,
                 };
                 if !wanted {
                     continue;
@@ -433,7 +436,7 @@ pub fn detect(kind: Kind) -> Option<PathBuf> {
             Kind::Vlc => "vlc",
             Kind::Mpc => "mpc",
             Kind::Memento => "memento",
-            Kind::System => return None,
+            Kind::Builtin | Kind::System => return None,
         };
         if let Some(p) = win::uninstall_entries(hint, exes) {
             return Some(p);
@@ -1071,10 +1074,14 @@ pub struct Prefs {
 
 pub fn prefs(conn: &Connection) -> Prefs {
     let get = |k: &str| db::get_setting(conn, &format!("pref.{k}")).ok().flatten();
+    if get("builtin_player_migrated_v1").as_deref() != Some("1") {
+        let _ = db::set_setting(conn, "pref.player", "builtin");
+        let _ = db::set_setting(conn, "pref.builtin_player_migrated_v1", "1");
+    }
     Prefs {
         kind: match get("player").filter(|s| !s.is_empty()) {
             Some(s) => Kind::parse(&s),
-            None => [Kind::Mpv, Kind::Vlc, Kind::Mpc].into_iter().find(|k| detect(*k).is_some()).unwrap_or(Kind::System),
+            None => Kind::Builtin,
         },
         path: get("player_path").filter(|s| !s.trim().is_empty()),
         threshold: get("watched_threshold").and_then(|s| s.parse::<f64>().ok()).map(|v| (v / 100.0).clamp(0.5, 1.0)).unwrap_or(0.9),
@@ -1771,6 +1778,9 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         let linked_subs = crate::subtitles::episode_subtitle_paths(&conn, ep.anilist_id, &ep.ep_key);
         (p, start, track_prefs, linked_subs)
     };
+    if p.kind == Kind::Builtin {
+        return crate::embedded_player::start(app, st, ep);
+    }
     // Supersede any previous tracking session.
     let session = st.play_session.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -1838,6 +1848,15 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         Kind::Mpv | Kind::Memento => {
             let addr = ipc_address(&tag);
             cmd.arg(format!("--input-ipc-server={addr}")).arg("--force-window=yes");
+            if ep.path.starts_with("http://") || ep.path.starts_with("https://") {
+                cmd.args([
+                    "--cache=yes",
+                    "--demuxer-max-bytes=150MiB",
+                    "--demuxer-max-back-bytes=50MiB",
+                    "--demuxer-readahead-secs=30",
+                    "--force-seekable=yes",
+                ]);
+            }
             if p.autoplay {
                 cmd.arg("--keep-open=yes"); // stay open at the end so we can load the next episode
             }
@@ -1925,7 +1944,7 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             }
             Pending::Mpc { base: format!("http://127.0.0.1:{}", p.mpc_port), exe: exe.clone() }
         }
-        Kind::System => unreachable!(),
+        Kind::Builtin | Kind::System => unreachable!(),
     };
     // The player's own logging (e.g. VLC's "direct3d11 vout display error") is not ours to show.
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
@@ -2166,6 +2185,7 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
 
 /// Hot-load a newly fetched or retimed subtitle file into a running mpv window over JSON IPC.
 pub async fn try_hotload_subtitle_in_mpv(st: &AppState, anilist_id: i64, ep_key: &str, sub_path: &str) -> bool {
+    let builtin_loaded = crate::embedded_player::reload_cues_if_active(anilist_id, ep_key, sub_path);
     let addr = {
         let g = st.active_mpv_ipc.lock().unwrap_or_else(|e| e.into_inner());
         match g.as_ref() {
@@ -2173,8 +2193,8 @@ pub async fn try_hotload_subtitle_in_mpv(st: &AppState, anilist_id: i64, ep_key:
             _ => None,
         }
     };
-    let Some(addr) = addr else { return false };
-    let Ok(mut mpv) = Mpv::connect(&addr).await else { return false };
+    let Some(addr) = addr else { return builtin_loaded };
+    let Ok(mut mpv) = Mpv::connect(&addr).await else { return builtin_loaded };
     let res = mpv.call(serde_json::json!(["sub-add", sub_path, "select"])).await;
     let fname = std::path::Path::new(sub_path)
         .file_name()
@@ -2183,7 +2203,7 @@ pub async fn try_hotload_subtitle_in_mpv(st: &AppState, anilist_id: i64, ep_key:
     let _ = mpv
         .call(serde_json::json!(["show-text", format!("Kura · Loaded subtitle: {fname}"), 3500]))
         .await;
-    res.is_some()
+    res.is_some() || builtin_loaded
 }
 
 #[cfg(test)]

@@ -1,7 +1,9 @@
 import {
   api,
   events,
-  type AnilistAccount, type Library,
+  type AnilistAccount,
+  type BuiltinPlayerState,
+  type Library,
   type MediaCard,
   type PlaybackEvent,
   type PlayerKind,
@@ -12,7 +14,7 @@ import {
 import { updater } from "./updater.svelte";
 
 export interface PlaybackPrefs {
-  /** Empty = not chosen yet (the backend then uses the first detected player). */
+  /** Empty = not chosen yet (the backend then uses the built-in player). */
   player: PlayerKind | "";
   playerPath: string;
   /** Percent of the episode after which it counts as watched (50–100). */
@@ -86,8 +88,8 @@ class AppStore {
   /** Preferred resolution for auto-pick ("1080p", "720p", "2160p", or "ask"). */
   torrentQuality = $state<"1080p" | "720p" | "2160p" | "ask">("1080p");
   torrentAutoSubs = $state(true);
-  torrentSeeding = $state(false);
-  nyaaUrl = $state("https://nyaa.si");
+  torrentSeeding = $state(true);
+  nyaaUrl = $state("");
   torrentSessions = $state<TorrentSessionStatus[]>([]);
   discord = $state<DiscordPrefs>({
     enabled: true,
@@ -98,6 +100,8 @@ class AppStore {
   launching = $state<LaunchingEpisode | null>(null);
   /** Latest playback event while a player is being tracked. */
   nowPlaying = $state<PlaybackEvent | null>(null);
+  /** Built-in Memento player state when active. */
+  builtinPlayer = $state<BuiltinPlayerState | null>(null);
   toasts = $state<Toast[]>([]);
 
   #refreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -156,6 +160,21 @@ class AppStore {
       this.scheduleRefresh();
     });
     api.getAnilistAccount().then((a) => (this.anilist = a)).catch(() => {});
+    await events.onBuiltinPlayerState((s) => {
+      this.builtinPlayer = s;
+      if (s.active) {
+        this.launching = null;
+        if (this.#launchTimer) clearTimeout(this.#launchTimer);
+        if (typeof document !== "undefined") {
+          document.documentElement.classList.add("builtin-player-active");
+        }
+      } else {
+        if (typeof document !== "undefined") {
+          document.documentElement.classList.remove("builtin-player-active");
+        }
+        this.scheduleRefresh();
+      }
+    });
     await events.onPlayback((p) => {
       if (p.state === "tracking") {
         this.nowPlaying = p;
@@ -213,8 +232,8 @@ class AppStore {
           ? prefs.torrent_quality
           : "1080p";
       this.torrentAutoSubs = prefs.torrent_auto_subs !== "0";
-      this.torrentSeeding = prefs.torrent_seeding === "1";
-      this.nyaaUrl = prefs.nyaa_url || "https://nyaa.si";
+      this.torrentSeeding = prefs.torrent_seeding !== "0";
+      this.nyaaUrl = prefs.nyaa_url ?? "";
       const num = (v: string | undefined, d: number) => (v !== undefined && !isNaN(Number(v)) ? Number(v) : d);
       this.playback = {
         player: (prefs.player as PlayerKind) ?? "",
@@ -354,7 +373,7 @@ class AppStore {
   }
 
   async setNyaaUrl(url: string) {
-    const clean = url.trim().replace(/\/+$/, "") || "https://nyaa.si";
+    const clean = url.trim().replace(/\/+$/, "");
     this.nyaaUrl = clean;
     await api.setPref("nyaa_url", clean);
   }
@@ -419,6 +438,15 @@ class AppStore {
   }
 
   isPlaying(anilistId?: number, epKey?: string): boolean {
+    if (this.builtinPlayer?.active) {
+      if (anilistId !== undefined && epKey !== undefined) {
+        return this.builtinPlayer.anilistId === anilistId && this.builtinPlayer.epKey === epKey;
+      }
+      if (anilistId !== undefined) {
+        return this.builtinPlayer.anilistId === anilistId;
+      }
+      return true;
+    }
     if (!this.nowPlaying) return false;
     if (anilistId !== undefined && epKey !== undefined) {
       return this.nowPlaying.anilistId === anilistId && this.nowPlaying.epKey === epKey;

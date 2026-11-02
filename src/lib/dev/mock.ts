@@ -161,6 +161,7 @@ function card(m: AniMedia, i: number): MediaCard {
     franchiseId: (media && franchises(media).get(m.id)?.root) ?? m.id,
     franchiseIndex: (media && franchises(media).get(m.id)?.index) ?? 0,
     franchiseSize: (media && franchises(media).get(m.id)?.size) ?? 1,
+    anilistStatus: null,
   };
 }
 

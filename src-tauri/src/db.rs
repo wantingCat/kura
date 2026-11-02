@@ -258,7 +258,10 @@ pub fn open(path: &Path) -> Result<Connection> {
          PRAGMA busy_timeout = 5000;",
     )?;
     migrate(&conn)?;
-    let _ = conn.execute("UPDATE media SET logo_url = NULL, logo_path = NULL WHERE logo_url LIKE '%/icons/%'", []);
+    let _ = conn.execute(
+        "UPDATE media SET logo_url = NULL, logo_path = NULL WHERE logo_url LIKE '%/icons/%'",
+        [],
+    );
 
     // Check if user data needs to be restored from persistent backup
     let data_dir = path.parent().unwrap_or(Path::new("."));
@@ -293,7 +296,7 @@ pub fn restore_user_data_if_needed(conn: &Connection, data_dir: &Path) -> Result
 pub fn seed_default_prefs_if_missing(conn: &Connection) -> Result<()> {
     let defaults = [
         ("pref.theme", "comic"),
-        ("pref.player", "mpv"),
+        ("pref.player", "builtin"),
         ("pref.audio_lang", "jpn"),
         ("pref.sub_lang", "jpn"),
         ("pref.sub_fallback", "eng"),
@@ -316,7 +319,9 @@ pub fn seed_default_prefs_if_missing(conn: &Connection) -> Result<()> {
         ("pref.torrent_quality", "1080p"),
         ("pref.torrent_auto_subs", "1"),
         ("pref.torrent_seeding", "0"),
-        ("pref.nyaa_url", "https://nyaa.si"),
+        ("pref.nyaa_url", ""),
+        ("pref.torrent_extensions", "[]"),
+        ("pref.builtin_player_migrated_v1", "0"),
     ];
 
     for (k, v) in defaults {
@@ -331,29 +336,43 @@ pub fn seed_default_prefs_if_missing(conn: &Connection) -> Result<()> {
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version < 1 {
-        conn.execute_batch(&format!("BEGIN; {SCHEMA_V1} PRAGMA user_version = 1; COMMIT;"))?;
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA_V1} PRAGMA user_version = 1; COMMIT;"
+        ))?;
     }
     if version < 2 {
-        conn.execute_batch(&format!("BEGIN; {SCHEMA_V2} PRAGMA user_version = 2; COMMIT;"))?;
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA_V2} PRAGMA user_version = 2; COMMIT;"
+        ))?;
     }
     if version < 3 {
-        conn.execute_batch(&format!("BEGIN; {SCHEMA_V3} PRAGMA user_version = 3; COMMIT;"))?;
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA_V3} PRAGMA user_version = 3; COMMIT;"
+        ))?;
     }
     if version < 4 {
-        conn.execute_batch(&format!("BEGIN; {SCHEMA_V4} PRAGMA user_version = 4; COMMIT;"))?;
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA_V4} PRAGMA user_version = 4; COMMIT;"
+        ))?;
     }
     if version < 6 {
-        conn.execute_batch(&format!("BEGIN; {SCHEMA_V5} PRAGMA user_version = 6; COMMIT;"))?;
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA_V5} PRAGMA user_version = 6; COMMIT;"
+        ))?;
     } else {
         conn.execute_batch(SCHEMA_V5)?;
     }
     if version < 7 {
-        conn.execute_batch(&format!("BEGIN; {SCHEMA_V6} PRAGMA user_version = 7; COMMIT;"))?;
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA_V6} PRAGMA user_version = 7; COMMIT;"
+        ))?;
     } else {
         conn.execute_batch(SCHEMA_V6)?;
     }
     if version < 8 {
-        conn.execute_batch(&format!("BEGIN; {SCHEMA_V7} PRAGMA user_version = 8; COMMIT;"))?;
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA_V7} PRAGMA user_version = 8; COMMIT;"
+        ))?;
     } else {
         conn.execute_batch(SCHEMA_V7)?;
     }
@@ -371,7 +390,9 @@ pub fn now() -> i64 {
 
 pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
     Ok(conn
-        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))
+        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+            r.get(0)
+        })
         .optional()?)
 }
 
@@ -455,12 +476,23 @@ pub fn relations(conn: &Connection, id: i64) -> Result<Vec<RelationLite>> {
 }
 
 /// (ep_key, tvdb_season, tvdb_episode, absolute_number, is_special)
-pub fn episode_index(conn: &Connection, id: i64) -> Result<Vec<(String, Option<i64>, Option<i64>, Option<i64>, bool)>> {
+pub fn episode_index(
+    conn: &Connection,
+    id: i64,
+) -> Result<Vec<(String, Option<i64>, Option<i64>, Option<i64>, bool)>> {
     let mut stmt = conn.prepare(
         "SELECT ep_key, tvdb_season, tvdb_episode, absolute_number, is_special FROM episodes WHERE anilist_id = ?1",
     )?;
     let rows = stmt
-        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)? != 0)))?
+        .query_map([id], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get::<_, i64>(4)? != 0,
+            ))
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -489,7 +521,11 @@ pub fn get_media_track_pref(conn: &Connection, anilist_id: i64) -> Result<Option
     .map_err(Into::into)
 }
 
-pub fn set_media_track_pref(conn: &Connection, anilist_id: i64, pref: Option<MediaTrackPref>) -> Result<()> {
+pub fn set_media_track_pref(
+    conn: &Connection,
+    anilist_id: i64,
+    pref: Option<MediaTrackPref>,
+) -> Result<()> {
     match pref {
         Some(p) => {
             conn.execute(
@@ -504,7 +540,10 @@ pub fn set_media_track_pref(conn: &Connection, anilist_id: i64, pref: Option<Med
             )?;
         }
         None => {
-            conn.execute("DELETE FROM media_track_prefs WHERE anilist_id = ?1", [anilist_id])?;
+            conn.execute(
+                "DELETE FROM media_track_prefs WHERE anilist_id = ?1",
+                [anilist_id],
+            )?;
         }
     }
     Ok(())
@@ -526,12 +565,24 @@ mod tests {
         seed_default_prefs_if_missing(&conn).unwrap();
 
         // Custom prefs must be preserved
-        assert_eq!(get_setting(&conn, "pref.theme").unwrap(), Some("manga".into()));
-        assert_eq!(get_setting(&conn, "pref.watched_threshold").unwrap(), Some("85".into()));
+        assert_eq!(
+            get_setting(&conn, "pref.theme").unwrap(),
+            Some("manga".into())
+        );
+        assert_eq!(
+            get_setting(&conn, "pref.watched_threshold").unwrap(),
+            Some("85".into())
+        );
 
         // Default prefs must be populated
-        assert_eq!(get_setting(&conn, "pref.player").unwrap(), Some("mpv".into()));
-        assert_eq!(get_setting(&conn, "pref.audio_lang").unwrap(), Some("jpn".into()));
+        assert_eq!(
+            get_setting(&conn, "pref.player").unwrap(),
+            Some("builtin".into())
+        );
+        assert_eq!(
+            get_setting(&conn, "pref.audio_lang").unwrap(),
+            Some("jpn".into())
+        );
     }
 
     #[test]
@@ -542,10 +593,15 @@ mod tests {
         // 1. Initial db with user libraries & prefs
         let conn1 = Connection::open_in_memory().unwrap();
         migrate(&conn1).unwrap();
-        set_setting(&conn1, "pref.player", "mpv").unwrap();
+        set_setting(&conn1, "pref.player", "builtin").unwrap();
         set_setting(&conn1, "pref.theme", "manga").unwrap();
         conn1.execute("INSERT INTO libraries (id, name, kind, created_at) VALUES (1, 'Anime', 'anime', ?1)", [now()]).unwrap();
-        conn1.execute("INSERT INTO library_folders (library_id, path) VALUES (1, 'C:\\AnimeFolder')", []).unwrap();
+        conn1
+            .execute(
+                "INSERT INTO library_folders (library_id, path) VALUES (1, 'C:\\AnimeFolder')",
+                [],
+            )
+            .unwrap();
 
         // Trigger backup
         backup_user_data(&conn1, &temp_dir);
@@ -560,13 +616,27 @@ mod tests {
         let restored = restore_user_data_if_needed(&conn2, &temp_dir).unwrap();
         assert!(restored, "Should restore from backup");
 
-        assert_eq!(get_setting(&conn2, "pref.player").unwrap(), Some("mpv".into()));
-        assert_eq!(get_setting(&conn2, "pref.theme").unwrap(), Some("manga".into()));
+        assert_eq!(
+            get_setting(&conn2, "pref.player").unwrap(),
+            Some("builtin".into())
+        );
+        assert_eq!(
+            get_setting(&conn2, "pref.theme").unwrap(),
+            Some("manga".into())
+        );
 
-        let lib_name: String = conn2.query_row("SELECT name FROM libraries WHERE id = 1", [], |r| r.get(0)).unwrap();
+        let lib_name: String = conn2
+            .query_row("SELECT name FROM libraries WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(lib_name, "Anime");
 
-        let folder_path: String = conn2.query_row("SELECT path FROM library_folders WHERE library_id = 1", [], |r| r.get(0)).unwrap();
+        let folder_path: String = conn2
+            .query_row(
+                "SELECT path FROM library_folders WHERE library_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(folder_path, "C:\\AnimeFolder");
 
         let _ = std::fs::remove_dir_all(&temp_dir);

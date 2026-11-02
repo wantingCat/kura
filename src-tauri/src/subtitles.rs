@@ -1443,9 +1443,7 @@ pub fn extract_mkv_subtitle_spans(mkv_path: &Path) -> Result<(Vec<Span>, String)
                                     }
                                     // BlockDuration (0x9B)
                                     0x9B if bsz <= 8 => {
-                                        if sub_tracks.iter().any(|(n, _)| *n == blk_track) {
-                                            blk_dur_ticks = read_ebml_uint(&mut file, bsz as usize).ok();
-                                        }
+                                        blk_dur_ticks = read_ebml_uint(&mut file, bsz as usize).ok();
                                     }
                                     _ => {}
                                 }
@@ -1485,7 +1483,7 @@ pub fn extract_mkv_subtitle_spans(mkv_path: &Path) -> Result<(Vec<Span>, String)
         if let Some(mut sp) = spans_by_track.remove(&tnum) {
             sp.sort_by_key(|s| s.start_ms);
             sp.dedup_by(|a, b| (a.start_ms - b.start_ms).abs() < 40);
-            if sp.len() >= 15 {
+            if sp.len() >= 4 {
                 let is_better = match &best_track {
                     None => true,
                     Some((_, _, prev)) => sp.len() > prev.len(),
@@ -1943,7 +1941,8 @@ pub async fn jimaku_download_and_process(
         .optional()?
         .map(PathBuf::from)
         .filter(|p| p.is_file())
-    };
+    }
+    .or_else(|| crate::torrent::active_save_path_for_episode(anilist_id, ep_key));
 
     let cache_dir = st.data_dir.join("subtitles").join(anilist_id.to_string());
     std::fs::create_dir_all(&cache_dir)?;
@@ -1994,12 +1993,59 @@ pub async fn jimaku_download_and_process(
                 linked_count += 1;
             }
         } else {
-            // Link the first extracted file to the current episode
-            let first = &extracted[0];
-            let p_str = first.to_string_lossy().to_string();
-            let _ = upsert_linked_subtitle(&st.db(), anilist_id, ep_key, &p_str, "ja", false, "jimaku", false, None);
-            saved_paths.push(p_str);
-            linked_count += 1;
+            // Streaming mode (no `local_files` rows yet): match each extracted file by episode number!
+            let mut matched_current = false;
+            for ext_path in &extracted {
+                let fname = ext_path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let target_ep_key = parse_subtitle_filename(&fname)
+                    .and_then(|p| p.episode)
+                    .map(|ep| ep.to_string())
+                    .or_else(|| if extracted.len() == 1 { Some(ep_key.to_string()) } else { None });
+                if let Some(k) = target_ep_key {
+                    let mut final_path = ext_path.clone();
+                    let mut was_retimed = false;
+                    let mut offset_ms = None;
+                    if auto_retime && k == ep_key {
+                        matched_current = true;
+                        if let Some(ref vpath) = video_path {
+                            let retimed_dest = cache_dir.join(format!("ep{k}_retimed_{fname}"));
+                            if let Ok(rt) = retime_subtitle_file(&final_path, vpath, &retimed_dest) {
+                                final_path = PathBuf::from(&rt.output_path);
+                                was_retimed = true;
+                                offset_ms = Some(rt.offset_ms);
+                                retime_report = Some(rt);
+                            }
+                        }
+                    } else if k == ep_key {
+                        matched_current = true;
+                    }
+                    let cc = detect_cc_tag(&fname);
+                    let p_str = final_path.to_string_lossy().to_string();
+                    let _ = upsert_linked_subtitle(
+                        &st.db(),
+                        anilist_id,
+                        &k,
+                        &p_str,
+                        "ja",
+                        cc,
+                        "jimaku",
+                        was_retimed,
+                        offset_ms,
+                    );
+                    saved_paths.push(p_str);
+                    linked_count += 1;
+                }
+            }
+            if !matched_current {
+                let first = &extracted[0];
+                let p_str = first.to_string_lossy().to_string();
+                let _ = upsert_linked_subtitle(&st.db(), anilist_id, ep_key, &p_str, "ja", false, "jimaku", false, None);
+                saved_paths.push(p_str);
+                linked_count += 1;
+            }
         }
     } else {
         let ext = Path::new(file_name)
@@ -2074,6 +2120,781 @@ pub async fn jimaku_download_and_process(
         retime_report,
         loaded_into_mpv,
     })
+}
+
+// ---------------------------------------------------------------------------
+// 4. Subtitle Cue Text Parser for Built-in Memento Player
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleCue {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text: String,
+}
+
+fn strip_sub_markup(raw: &str, is_ass: bool) -> String {
+    let mut s = raw.replace("\\N", "\n").replace("\\n", "\n").replace("\\h", " ");
+    // Strip { ... } override tags
+    let mut out = String::with_capacity(s.len());
+    let mut in_brace = false;
+    let mut in_angle = false;
+    for ch in s.chars() {
+        if ch == '{' {
+            in_brace = true;
+            continue;
+        }
+        if ch == '}' && in_brace {
+            in_brace = false;
+            continue;
+        }
+        if !is_ass && ch == '<' {
+            in_angle = true;
+            continue;
+        }
+        if !is_ass && ch == '>' && in_angle {
+            in_angle = false;
+            continue;
+        }
+        if !in_brace && !in_angle {
+            out.push(ch);
+        }
+    }
+    s = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    s
+}
+
+pub fn parse_subtitle_cues(content: &str, ext: &str) -> Vec<SubtitleCue> {
+    let mut cues = Vec::new();
+    let is_ass = matches!(ext.to_ascii_lowercase().as_str(), "ass" | "ssa");
+
+    if is_ass {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("Dialogue:") {
+                let fields: Vec<&str> = rest.splitn(10, ',').collect();
+                if fields.len() >= 10 {
+                    let raw_text = fields[9].trim();
+                    if raw_text.is_empty() || raw_text.contains("\\p1") {
+                        continue;
+                    }
+                    if let (Some(s), Some(e)) = (parse_ass_time(fields[1]), parse_ass_time(fields[2])) {
+                        if e > s {
+                            let clean = strip_sub_markup(raw_text, true);
+                            if !clean.is_empty() {
+                                cues.push(SubtitleCue {
+                                    start_ms: s,
+                                    end_ms: e,
+                                    text: clean,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        let mut lines = content.lines().peekable();
+        while let Some(line) = lines.next() {
+            if let Some((left, right)) = line.split_once("-->") {
+                let right_time = right.split_whitespace().next().unwrap_or(right);
+                if let (Some(s), Some(e)) = (parse_srt_vtt_time(left), parse_srt_vtt_time(right_time)) {
+                    let mut text_lines = Vec::new();
+                    while let Some(&next_line) = lines.peek() {
+                        if next_line.trim().is_empty() || next_line.contains("-->") {
+                            break;
+                        }
+                        text_lines.push(lines.next().unwrap_or(""));
+                    }
+                    let raw = text_lines.join("\n");
+                    let clean = strip_sub_markup(&raw, false);
+                    if e > s && !clean.is_empty() {
+                        cues.push(SubtitleCue {
+                            start_ms: s,
+                            end_ms: e,
+                            text: clean,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    cues.sort_by_key(|c| c.start_ms);
+    cues
+}
+
+pub fn parse_subtitle_file_cues(path: &Path) -> Vec<SubtitleCue> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("srt")
+        .to_ascii_lowercase();
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let content = String::from_utf8_lossy(&bytes);
+    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
+    parse_subtitle_cues(content, &ext)
+}
+
+/// Load external subtitle cues for an episode (either from linked subtitles in DB or sibling `.srt`/`.ass` files).
+pub fn load_cues_for_episode(conn: &Connection, anilist_id: i64, ep_key: &str, video_path: &str) -> (Option<String>, Vec<SubtitleCue>) {
+    let mut candidate_paths = episode_subtitle_paths(conn, anilist_id, ep_key);
+    let vpath = Path::new(video_path);
+    if let (Some(parent), Some(stem)) = (vpath.parent(), vpath.file_stem().and_then(|s| s.to_str())) {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if !p.is_file() {
+                    continue;
+                }
+                let Some(ext) = p.extension().and_then(|e| e.to_str()) else { continue };
+                if !SUB_EXTENSIONS.iter().any(|s| s.eq_ignore_ascii_case(ext)) {
+                    continue;
+                }
+                let Some(fname) = p.file_name().and_then(|s| s.to_str()) else { continue };
+                if fname.starts_with(stem) {
+                    let p_str = p.to_string_lossy().to_string();
+                    if !candidate_paths.contains(&p_str) {
+                        candidate_paths.push(p_str);
+                    }
+                }
+            }
+        }
+    }
+
+    for sub_path in candidate_paths {
+        let p = Path::new(&sub_path);
+        if p.is_file() {
+            let cues = parse_subtitle_file_cues(p);
+            if !cues.is_empty() {
+                return (Some(sub_path), cues);
+            }
+        }
+    }
+    (None, Vec::new())
+}
+
+#[derive(Debug, Clone)]
+pub struct MkvAudioTrack {
+    pub track_num: i64,
+    pub lang: String,
+    pub title: Option<String>,
+    pub codec: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MkvSubTrack {
+    pub track_num: i64,
+    pub lang: String,
+    pub title: Option<String>,
+    pub codec: String,
+    pub cues: Vec<SubtitleCue>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MkvChapter {
+    pub title: String,
+    pub time_sec: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MkvEmbeddedData {
+    pub duration_sec: Option<f64>,
+    pub audio_tracks: Vec<MkvAudioTrack>,
+    pub sub_tracks: Vec<MkvSubTrack>,
+    pub chapters: Vec<MkvChapter>,
+    pub has_declared_sub_tracks: bool,
+    pub max_cluster_time_ms: i64,
+}
+
+fn decode_mkv_block_bytes(raw_bytes: &[u8]) -> Option<String> {
+    if raw_bytes.is_empty() {
+        return None;
+    }
+
+    // `mkvmerge` zlib-compresses subtitle blocks by default (`ContentCompAlgo = 0`, RFC 1950 header `0x78 ...`).
+    // Check RFC 1950 zlib header first (`(cmf & 0x0F) == 8 && (cmf >> 4) <= 7 && (u16 % 31 == 0)`).
+    if raw_bytes.len() >= 2 {
+        let cmf = raw_bytes[0];
+        let flg = raw_bytes[1];
+        let is_zlib_header = (cmf & 0x0F) == 8
+            && (cmf >> 4) <= 7
+            && (u16::from_be_bytes([cmf, flg]) % 31 == 0);
+        if is_zlib_header {
+            let mut decoded = Vec::new();
+            if flate2::read::ZlibDecoder::new(raw_bytes)
+                .read_to_end(&mut decoded)
+                .is_ok()
+                && !decoded.is_empty()
+            {
+                if let Ok(s) = String::from_utf8(decoded) {
+                    return Some(s);
+                }
+            }
+        }
+    }
+
+    // If raw_bytes is already valid UTF-8 without binary control characters, use it directly
+    if let Ok(s) = std::str::from_utf8(raw_bytes) {
+        let has_binary_ctrl = s
+            .bytes()
+            .any(|b| b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t' && b != 0);
+        if !has_binary_ctrl {
+            return Some(s.to_string());
+        }
+    }
+
+    // Otherwise try ZlibDecoder and raw DeflateDecoder as fallback
+    let mut decoded = Vec::new();
+    if flate2::read::ZlibDecoder::new(raw_bytes)
+        .read_to_end(&mut decoded)
+        .is_ok()
+        && !decoded.is_empty()
+    {
+        return Some(String::from_utf8_lossy(&decoded).into_owned());
+    }
+    decoded.clear();
+    if flate2::read::DeflateDecoder::new(raw_bytes)
+        .read_to_end(&mut decoded)
+        .is_ok()
+        && !decoded.is_empty()
+    {
+        return Some(String::from_utf8_lossy(&decoded).into_owned());
+    }
+
+    None
+}
+
+fn clean_mkv_block_text(raw_bytes: &[u8], is_ass: bool) -> String {
+    let Some(decoded) = decode_mkv_block_bytes(raw_bytes) else {
+        return String::new();
+    };
+    let raw = decoded.trim_matches('\0').trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    if is_ass {
+        // Matroska S_TEXT/ASS block format: ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+        let parts: Vec<&str> = raw.splitn(9, ',').collect();
+        if parts.len() == 9 {
+            let style = parts[2].trim().to_ascii_lowercase();
+            let text_part = parts[8].trim();
+            if text_part.contains("\\p1") || style.contains("sign") || style.contains("logo") {
+                return String::new();
+            }
+            return strip_sub_markup(text_part, true);
+        }
+        strip_sub_markup(raw, true)
+    } else {
+        strip_sub_markup(raw, false)
+    }
+}
+
+/// Extract embedded subtitle tracks (with full dialogue text cues) and chapters from a `.mkv` file in pure Rust.
+pub fn extract_mkv_embedded_data(mkv_path: &Path) -> Result<MkvEmbeddedData> {
+    let mut file = File::open(mkv_path)?;
+    let file_len = file.metadata()?.len();
+
+    let (ebml_id, _) = read_ebml_vint(&mut file, true)?;
+    if ebml_id != 0x1A45DFA3 {
+        bail!("Not an EBML/Matroska file");
+    }
+    let (ebml_size, _) = read_ebml_vint(&mut file, false)?;
+    file.seek(SeekFrom::Current(ebml_size as i64))?;
+
+    let (seg_id, _) = read_ebml_vint(&mut file, true)?;
+    if seg_id != 0x18538067 {
+        bail!("Matroska Segment not found");
+    }
+    let (_seg_size, _) = read_ebml_vint(&mut file, false)?;
+
+    let mut timestamp_scale: u64 = 1_000_000;
+    let mut raw_duration_ticks: Option<f64> = None;
+    let mut audio_tracks: Vec<MkvAudioTrack> = Vec::new();
+    // (track_num, lang, title, codec)
+    let mut sub_meta: Vec<(u64, String, Option<String>, String)> = Vec::new();
+    let mut cues_by_track: HashMap<u64, Vec<SubtitleCue>> = HashMap::new();
+    let mut chapters: Vec<MkvChapter> = Vec::new();
+    let mut max_cluster_time_ms: i64 = 0;
+
+    while file.stream_position()? < file_len {
+        let Ok((id, _)) = read_ebml_vint(&mut file, true) else { break };
+        let Ok((size, _)) = read_ebml_vint(&mut file, false) else { break };
+        let data_start = file.stream_position()?;
+        let is_unknown_size = size == 0x00FF_FFFF_FFFF_FFFF || size == 0x7FFF_FFFF_FFFF_FFFF;
+        let elem_end = if is_unknown_size { file_len } else { (data_start + size).min(file_len) };
+
+        match id {
+            // Segment Info (0x1549A966)
+            0x1549A966 => {
+                while file.stream_position()? < elem_end {
+                    let Ok((sub_id, _)) = read_ebml_vint(&mut file, true) else { break };
+                    let Ok((sub_sz, _)) = read_ebml_vint(&mut file, false) else { break };
+                    let sub_start = file.stream_position()?;
+                    if sub_id == 0x2AD7B1 && sub_sz <= 8 {
+                        if let Ok(scale) = read_ebml_uint(&mut file, sub_sz as usize) {
+                            if scale > 0 {
+                                timestamp_scale = scale;
+                            }
+                        }
+                    } else if sub_id == 0x4489 && sub_sz == 4 {
+                        let mut b = [0u8; 4];
+                        if file.read_exact(&mut b).is_ok() {
+                            raw_duration_ticks = Some(f32::from_be_bytes(b) as f64);
+                        }
+                    } else if sub_id == 0x4489 && sub_sz == 8 {
+                        let mut b = [0u8; 8];
+                        if file.read_exact(&mut b).is_ok() {
+                            raw_duration_ticks = Some(f64::from_be_bytes(b));
+                        }
+                    }
+                    let _ = file.seek(SeekFrom::Start(sub_start + sub_sz));
+                }
+                let _ = file.seek(SeekFrom::Start(elem_end));
+            }
+            // Tracks (0x1654AE6B)
+            0x1654AE6B => {
+                while file.stream_position()? < elem_end {
+                    let Ok((entry_id, _)) = read_ebml_vint(&mut file, true) else { break };
+                    let Ok((entry_sz, _)) = read_ebml_vint(&mut file, false) else { break };
+                    let entry_start = file.stream_position()?;
+                    let entry_end = (entry_start + entry_sz).min(elem_end);
+                    if entry_id == 0xAE {
+                        let mut track_num = 0u64;
+                        let mut track_type = 0u64;
+                        let mut lang = String::from("und");
+                        let mut title: Option<String> = None;
+                        let mut codec = String::new();
+                        while file.stream_position()? < entry_end {
+                            let Ok((tid, _)) = read_ebml_vint(&mut file, true) else { break };
+                            let Ok((tsz, _)) = read_ebml_vint(&mut file, false) else { break };
+                            let tstart = file.stream_position()?;
+                            match tid {
+                                0xD7 if tsz <= 8 => track_num = read_ebml_uint(&mut file, tsz as usize).unwrap_or(0),
+                                0x83 if tsz <= 8 => track_type = read_ebml_uint(&mut file, tsz as usize).unwrap_or(0),
+                                0x536E if tsz <= 256 => {
+                                    let mut b = vec![0u8; tsz as usize];
+                                    if file.read_exact(&mut b).is_ok() {
+                                        let s = String::from_utf8_lossy(&b).trim_matches('\0').trim().to_string();
+                                        if !s.is_empty() {
+                                            title = Some(s);
+                                        }
+                                    }
+                                }
+                                0x86 if tsz <= 64 => {
+                                    let mut b = vec![0u8; tsz as usize];
+                                    if file.read_exact(&mut b).is_ok() {
+                                        codec = String::from_utf8_lossy(&b).trim_matches('\0').trim().to_string();
+                                    }
+                                }
+                                0x22B59C | 0x22B59D if tsz <= 32 => {
+                                    let mut b = vec![0u8; tsz as usize];
+                                    if file.read_exact(&mut b).is_ok() {
+                                        let s = String::from_utf8_lossy(&b).trim_matches('\0').trim().to_string();
+                                        if !s.is_empty() {
+                                            lang = s;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            let _ = file.seek(SeekFrom::Start(tstart + tsz));
+                        }
+                        if track_type == 0x02 && track_num > 0 {
+                            audio_tracks.push(MkvAudioTrack {
+                                track_num: track_num as i64,
+                                lang,
+                                title,
+                                codec,
+                            });
+                        } else if track_type == 0x11 && track_num > 0 && (codec.contains("TEXT") || codec.contains("ASS") || codec.contains("SSA") || codec.is_empty()) {
+                            sub_meta.push((track_num, lang, title, codec));
+                        }
+                    }
+                    let _ = file.seek(SeekFrom::Start(entry_end));
+                }
+                let _ = file.seek(SeekFrom::Start(elem_end));
+            }
+            // Chapters (0x1043A770)
+            0x1043A770 => {
+                while file.stream_position()? < elem_end {
+                    let Ok((ed_id, _)) = read_ebml_vint(&mut file, true) else { break };
+                    let Ok((ed_sz, _)) = read_ebml_vint(&mut file, false) else { break };
+                    let ed_start = file.stream_position()?;
+                    let ed_end = (ed_start + ed_sz).min(elem_end);
+                    if ed_id == 0x45B9 {
+                        // EditionEntry
+                        while file.stream_position()? < ed_end {
+                            let Ok((ch_id, _)) = read_ebml_vint(&mut file, true) else { break };
+                            let Ok((ch_sz, _)) = read_ebml_vint(&mut file, false) else { break };
+                            let ch_start = file.stream_position()?;
+                            let ch_end = (ch_start + ch_sz).min(ed_end);
+                            if ch_id == 0xB6 {
+                                // ChapterAtom
+                                let mut time_ns: Option<u64> = None;
+                                let mut ch_title = String::from("Chapter");
+                                while file.stream_position()? < ch_end {
+                                    let Ok((aid, _)) = read_ebml_vint(&mut file, true) else { break };
+                                    let Ok((asz, _)) = read_ebml_vint(&mut file, false) else { break };
+                                    let astart = file.stream_position()?;
+                                    let aend = (astart + asz).min(ch_end);
+                                    match aid {
+                                        0x91 if asz <= 8 => {
+                                            time_ns = read_ebml_uint(&mut file, asz as usize).ok();
+                                        }
+                                        0x80 => {
+                                            // ChapterDisplay
+                                            while file.stream_position()? < aend {
+                                                let Ok((did, _)) = read_ebml_vint(&mut file, true) else { break };
+                                                let Ok((dsz, _)) = read_ebml_vint(&mut file, false) else { break };
+                                                let dstart = file.stream_position()?;
+                                                if did == 0x85 && dsz <= 256 {
+                                                    let mut b = vec![0u8; dsz as usize];
+                                                    if file.read_exact(&mut b).is_ok() {
+                                                        let s = String::from_utf8_lossy(&b).trim_matches('\0').trim().to_string();
+                                                        if !s.is_empty() {
+                                                            ch_title = s;
+                                                        }
+                                                    }
+                                                }
+                                                let _ = file.seek(SeekFrom::Start(dstart + dsz));
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                    let _ = file.seek(SeekFrom::Start(aend));
+                                }
+                                if let Some(ns) = time_ns {
+                                    chapters.push(MkvChapter {
+                                        title: ch_title,
+                                        time_sec: (ns as f64) / 1_000_000_000.0,
+                                    });
+                                }
+                            }
+                            let _ = file.seek(SeekFrom::Start(ch_end));
+                        }
+                    }
+                    let _ = file.seek(SeekFrom::Start(ed_end));
+                }
+                let _ = file.seek(SeekFrom::Start(elem_end));
+            }
+            // Cluster (0x1F43B675)
+            0x1F43B675 => {
+                if sub_meta.is_empty() {
+                    let _ = file.seek(SeekFrom::Start(elem_end));
+                    continue;
+                }
+                let mut cluster_ts: i64 = 0;
+                while file.stream_position()? < elem_end {
+                    let Ok((cid, _)) = read_ebml_vint(&mut file, true) else { break };
+                    let Ok((csz, _)) = read_ebml_vint(&mut file, false) else { break };
+                    let cstart = file.stream_position()?;
+                    let cend = (cstart + csz).min(elem_end);
+                    match cid {
+                        0xE7 if csz <= 8 => {
+                            cluster_ts = read_ebml_uint(&mut file, csz as usize).unwrap_or(0) as i64;
+                            let cluster_ms = ((cluster_ts.max(0) as u64 * timestamp_scale) / 1_000_000) as i64;
+                            if cluster_ms > max_cluster_time_ms {
+                                max_cluster_time_ms = cluster_ms;
+                            }
+                        }
+                        0xA3 if csz >= 4 => {
+                            if let Ok((tnum, vlen)) = read_ebml_vint(&mut file, false) {
+                                if let Some((_, _, _, codec)) = sub_meta.iter().find(|(n, _, _, _)| *n == tnum) {
+                                    let payload_len = (csz as usize).saturating_sub(vlen + 3);
+                                    let mut hdr = [0u8; 3];
+                                    if file.read_exact(&mut hdr).is_ok() && payload_len <= 16_384 {
+                                        let mut payload = vec![0u8; payload_len];
+                                        if file.read_exact(&mut payload).is_ok() {
+                                            let rel_ts = i16::from_be_bytes([hdr[0], hdr[1]]) as i64;
+                                            let abs_ticks = (cluster_ts + rel_ts).max(0) as u64;
+                                            let start_ms = ((abs_ticks * timestamp_scale) / 1_000_000) as i64;
+                                            let is_ass = codec.contains("ASS") || codec.contains("SSA");
+                                            let text = clean_mkv_block_text(&payload, is_ass);
+                                            if !text.is_empty() {
+                                                cues_by_track.entry(tnum).or_default().push(SubtitleCue {
+                                                    start_ms,
+                                                    end_ms: start_ms + 2_500,
+                                                    text,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        0xA0 => {
+                            let mut blk_track = 0u64;
+                            let mut blk_rel_ts: i64 = 0;
+                            let mut blk_dur_ticks: Option<u64> = None;
+                            let mut blk_payload: Vec<u8> = Vec::new();
+                            while file.stream_position()? < cend {
+                                let Ok((bid, _)) = read_ebml_vint(&mut file, true) else { break };
+                                let Ok((bsz, _)) = read_ebml_vint(&mut file, false) else { break };
+                                let bstart = file.stream_position()?;
+                                match bid {
+                                    0xA1 if bsz >= 4 => {
+                                        if let Ok((tnum, vlen)) = read_ebml_vint(&mut file, false) {
+                                            blk_track = tnum;
+                                            if sub_meta.iter().any(|(n, _, _, _)| *n == tnum) {
+                                                let payload_len = (bsz as usize).saturating_sub(vlen + 3);
+                                                let mut hdr = [0u8; 3];
+                                                if file.read_exact(&mut hdr).is_ok() && payload_len <= 16_384 {
+                                                    blk_rel_ts = i16::from_be_bytes([hdr[0], hdr[1]]) as i64;
+                                                    blk_payload = vec![0u8; payload_len];
+                                                    let _ = file.read_exact(&mut blk_payload);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    0x9B if bsz <= 8 => {
+                                        blk_dur_ticks = read_ebml_uint(&mut file, bsz as usize).ok();
+                                    }
+                                    _ => {}
+                                }
+                                let _ = file.seek(SeekFrom::Start(bstart + bsz));
+                            }
+                            if let Some((_, _, _, codec)) = sub_meta.iter().find(|(n, _, _, _)| *n == blk_track) {
+                                if !blk_payload.is_empty() {
+                                    let abs_ticks = (cluster_ts + blk_rel_ts).max(0) as u64;
+                                    let start_ms = ((abs_ticks * timestamp_scale) / 1_000_000) as i64;
+                                    let dur_ms = blk_dur_ticks
+                                        .map(|d| ((d * timestamp_scale) / 1_000_000) as i64)
+                                        .unwrap_or(2_500)
+                                        .clamp(100, 20_000);
+                                    let is_ass = codec.contains("ASS") || codec.contains("SSA");
+                                    let text = clean_mkv_block_text(&blk_payload, is_ass);
+                                    if !text.is_empty() {
+                                        cues_by_track.entry(blk_track).or_default().push(SubtitleCue {
+                                            start_ms,
+                                            end_ms: start_ms + dur_ms,
+                                            text,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    let _ = file.seek(SeekFrom::Start(cend));
+                }
+                let _ = file.seek(SeekFrom::Start(elem_end));
+            }
+            _ => {
+                if elem_end <= data_start {
+                    break;
+                }
+                let _ = file.seek(SeekFrom::Start(elem_end));
+            }
+        }
+    }
+
+    let has_declared_sub_tracks = !sub_meta.is_empty();
+    let mut sub_tracks = Vec::new();
+    for (tnum, lang, title, codec) in sub_meta {
+        if let Some(mut cues) = cues_by_track.remove(&tnum) {
+            if !cues.is_empty() {
+                cues.sort_by_key(|c| c.start_ms);
+                sub_tracks.push(MkvSubTrack {
+                    track_num: tnum as i64,
+                    lang,
+                    title,
+                    codec,
+                    cues,
+                });
+            }
+        }
+    }
+    chapters.sort_by(|a, b| a.time_sec.partial_cmp(&b.time_sec).unwrap_or(std::cmp::Ordering::Equal));
+    let duration_sec = raw_duration_ticks
+        .map(|ticks| (ticks * (timestamp_scale as f64)) / 1_000_000_000.0)
+        .filter(|&d| d > 0.0 && d.is_finite());
+
+    Ok(MkvEmbeddedData {
+        duration_sec,
+        audio_tracks,
+        sub_tracks,
+        chapters,
+        has_declared_sub_tracks,
+        max_cluster_time_ms,
+    })
+}
+
+fn is_distributor_bumper_cue(start_ms: i64, text: &str) -> bool {
+    if start_ms > 20_000 {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
+    const BUMPER_TAGS: &[&str] = &[
+        "viz media",
+        "crunchyroll",
+        "funimation",
+        "hidive",
+        "sentai",
+        "netflix",
+        "aniplex",
+        "bilibili",
+        "muse ",
+        "ani-one",
+        "presented by",
+        "subtitles by",
+        "translated by",
+        "encoded by",
+        "synced by",
+        "rips by",
+    ];
+    BUMPER_TAGS.iter().any(|tag| lower.contains(tag))
+}
+
+fn cues_to_filtered_spans(cues: &[SubtitleCue]) -> Vec<Span> {
+    let mut spans: Vec<Span> = cues
+        .iter()
+        .filter(|c| c.end_ms > c.start_ms && !is_distributor_bumper_cue(c.start_ms, &c.text))
+        .map(|c| Span {
+            start_ms: c.start_ms,
+            end_ms: c.end_ms,
+        })
+        .collect();
+    spans.sort_by_key(|s| s.start_ms);
+    spans.dedup_by(|a, b| (a.start_ms - b.start_ms).abs() < 40);
+    spans
+}
+
+/// Compute the live timing offset (`offset_sec`, `matched_cues`) between an external subtitle track
+/// (`ext_cues`, e.g. Japanese TV broadcast subtitles from Jimaku) and a streaming/local `.mkv`'s
+/// embedded subtitle cues or chapters (which may include a 6–15s Viz Media / Crunchyroll / Netflix intro bumper).
+pub fn compute_live_cue_offset_sec(
+    ext_cues: &[SubtitleCue],
+    embedded: &MkvEmbeddedData,
+) -> Option<(f64, usize)> {
+    let target_spans = cues_to_filtered_spans(ext_cues);
+    if target_spans.is_empty() {
+        return None;
+    }
+
+    // 1. Pick the best embedded dialogue subtitle track (prefer full dialogue tracks over sign/forced tracks)
+    let mut best_ref_spans: Vec<Span> = Vec::new();
+    let mut best_is_signs = true;
+    for tr in &embedded.sub_tracks {
+        let title_lower = tr.title.as_deref().unwrap_or("").to_ascii_lowercase();
+        let is_signs = title_lower.contains("sign") || title_lower.contains("song") || title_lower.contains("forced");
+        let sp = cues_to_filtered_spans(&tr.cues);
+        if sp.is_empty() {
+            continue;
+        }
+        let is_better = if best_ref_spans.is_empty() {
+            true
+        } else if best_is_signs && !is_signs && sp.len() >= 2 {
+            true
+        } else if is_signs == best_is_signs {
+            sp.len() > best_ref_spans.len()
+        } else {
+            false
+        };
+        if is_better {
+            best_ref_spans = sp;
+            best_is_signs = is_signs;
+        }
+    }
+
+    // 2. If we have at least 2 embedded dialogue cues from the downloaded clusters, align the corresponding
+    // prefix of `target_spans` against `best_ref_spans`!
+    if best_ref_spans.len() >= 2 {
+        let max_ref_ms = best_ref_spans.iter().map(|s| s.end_ms).max().unwrap_or(0);
+        let max_count = (best_ref_spans.len() + 6).min(target_spans.len()).min(180);
+        let target_window: Vec<Span> = target_spans
+            .iter()
+            .copied()
+            .filter(|s| s.start_ms <= max_ref_ms + 15_000)
+            .take(max_count)
+            .collect();
+
+        if target_window.len() >= 2 {
+            if let Some(model) = align_subtitle_spans(&target_window, &best_ref_spans) {
+                let min_req = if best_ref_spans.len() < 5 { 2 } else { 3 };
+                if model.matched_cues >= min_req {
+                    let off_sec = ((model.primary_offset_ms as f64) / 50.0).round() * 0.05;
+                    return Some((off_sec, model.matched_cues));
+                }
+            }
+        }
+
+        // Fallback when only 1-2 initial dialogue cues have arrived after a distributor intro animation
+        let onset_diff_ms = best_ref_spans[0].start_ms - target_spans[0].start_ms;
+        if (3_000..=35_000).contains(&onset_diff_ms) && target_spans[0].start_ms < 8_000 {
+            let off_sec = ((onset_diff_ms as f64) / 50.0).round() * 0.05;
+            return Some((off_sec, 1));
+        }
+    } else if best_ref_spans.len() == 1 {
+        let onset_diff_ms = best_ref_spans[0].start_ms - target_spans[0].start_ms;
+        if (3_000..=35_000).contains(&onset_diff_ms) && target_spans[0].start_ms < 8_000 {
+            let off_sec = ((onset_diff_ms as f64) / 50.0).round() * 0.05;
+            return Some((off_sec, 1));
+        }
+    } else if embedded.has_declared_sub_tracks && embedded.max_cluster_time_ms >= 1_500 {
+        // The `.mkv` declares an embedded subtitle track and we have scanned clusters up to `max_cluster_time_ms`,
+        // yet ZERO dialogue cues have occurred in the video so far (e.g. a Viz Media / Crunchyroll logo animation
+        // is playing at 0:00..0:09). If `ext_cues` starts speaking immediately at 0:00..0:05, hold `ext_cues` back
+        // past `max_cluster_time_ms` until the cluster with the first real dialogue cue arrives!
+        if target_spans[0].start_ms < embedded.max_cluster_time_ms && target_spans[0].start_ms < 6_000 {
+            let hold_ms = (embedded.max_cluster_time_ms - target_spans[0].start_ms + 2_000).clamp(2_000, 20_000);
+            let off_sec = ((hold_ms as f64) / 100.0).round() * 0.1;
+            return Some((off_sec, 0));
+        }
+    }
+
+    // 3. Fallback to Matroska Chapters if the video has an explicit 4s-18s leading Logo/Intro bumper chapter
+    if embedded.chapters.len() >= 2 {
+        let ch0 = &embedded.chapters[0];
+        let ch1 = &embedded.chapters[1];
+        if ch0.time_sec < 0.5 && (4.0..=18.0).contains(&ch1.time_sec) && target_spans[0].start_ms < 4_000 {
+            let off_sec = (ch1.time_sec * 20.0).round() / 20.0;
+            return Some((off_sec, 1));
+        }
+    }
+
+    None
+}
+
+/// Align `ext_cues` against already-loaded embedded tracks in `cues_by_track` (used when hot-loading
+/// a newly downloaded Jimaku subtitle into an already-playing session).
+pub fn compute_live_cue_offset_from_tracks(
+    ext_cues: &[SubtitleCue],
+    cues_by_track: &HashMap<i64, Vec<SubtitleCue>>,
+    external_track_id: i64,
+) -> Option<(f64, usize)> {
+    let mut sub_tracks = Vec::new();
+    for (&id, cues) in cues_by_track {
+        if id != external_track_id && !cues.is_empty() {
+            sub_tracks.push(MkvSubTrack {
+                track_num: id,
+                lang: String::from("und"),
+                title: None,
+                codec: String::new(),
+                cues: cues.clone(),
+            });
+        }
+    }
+    if sub_tracks.is_empty() {
+        return None;
+    }
+    let dummy = MkvEmbeddedData {
+        duration_sec: None,
+        audio_tracks: Vec::new(),
+        sub_tracks,
+        chapters: Vec::new(),
+        has_declared_sub_tracks: true,
+        max_cluster_time_ms: 0,
+    };
+    compute_live_cue_offset_sec(ext_cues, &dummy)
 }
 
 // ---------------------------------------------------------------------------
@@ -2213,6 +3034,81 @@ mod tests {
         let ass = "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:10.00,0:00:12.50,Default,,0,0,0,,{\\blur2}猫猫（マオマオ）";
         let out_ass = rewrite_subtitle_timestamps(ass, "ass", |ms| ms - 1_250);
         assert!(out_ass.contains("Dialogue: 0,0:00:08.75,0:00:11.25,Default,,0,0,0,,{\\blur2}猫猫（マオマオ）"));
+    }
+
+    #[test]
+    fn decompresses_zlib_mkv_ass_and_utf8_blocks() {
+        use std::io::Write;
+        let raw_ass = "0,0,Default,,0,0,0,,{\\blur1.5}魔法使いフリーレン\\N新しい旅";
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(raw_ass.as_bytes()).unwrap();
+        let compressed = enc.finish().unwrap();
+
+        // Starts with `0x78 0x9C` (`x...`)
+        assert_eq!(compressed[0], 0x78);
+
+        let cleaned = clean_mkv_block_text(&compressed, true);
+        assert_eq!(cleaned, "魔法使いフリーレン\n新しい旅");
+    }
+
+    #[test]
+    fn aligns_live_streaming_subtitles_with_viz_media_intro_bumper() {
+        // Full 24-minute external Japanese broadcast subtitle starting right at 0:00.8 (no distributor bumper)
+        let mut ext_cues = Vec::new();
+        for i in 0..120 {
+            let s = 800 + i * 4_500;
+            ext_cues.push(SubtitleCue {
+                start_ms: s,
+                end_ms: s + 2_200,
+                text: format!("台詞 {i}"),
+            });
+        }
+
+        // Scenario 1: First 6 seconds of stream downloaded (only the Viz Media logo cluster so far, 0 dialogue cues)
+        let silent_intro = MkvEmbeddedData {
+            duration_sec: Some(1440.0),
+            audio_tracks: Vec::new(),
+            sub_tracks: Vec::new(),
+            chapters: Vec::new(),
+            has_declared_sub_tracks: true,
+            max_cluster_time_ms: 6_000,
+        };
+        let (hold_off, hold_matched) = compute_live_cue_offset_sec(&ext_cues, &silent_intro).unwrap();
+        assert_eq!(hold_matched, 0);
+        assert!(hold_off >= 6.0, "Should hold cues past silent intro cluster, got {hold_off}");
+
+        // Scenario 2: First 35 seconds of stream downloaded — includes a "Presented by VIZ Media" bumper line
+        // at 0:01.0 and 5 real dialogue lines shifted by +8.50s (starting at 0:09.3)
+        let mut ref_cues = vec![SubtitleCue {
+            start_ms: 1_000,
+            end_ms: 4_000,
+            text: "Presented by VIZ Media".into(),
+        }];
+        for i in 0..5 {
+            let s = 800 + 8_500 + i * 4_500;
+            ref_cues.push(SubtitleCue {
+                start_ms: s,
+                end_ms: s + 2_200,
+                text: format!("Dialogue line {i}"),
+            });
+        }
+        let partial_stream = MkvEmbeddedData {
+            duration_sec: Some(1440.0),
+            audio_tracks: Vec::new(),
+            sub_tracks: vec![MkvSubTrack {
+                track_num: 3,
+                lang: "eng".into(),
+                title: Some("English".into()),
+                codec: "S_TEXT/ASS".into(),
+                cues: ref_cues,
+            }],
+            chapters: Vec::new(),
+            has_declared_sub_tracks: true,
+            max_cluster_time_ms: 35_000,
+        };
+        let (locked_off, matched) = compute_live_cue_offset_sec(&ext_cues, &partial_stream).unwrap();
+        assert!(matched >= 4, "Expected >= 4 matched cues, got {matched}");
+        assert!((locked_off - 8.5).abs() <= 0.1, "Expected +8.5s Viz Media bumper offset, got {locked_off}");
     }
 }
 

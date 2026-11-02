@@ -2,7 +2,9 @@ pub mod anilist_sync;
 pub mod backup;
 pub mod commands;
 pub mod db;
+pub mod dictionary;
 pub mod discord;
+pub mod embedded_player;
 pub mod franchise;
 pub mod logging;
 pub mod matcher;
@@ -46,8 +48,15 @@ pub fn run() {
             let _ = app.asset_protocol_scope().allow_directory(&data_dir, true);
             let conn = db::open(&data_dir.join("kura.db"))?;
             let (watcher, reload_rx) = watcher::WatcherHandle::new();
-            let state = Arc::new(service::AppState::new(conn, data_dir, watcher));
+            let state = Arc::new(service::AppState::new(conn, data_dir.clone(), watcher));
             app.manage(state.clone());
+
+            // Seed starter Japanese Yomitan dictionary in background
+            std::thread::spawn(move || {
+                if let Ok(dconn) = dictionary::open_dict_db(&data_dir) {
+                    let _ = dictionary::ensure_starter_dictionary(&dconn);
+                }
+            });
 
             // Development helper: seed a library from an env var (debug builds only).
             #[cfg(debug_assertions)]
@@ -141,6 +150,17 @@ pub fn run() {
             commands::start_torrent_session,
             commands::list_torrent_sessions,
             commands::cancel_torrent_session,
+            commands::list_torrent_extensions,
+            commands::import_torrent_extension,
+            commands::toggle_torrent_extension,
+            commands::remove_torrent_extension,
+            commands::builtin_player_get_state,
+            commands::builtin_player_command,
+            commands::lookup_japanese_at,
+            commands::list_dictionaries,
+            commands::import_yomitan_dictionary,
+            commands::download_recommended_dictionaries,
+            commands::remove_dictionary,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

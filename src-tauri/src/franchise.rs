@@ -110,21 +110,42 @@ pub fn compute(owned: &[Owned], edges: &[Edge]) -> HashMap<i64, Placement> {
     out
 }
 
-/// Franchise placement for every entry that has at least one local file.
+/// Franchise placement for every entry in the active library (local files, or also streaming/AniList entries in streaming mode).
 pub fn load(conn: &Connection) -> rusqlite::Result<HashMap<i64, Placement>> {
-    let mut stmt = conn.prepare(
-        "SELECT m.anilist_id, m.format, m.start_date, m.season_year FROM media m
-         WHERE EXISTS (SELECT 1 FROM local_files f WHERE f.anilist_id = m.anilist_id)",
-    )?;
+    let is_streaming = crate::db::get_setting(conn, "pref.app_mode")
+        .ok()
+        .flatten()
+        .map(|m| m == "streaming")
+        .unwrap_or(false);
+    let _ = conn.execute_batch(crate::db::SCHEMA_V5);
+    let _ = conn.execute_batch(crate::db::SCHEMA_V7);
+
+    let where_clause = if is_streaming {
+        "EXISTS (SELECT 1 FROM local_files f WHERE f.anilist_id = m.anilist_id)
+         OR EXISTS (SELECT 1 FROM stream_library s WHERE s.anilist_id = m.anilist_id)
+         OR EXISTS (SELECT 1 FROM anilist_entries a WHERE a.anilist_id = m.anilist_id AND a.status IN ('CURRENT', 'PLANNING', 'COMPLETED', 'PAUSED', 'DROPPED', 'REPEATING'))"
+    } else {
+        "EXISTS (SELECT 1 FROM local_files f WHERE f.anilist_id = m.anilist_id)"
+    };
+    let edge_clause = if is_streaming {
+        "EXISTS (SELECT 1 FROM local_files f WHERE f.anilist_id = r.anilist_id)
+         OR EXISTS (SELECT 1 FROM stream_library s WHERE s.anilist_id = r.anilist_id)
+         OR EXISTS (SELECT 1 FROM anilist_entries a WHERE a.anilist_id = r.anilist_id AND a.status IN ('CURRENT', 'PLANNING', 'COMPLETED', 'PAUSED', 'DROPPED', 'REPEATING'))"
+    } else {
+        "EXISTS (SELECT 1 FROM local_files f WHERE f.anilist_id = r.anilist_id)"
+    };
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT m.anilist_id, m.format, m.start_date, m.season_year FROM media m WHERE {where_clause}"
+    ))?;
     let owned = stmt
         .query_map([], |r| Ok(Owned { id: r.get(0)?, format: r.get(1)?, start: r.get(2)?, year: r.get(3)? }))?
         .collect::<Result<Vec<_>, _>>()?;
 
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT r.anilist_id, r.related_id, r.relation_type, r.format FROM media_relations r
-         WHERE COALESCE(r.media_type, 'ANIME') = 'ANIME'
-           AND EXISTS (SELECT 1 FROM local_files f WHERE f.anilist_id = r.anilist_id)",
-    )?;
+         WHERE COALESCE(r.media_type, 'ANIME') = 'ANIME' AND ({edge_clause})"
+    ))?;
     let edges = stmt
         .query_map([], |r| Ok(Edge { from: r.get(0)?, to: r.get(1)?, kind: r.get(2)?, to_format: r.get(3)? }))?
         .collect::<Result<Vec<_>, _>>()?;

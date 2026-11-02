@@ -52,6 +52,7 @@ export interface MediaCard {
   /** Position among owned entries of the franchise, in release order. */
   franchiseIndex: number;
   franchiseSize: number;
+  anilistStatus: string | null;
 }
 
 export interface UnmatchedGroup {
@@ -353,6 +354,14 @@ export interface TorrentCandidate {
   refSubtitleUrl: string | null;
 }
 
+export interface TorrentExtension {
+  id: string;
+  name: string;
+  kind: "rss" | "subsplease-json" | "seadex-api" | string;
+  url: string;
+  enabled: boolean;
+}
+
 export interface TorrentSessionStatus {
   sessionId: string;
   anilistId: number;
@@ -363,8 +372,10 @@ export interface TorrentSessionStatus {
   state: "initializing" | "buffering" | "streaming" | "downloading" | "completed" | "error" | string;
   progressPct: number;
   downloadedBytes: number;
+  uploadedBytes: number;
   totalBytes: number;
   speedBps: number;
+  uploadSpeedBps: number;
   peers: number;
   streamUrl: string | null;
   savePath: string;
@@ -429,7 +440,7 @@ export interface UpNextItem {
   newCount: number;
 }
 
-export type PlayerKind = "system" | "mpv" | "vlc" | "mpc" | "memento";
+export type PlayerKind = "builtin" | "system" | "mpv" | "vlc" | "mpc" | "memento";
 
 export interface DetectedPlayer {
   kind: PlayerKind;
@@ -572,6 +583,125 @@ export interface AiringNotification {
   message: string;
 }
 
+export interface TrackItem {
+  id: number;
+  trackType: string;
+  title: string | null;
+  lang: string | null;
+  codec: string | null;
+  selected: boolean;
+  external: boolean;
+}
+
+export interface ChapterItem {
+  title: string;
+  time: number;
+}
+
+export interface BuiltinPlayerState {
+  active: boolean;
+  backend: "mpv" | "html5" | string;
+  anilistId: number;
+  epKey: string;
+  path: string;
+  streamUrl: string;
+  transcodeBaseUrl: string | null;
+  showTitle: string;
+  episodeTitle: string;
+  paused: boolean;
+  position: number;
+  duration: number;
+  volume: number;
+  muted: boolean;
+  speed: number;
+  aid: number | null;
+  sid: number | null;
+  subText: string;
+  subOffsetSec: number;
+  audioTracks: TrackItem[];
+  subTracks: TrackItem[];
+  chapters: ChapterItem[];
+  opStart: number | null;
+  opEnd: number | null;
+  edStart: number | null;
+  edEnd: number | null;
+  hasNextEpisode: boolean;
+  externalSubPath: string | null;
+}
+
+export type BuiltinCommand =
+  | { type: "play_pause" }
+  | { type: "pause" }
+  | { type: "resume" }
+  | { type: "seek"; position: number }
+  | { type: "seek_relative"; delta: number }
+  | { type: "set_volume"; volume: number }
+  | { type: "toggle_mute" }
+  | { type: "set_speed"; speed: number }
+  | { type: "set_audio_track"; id: number }
+  | { type: "set_sub_track"; id: number }
+  | { type: "add_sub_offset"; delta: number }
+  | { type: "load_sub_file"; path: string }
+  | { type: "next_episode" }
+  | { type: "open_external_mpv" }
+  | { type: "html5_tick"; position: number; duration: number; paused: boolean; ended: boolean }
+  | { type: "sync_bounds" }
+  | { type: "stop" };
+
+export interface DictionaryInfo {
+  id: number;
+  title: string;
+  revision: string;
+  termCount: number;
+  kanjiCount: number;
+  metaCount: number;
+  importedAt: number;
+}
+
+export interface FuriganaSegment {
+  text: string;
+  reading: string | null;
+}
+
+export interface PitchAccent {
+  reading: string;
+  downstep: number;
+}
+
+export interface TermEntry {
+  expression: string;
+  reading: string;
+  furigana: FuriganaSegment[];
+  matchedText: string;
+  matchLen: number;
+  deinflectionReasons: string[];
+  definitionTags: string[];
+  termTags: string[];
+  rules: string[];
+  glossaries: string[];
+  dictionaryTitle: string;
+  score: number;
+  frequencies: string[];
+  pitches: PitchAccent[];
+}
+
+export interface KanjiEntry {
+  character: string;
+  onyomi: string[];
+  kunyomi: string[];
+  meanings: string[];
+  tags: string[];
+  stats: Record<string, string>;
+  dictionaryTitle: string;
+}
+
+export interface LookupResult {
+  matchedText: string;
+  matchLen: number;
+  terms: TermEntry[];
+  kanji: KanjiEntry[];
+}
+
 export const api = {
   listLibraries: () => invoke<Library[]>("list_libraries"),
   createLibrary: (name: string, folders: string[]) => invoke<number>("create_library", { name, folders }),
@@ -697,6 +827,24 @@ export const api = {
     }),
   listTorrentSessions: () => invoke<TorrentSessionStatus[]>("list_torrent_sessions"),
   cancelTorrentSession: (sessionId: string) => invoke<void>("cancel_torrent_session", { sessionId }),
+  listTorrentExtensions: () => invoke<TorrentExtension[]>("list_torrent_extensions"),
+  importTorrentExtension: (input: string) =>
+    invoke<TorrentExtension[]>("import_torrent_extension", { input }),
+  toggleTorrentExtension: (id: string, enabled: boolean) =>
+    invoke<TorrentExtension[]>("toggle_torrent_extension", { id, enabled }),
+  removeTorrentExtension: (id: string) =>
+    invoke<TorrentExtension[]>("remove_torrent_extension", { id }),
+  builtinPlayerGetState: () => invoke<BuiltinPlayerState>("builtin_player_get_state"),
+  builtinPlayerCommand: (command: BuiltinCommand) =>
+    invoke<BuiltinPlayerState>("builtin_player_command", { command }),
+  lookupJapaneseAt: (text: string, charOffset: number) =>
+    invoke<LookupResult>("lookup_japanese_at", { text, charOffset }),
+  listDictionaries: () => invoke<DictionaryInfo[]>("list_dictionaries"),
+  importYomitanDictionary: (zipPath: string) =>
+    invoke<DictionaryInfo>("import_yomitan_dictionary", { zipPath }),
+  downloadRecommendedDictionaries: () =>
+    invoke<DictionaryInfo[]>("download_recommended_dictionaries"),
+  removeDictionary: (id: number) => invoke<void>("remove_dictionary", { id }),
 };
 
 export const events = {
@@ -715,6 +863,10 @@ export const events = {
     listen<AiringNotification>("airing-notification", (e) => cb(e.payload)),
   onTorrentProgress: (cb: (s: TorrentSessionStatus) => void): Promise<UnlistenFn> =>
     listen<TorrentSessionStatus>("torrent-progress", (e) => cb(e.payload)),
+  onBuiltinPlayerState: (cb: (s: BuiltinPlayerState) => void): Promise<UnlistenFn> =>
+    listen<BuiltinPlayerState>("builtin-player-state", (e) => cb(e.payload)),
+  onDictionaryProgress: (cb: (p: { stage: string; message: string }) => void): Promise<UnlistenFn> =>
+    listen<{ stage: string; message: string }>("dictionary-progress", (e) => cb(e.payload)),
 };
 
 /** Prefer the locally cached image (works offline), fall back to the remote URL. */

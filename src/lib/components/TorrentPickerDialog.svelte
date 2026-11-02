@@ -3,6 +3,7 @@
   import {
     api,
     type TorrentCandidate,
+    type TorrentExtension,
     type TorrentSessionStatus,
   } from "$lib/api";
   import { app } from "$lib/app.svelte";
@@ -33,10 +34,29 @@
   let manualMagnet = $state("");
   let chosenMode = $state<"stream" | "hybrid" | "download">(app.torrentAction);
   let activeSessionId = $state<string | null>(null);
+  let triedKeys = $state<string[]>([]);
+  let failoverCount = $state(0);
+
+  // Modular Torrent Extensions state
+  let extensions = $state<TorrentExtension[]>([]);
+  let showExtensions = $state(false);
+  let extInput = $state("");
+  let importingExt = $state(false);
+
+  function candidateKey(c: TorrentCandidate): string {
+    return (c.infoHash || c.torrentUrl || c.magnetUri || c.title).toLowerCase();
+  }
+
+  const nextUntriedCandidate = $derived<TorrentCandidate | null>(
+    candidates.find(
+      (c) => c.seeders > 0 && !triedKeys.includes(candidateKey(c)),
+    ) ?? null,
+  );
 
   const liveSession = $derived<TorrentSessionStatus | null>(
     activeSessionId
-      ? (app.torrentSessions.find((s) => s.sessionId === activeSessionId) ?? null)
+      ? (app.torrentSessions.find((s) => s.sessionId === activeSessionId) ??
+          null)
       : null,
   );
 
@@ -48,33 +68,121 @@
     }
   });
 
+  // Automatic failover if the active torrent has dead/unreachable seeders
+  $effect(() => {
+    if (
+      liveSession &&
+      liveSession.state === "error" &&
+      failoverCount < 3 &&
+      nextUntriedCandidate
+    ) {
+      failoverCount += 1;
+      void tryNextCandidate();
+    }
+  });
+
   async function search(q?: string) {
     loading = true;
     error = null;
+    triedKeys = [];
+    failoverCount = 0;
     try {
-      candidates = await api.searchEpisodeTorrents(anilistId, episodeNumber, q || null);
+      candidates = await api.searchEpisodeTorrents(
+        anilistId,
+        episodeNumber,
+        q || null,
+      );
+      if (!q && !customQuery) {
+        customQuery = `${title} ${String(episodeNumber).padStart(2, "0")}`;
+      }
       if (autoStart && !q && app.torrentQuality !== "ask") {
-        const best = candidates.find((c) => c.seeders > 0 && c.score > 400) ?? candidates.find((c) => c.seeders > 0);
+        const best =
+          candidates.find((c) => c.seeders >= 3 && c.score > 400) ??
+          candidates.find((c) => c.seeders > 0 && c.score > 400) ??
+          candidates.find((c) => c.seeders > 0);
         if (best) {
           await startCandidate(best);
         }
       }
     } catch (e) {
-      error = String(e);
+      const msg = String(e);
+      if (msg.includes("NO_TORRENT_EXTENSIONS")) {
+        showExtensions = true;
+        error = null;
+      } else {
+        error = msg;
+      }
     } finally {
       loading = false;
     }
   }
 
+  async function loadExtensions() {
+    try {
+      extensions = await api.listTorrentExtensions();
+      if (extensions.filter((e) => e.enabled).length === 0) {
+        showExtensions = true;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function handleImportExtension() {
+    const val = extInput.trim();
+    if (!val || importingExt) return;
+    importingExt = true;
+    error = null;
+    try {
+      extensions = await api.importTorrentExtension(val);
+      extInput = "";
+      showExtensions = false;
+      app.toast(
+        `Enabled ${extensions.filter((e) => e.enabled).length} torrent extension(s)`,
+        "info",
+      );
+      await search(customQuery || undefined);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      importingExt = false;
+    }
+  }
+
+  async function handleToggleExtension(ext: TorrentExtension) {
+    try {
+      extensions = await api.toggleTorrentExtension(ext.id, !ext.enabled);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function handleRemoveExtension(id: string) {
+    try {
+      extensions = await api.removeTorrentExtension(id);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   onMount(() => {
-    search();
+    void loadExtensions();
+    void search();
   });
 
   async function startCandidate(c: TorrentCandidate) {
     if (starting) return;
     starting = true;
     error = null;
+    const key = candidateKey(c);
+    if (!triedKeys.includes(key)) {
+      triedKeys = [...triedKeys, key];
+    }
     try {
+      if (activeSessionId) {
+        await api.cancelTorrentSession(activeSessionId).catch(() => {});
+        activeSessionId = null;
+      }
       const status = await api.startTorrentSession({
         anilistId,
         epKey,
@@ -88,8 +196,32 @@
       }
     } catch (e) {
       error = String(e);
+      starting = false;
+      if (failoverCount < 3 && nextUntriedCandidate) {
+        failoverCount += 1;
+        await startCandidate(nextUntriedCandidate);
+        return;
+      }
     } finally {
       starting = false;
+    }
+  }
+
+  async function tryNextCandidate() {
+    if (!nextUntriedCandidate) {
+      if (activeSessionId) {
+        await api.cancelTorrentSession(activeSessionId).catch(() => {});
+        activeSessionId = null;
+      }
+      return;
+    }
+    await startCandidate(nextUntriedCandidate);
+  }
+
+  async function backToCandidateList() {
+    if (activeSessionId) {
+      await api.cancelTorrentSession(activeSessionId).catch(() => {});
+      activeSessionId = null;
     }
   }
 
@@ -127,17 +259,98 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div class="backdrop" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.target === e.currentTarget && onclose()}>
+<div
+  class="backdrop"
+  role="dialog"
+  aria-modal="true"
+  tabindex="-1"
+  onclick={(e) => e.target === e.currentTarget && onclose()}
+>
   <div class="modal card">
     <header class="modal-head">
       <div>
-        <span class="eyebrow">Torrent Stream & Download · Episode {episodeNumber}</span>
+        <span class="eyebrow"
+          >Torrent Stream & Download · Episode {episodeNumber}</span
+        >
         <h2>{title}</h2>
       </div>
-      <button class="btn btn-ghost btn-icon" onclick={onclose} aria-label="Close">
-        <Icon name="x" size={16} />
-      </button>
+      <div class="head-actions">
+        <button
+          class="btn btn-ghost btn-sm"
+          onclick={() => (showExtensions = !showExtensions)}
+          title="Manage modular torrent extensions & indexers"
+        >
+          🧩 Extensions ({extensions.filter((e) => e.enabled).length})
+        </button>
+        <button
+          class="btn btn-ghost btn-icon"
+          onclick={onclose}
+          aria-label="Close"
+        >
+          <Icon name="x" size={16} />
+        </button>
+      </div>
     </header>
+
+    {#if showExtensions}
+      <div class="ext-box">
+        <div class="ext-box-head">
+          <strong>Modular Torrent Extensions</strong>
+          <small class="faint">
+            Kura ships without built-in piracy indexers. Add an extension
+            manifest URL (Hayase <code>index.json</code> or Kura JSON) or any RSS
+            / API source URL.
+          </small>
+        </div>
+        <form
+          class="search-row"
+          onsubmit={(e) => {
+            e.preventDefault();
+            void handleImportExtension();
+          }}
+        >
+          <input
+            class="input"
+            placeholder="Paste extension manifest URL or source URL (e.g. https://…)"
+            bind:value={extInput}
+          />
+          <button
+            class="btn btn-primary btn-sm"
+            type="submit"
+            disabled={importingExt || !extInput.trim()}
+          >
+            {importingExt ? "Importing…" : "+ Add Extension"}
+          </button>
+        </form>
+        {#if extensions.length > 0}
+          <div class="ext-list">
+            {#each extensions as ext (ext.id)}
+              <div class="ext-item">
+                <label class="ext-toggle">
+                  <input
+                    type="checkbox"
+                    checked={ext.enabled}
+                    onchange={() => void handleToggleExtension(ext)}
+                  />
+                  <strong>{ext.name}</strong>
+                  <span class="badge">{ext.kind}</span>
+                </label>
+                <div class="ext-item-right">
+                  <code class="faint ext-url">{ext.url}</code>
+                  <button
+                    class="btn btn-ghost btn-sm"
+                    onclick={() => void handleRemoveExtension(ext.id)}
+                    title="Remove extension"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     {#if liveSession}
       <div class="live-box">
@@ -161,16 +374,31 @@
               <small class="faint">{liveSession.fileName}</small>
             </div>
           </div>
-          <span class="badge badge-accent">{liveSession.progressPct.toFixed(1)}%</span>
+          <span class="badge badge-accent"
+            >{liveSession.progressPct.toFixed(1)}%</span
+          >
         </div>
 
         <div class="prog-bar">
-          <div class="prog-fill" style:width={`${Math.max(3, liveSession.progressPct)}%`}></div>
+          <div
+            class="prog-fill"
+            style:width={`${Math.max(3, liveSession.progressPct)}%`}
+          ></div>
         </div>
 
         <div class="live-metrics">
-          <span><strong>{formatBytes(liveSession.downloadedBytes)}</strong> / {formatBytes(liveSession.totalBytes)}</span>
-          <span><strong>{formatBytes(liveSession.speedBps)}/s</strong></span>
+          <span
+            ><strong>{formatBytes(liveSession.downloadedBytes)}</strong> / {formatBytes(
+              liveSession.totalBytes,
+            )}</span
+          >
+          <span class="seeders"
+            >↓ <strong>{formatBytes(liveSession.speedBps)}/s</strong></span
+          >
+          <span
+            >↑ <strong>{formatBytes(liveSession.uploadSpeedBps ?? 0)}/s</strong
+            ></span
+          >
           <span><strong>{liveSession.peers}</strong> connected peers</span>
           {#if app.torrentAutoSubs && app.jimakuApiKey}
             <span class="badge badge-ok">Jimaku Auto-Retime Active</span>
@@ -182,6 +410,18 @@
         {/if}
 
         <div class="live-actions">
+          <button class="btn btn-ghost" onclick={backToCandidateList}>
+            ← Pick another torrent
+          </button>
+          {#if nextUntriedCandidate}
+            <button
+              class="btn btn-primary"
+              disabled={starting}
+              onclick={tryNextCandidate}
+            >
+              Try Next Release ⏭
+            </button>
+          {/if}
           <button class="btn btn-ghost" onclick={onclose}>
             Keep running in background
           </button>
@@ -192,7 +432,11 @@
       </div>
     {:else}
       <div class="controls-bar">
-        <div class="mode-pills" role="radiogroup" aria-label="Torrent action mode">
+        <div
+          class="mode-pills"
+          role="radiogroup"
+          aria-label="Torrent action mode"
+        >
           <button
             class="mode-pill"
             class:on={chosenMode === "stream"}
@@ -246,22 +490,38 @@
         {#if loading}
           <div class="center-box">
             <span class="spinner"></span>
-            <span>Searching AnimeTosho & Nyaa for Episode {episodeNumber}…</span>
+            <span
+              >Searching enabled extensions for Episode {episodeNumber}…</span
+            >
+          </div>
+        {:else if extensions.filter((e) => e.enabled).length === 0}
+          <div class="center-box">
+            <strong>No torrent extensions enabled yet.</strong>
+            <p class="faint">
+              Paste an extension manifest or RSS/API source URL in the
+              Extensions box above to enable searching.
+            </p>
           </div>
         {:else if candidates.length === 0}
           <div class="center-box">
             <strong>No torrents found automatically.</strong>
-            <p class="faint">Try a custom search above or paste a magnet / .torrent URL below.</p>
+            <p class="faint">
+              Try a custom search above or paste a magnet / .torrent URL below.
+            </p>
           </div>
         {:else}
           {#each candidates as c, i (c.infoHash ?? c.title + i)}
             <div class="cand-row" class:best={i === 0}>
               <div class="cand-info">
                 <div class="cand-badges">
-                  {#if i === 0}<span class="badge badge-ok">Best Match</span>{/if}
-                  {#if c.resolution}<span class="badge badge-accent">{c.resolution}</span>{/if}
+                  {#if i === 0}<span class="badge badge-ok">Best Match</span
+                    >{/if}
+                  {#if c.resolution}<span class="badge badge-accent"
+                      >{c.resolution}</span
+                    >{/if}
                   {#if c.group}<span class="badge">{c.group}</span>{/if}
-                  {#if c.isBatch}<span class="badge badge-warn">Batch Pack</span>{/if}
+                  {#if c.isBatch}<span class="badge badge-warn">Batch Pack</span
+                    >{/if}
                   <span class="faint">{c.source}</span>
                 </div>
                 <strong class="cand-title" title={c.title}>{c.title}</strong>
@@ -276,7 +536,11 @@
                 disabled={starting}
                 onclick={() => startCandidate(c)}
               >
-                <Icon name={chosenMode === "download" ? "download" : "play"} size={13} fill={chosenMode !== "download"} />
+                <Icon
+                  name={chosenMode === "download" ? "download" : "play"}
+                  size={13}
+                  fill={chosenMode !== "download"}
+                />
                 {chosenMode === "download" ? "Download" : "Stream"}
               </button>
             </div>
@@ -290,7 +554,11 @@
           placeholder="Or paste a magnet:?xt=urn:btih:… or .torrent URL directly"
           bind:value={manualMagnet}
         />
-        <button class="btn btn-sm" disabled={!manualMagnet.trim() || starting} onclick={startManualMagnet}>
+        <button
+          class="btn btn-sm"
+          disabled={!manualMagnet.trim() || starting}
+          onclick={startManualMagnet}
+        >
           Load Link
         </button>
       </footer>
@@ -500,5 +768,61 @@
     color: var(--danger);
     font-size: 12.5px;
   }
+  .head-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .ext-box {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: var(--r-md);
+    background: var(--bg-elev);
+    border: 1.5px solid var(--border-strong);
+  }
+  .ext-box-head {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 12.5px;
+  }
+  .ext-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 150px;
+    overflow-y: auto;
+  }
+  .ext-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .ext-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+  }
+  .ext-item-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .ext-url {
+    font-size: 11px;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 </style>
-

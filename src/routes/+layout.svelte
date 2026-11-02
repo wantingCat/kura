@@ -9,6 +9,7 @@
   import UpdateBanner from "$lib/components/UpdateBanner.svelte";
   import Toasts from "$lib/components/Toasts.svelte";
   import MpvInstallModal from "$lib/components/MpvInstallModal.svelte";
+  import BuiltinPlayerModal from "$lib/components/BuiltinPlayerModal.svelte";
   import { mpvModal } from "$lib/mpvModal.svelte";
   import ChangelogModal from "$lib/components/ChangelogModal.svelte";
   import { changelogModal } from "$lib/changelogModal.svelte";
@@ -40,10 +41,15 @@
     <UpdateBanner />
     {@render children()}
   </main>
-  <Toasts />
-  <MpvInstallModal />
-  <ChangelogModal />
 </div>
+
+{#if app.builtinPlayer?.active}
+  <BuiltinPlayerModal playerState={app.builtinPlayer} />
+{/if}
+
+<Toasts />
+<MpvInstallModal />
+<ChangelogModal />
 
 <style>
   .shell {
@@ -53,6 +59,7 @@
     width: 100vw;
     overflow: hidden;
   }
+
   main {
     flex: 1;
     min-height: 0;

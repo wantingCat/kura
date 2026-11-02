@@ -1,7 +1,7 @@
 //! Persisting provider data into the local cache.
 
 use crate::db::now;
-use crate::providers::{AlCharacters, AlMedia, AlStaff, EpisodeMeta};
+use crate::providers::{AlCharacters, AlMedia, AlSeasonalMedia, AlStaff, EpisodeMeta};
 use anyhow::Result;
 use rusqlite::{params, Connection};
 
@@ -104,6 +104,95 @@ pub fn upsert_media(conn: &Connection, m: &AlMedia) -> Result<()> {
             m.staff.as_ref(),
         );
     }
+    if let Some(entry) = &m.media_list_entry {
+        let _ = conn.execute_batch(crate::db::SCHEMA_V5);
+        let eff_prog = if entry.status == "COMPLETED" {
+            entry.progress.max(m.episodes.unwrap_or(1))
+        } else {
+            entry.progress
+        };
+        let _ = conn.execute(
+            "INSERT INTO anilist_entries (anilist_id, entry_id, status, progress, score, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(anilist_id) DO UPDATE SET
+               entry_id = excluded.entry_id,
+               status = excluded.status,
+               progress = MAX(anilist_entries.progress, excluded.progress),
+               score = COALESCE(excluded.score, anilist_entries.score),
+               updated_at = excluded.updated_at",
+            params![
+                m.id,
+                entry.id,
+                entry.status,
+                eff_prog,
+                entry.score,
+                entry.updated_at.unwrap_or_else(now)
+            ],
+        );
+        let _ = crate::anilist_sync::apply_remote_progress_to_local(conn, m.id, eff_prog);
+    } else {
+        crate::anilist_sync::reconcile_media_entry(conn, m.id, m.episodes);
+    }
+    Ok(())
+}
+
+/// Seed basic metadata from an AniList list/seasonal entry (`fetched_at = 0` so opening the detail page still fetches full relations/credits).
+pub fn upsert_seasonal_media(conn: &Connection, m: &AlSeasonalMedia) -> Result<()> {
+    let genres = serde_json::to_string(&m.genres)?;
+    let studios: Vec<String> = m
+        .studios
+        .as_ref()
+        .map(|s| s.nodes.iter().map(|n| n.name.clone()).collect())
+        .unwrap_or_default();
+    let studios = serde_json::to_string(&studios)?;
+    let cover = m.cover_image.as_ref();
+
+    conn.execute(
+        "INSERT INTO media (anilist_id, title_romaji, title_english, title_native, synonyms, format, status,
+            episodes, duration, season, season_year, start_date, genres, tags, studios,
+            cover_url, cover_color, banner_url, average_score, next_airing_episode, next_airing_at, fetched_at)
+         VALUES (?1, ?2, ?3, ?4, '[]', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, '[]', ?13, ?14, ?15, ?16, ?17, ?18, ?19, 0)
+         ON CONFLICT(anilist_id) DO UPDATE SET
+            title_romaji = COALESCE(excluded.title_romaji, media.title_romaji),
+            title_english = COALESCE(excluded.title_english, media.title_english),
+            title_native = COALESCE(excluded.title_native, media.title_native),
+            format = COALESCE(excluded.format, media.format),
+            status = COALESCE(excluded.status, media.status),
+            episodes = COALESCE(excluded.episodes, media.episodes),
+            duration = COALESCE(excluded.duration, media.duration),
+            season = COALESCE(excluded.season, media.season),
+            season_year = COALESCE(excluded.season_year, media.season_year),
+            start_date = COALESCE(excluded.start_date, media.start_date),
+            genres = CASE WHEN media.genres IS NULL OR media.genres = '[]' THEN excluded.genres ELSE media.genres END,
+            studios = CASE WHEN media.studios IS NULL OR media.studios = '[]' THEN excluded.studios ELSE media.studios END,
+            cover_url = COALESCE(media.cover_url, excluded.cover_url),
+            cover_color = COALESCE(media.cover_color, excluded.cover_color),
+            banner_url = COALESCE(media.banner_url, excluded.banner_url),
+            average_score = COALESCE(excluded.average_score, media.average_score),
+            next_airing_episode = excluded.next_airing_episode,
+            next_airing_at = excluded.next_airing_at",
+        params![
+            m.id,
+            m.title.romaji,
+            m.title.english,
+            m.title.native,
+            m.format,
+            m.status,
+            m.episodes,
+            m.duration,
+            m.season,
+            m.season_year,
+            m.start_date.as_ref().and_then(|d| d.to_string_opt()),
+            genres,
+            studios,
+            cover.and_then(|c| c.extra_large.clone().or(c.large.clone())),
+            cover.and_then(|c| c.color.clone()),
+            m.banner_image,
+            m.average_score,
+            m.next_airing_episode.as_ref().map(|a| a.episode),
+            m.next_airing_episode.as_ref().map(|a| a.airing_at),
+        ],
+    )?;
     Ok(())
 }
 

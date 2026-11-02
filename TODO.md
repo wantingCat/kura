@@ -15,10 +15,11 @@ This document serves as the master planning roadmap for Kura, organizing propose
 | **v0.3.6** | **Bug Fix**: Skip button no longer triggers on prologues (length-matched AniSkip, stricter chapter detection) + redesigned skip button & styled MPV messages | ✅ Completed |
 | **v0.3.7** | **Foundations (part 1)**: Settings Overhaul (sidebar + search), Full Backup & Restore, Diagnostics & Log, CI Checks, Startup-Hang Fix, Maximized Window | ✅ Completed |
 | **v0.4** | **Foundations, Sync & Airing**: Advanced Library Filtering, Visual Bug Sweep, AniList Two-Way Sync + Seasonal Airing Calendar & Countdown | ✅ Completed |
-| **v0.5** | **Streaming Mode, Subtitles & Cast**: 2-Mode Architecture (Offline vs. Hayase-style Nyaa Torrent Streaming) + Full Catalog & Seiyuu Discovery + Jimaku.cc Subtitle Fetcher + Auto-Retiming + Smart Subtitle Matcher | ✅ Completed |
-| **v0.6** | **Watch Analytics**: Watch-Time & Immersion Hours Tracker + Yearly Activity Heatmap | 💡 Planned |
-| **v0.7** | **Social & Music**: Syncplay Auto-Install & Launcher + AnimeThemes OP/ED Drawer + Linux/macOS Polish | 💡 Planned |
-| **v1.0** | **Polish, Built-in Player & Trust (Stable)**: Integrated `libmpv` Default Player, Performance, Windows Code Signing, Japanese UI Language | 💡 Future |
+| **v0.5** | **Streaming Mode, Subtitles & Cast**: 2-Mode Architecture (Offline vs. Torrent Streaming) + Full Catalog & Seiyuu Discovery + Jimaku.cc Subtitle Fetcher + Auto-Retiming + Smart Subtitle Matcher | ✅ Completed |
+| **v0.6** | **Built-In Memento Player, Yomitan Dictionary & Modular Extensions**: In-App Video Player + Pause-to-Hover Yomitan Dictionary + Modular Hayase/RSS Extensions (Zero Built-In Piracy) + SeaDex/DHT/PEX Swarm Engine + Live Streaming Subtitle Auto-Sync | ✅ Completed |
+| **v0.7** | **Watch Analytics**: Watch-Time & Immersion Hours Tracker + Yearly Activity Heatmap | 💡 Planned |
+| **v0.8** | **Social & Music**: Syncplay Auto-Install & Launcher + AnimeThemes OP/ED Drawer + Linux/macOS Polish | 💡 Planned |
+| **v1.0** | **Polish & Trust (Stable)**: Performance, Windows Code Signing, Japanese UI Language | 💡 Future |
 
 > **Versioning Policy**: Minor feature releases use two-part numbers (`0.4`, `0.5`, `0.6`, `0.7`), with three-part patch numbers (`0.4.1`) reserved strictly for small hotfixes. `1.0` marks the stable release.
 

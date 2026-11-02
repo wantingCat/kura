@@ -766,7 +766,7 @@
               <section class="block">
                 <h2 class="section-title">
                   {d.format === "MOVIE" ? "Movie" : "Episodes"}
-                  <span class="count">{owned} of {totalEps || regular.length} in library · {watched} watched</span>
+                  <span class="count">{owned} of {totalEps || regular.length} in library · {effectiveWatched} watched</span>
                 </h2>
                 {@render episodeList(regular)}
               </section>

@@ -78,6 +78,14 @@ const MEDIA_FIELDS: &str = r#"
   tags { name rank isMediaSpoiler }
   studios(isMain: true) { nodes { name } }
   nextAiringEpisode { episode airingAt }
+  mediaListEntry {
+    id
+    mediaId
+    status
+    progress
+    score(format: POINT_10_DECIMAL)
+    updatedAt
+  }
   relations {
     edges {
       relationType(version: 2)
@@ -281,6 +289,8 @@ pub struct AlMedia {
     pub tags: Vec<AlTag>,
     pub studios: Option<AlStudios>,
     pub next_airing_episode: Option<AlAiring>,
+    #[serde(default)]
+    pub media_list_entry: Option<AlListEntry>,
     pub relations: Option<AlRelations>,
     pub characters: Option<AlCharacters>,
     pub staff: Option<AlStaff>,
@@ -312,15 +322,36 @@ pub struct AlViewer {
     pub avatar: Option<AlAvatar>,
 }
 
+fn de_status<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_else(|| "PLANNING".to_string()))
+}
+
+fn de_progress<'de, D>(deserializer: D) -> std::result::Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<i64>::deserialize(deserializer)?;
+    Ok(opt.unwrap_or(0))
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlListEntry {
+    #[serde(default)]
     pub id: i64,
     pub media_id: i64,
+    #[serde(default, deserialize_with = "de_status")]
     pub status: String,
+    #[serde(default, deserialize_with = "de_progress")]
     pub progress: i64,
     pub score: Option<f64>,
     pub updated_at: Option<i64>,
+    #[serde(default)]
+    pub media: Option<AlSeasonalMedia>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -408,8 +439,12 @@ impl Providers {
     }
 
     pub async fn anilist_media(&self, id: i64) -> Result<AlMedia> {
+        self.anilist_media_authed(id, None).await
+    }
+
+    pub async fn anilist_media_authed(&self, id: i64, token: Option<&str>) -> Result<AlMedia> {
         let q = format!("query ($id: Int) {{ Media(id: $id, type: ANIME) {{ {MEDIA_FIELDS} {CREDITS_FIELDS} }} }}");
-        let data = self.anilist_query(&q, json!({ "id": id })).await?;
+        let data = self.anilist_authed_query(token, &q, json!({ "id": id })).await?;
         if data["Media"].is_null() {
             bail!("AniList media {id} not found");
         }
@@ -596,6 +631,23 @@ impl Providers {
                     progress
                     score(format: POINT_10_DECIMAL)
                     updatedAt
+                    media {
+                      id
+                      format
+                      status
+                      episodes
+                      duration
+                      season
+                      seasonYear
+                      averageScore
+                      genres
+                      title { romaji english native }
+                      startDate { year month day }
+                      coverImage { extraLarge large color }
+                      bannerImage
+                      studios(isMain: true) { nodes { name } }
+                      nextAiringEpisode { episode airingAt }
+                    }
                   }
                 }
               }
@@ -611,6 +663,28 @@ impl Providers {
                     for e in entries {
                         if let Ok(entry) = serde_json::from_value::<AlListEntry>(e.clone()) {
                             out.push(entry);
+                        } else if let Some(media_id) = e.get("mediaId").and_then(|v| v.as_i64()) {
+                            let id = e.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+                            let status = e
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("PLANNING")
+                                .to_string();
+                            let progress = e.get("progress").and_then(|v| v.as_i64()).unwrap_or(0);
+                            let score = e.get("score").and_then(|v| v.as_f64());
+                            let updated_at = e.get("updatedAt").and_then(|v| v.as_i64());
+                            let media = e
+                                .get("media")
+                                .and_then(|m| serde_json::from_value::<AlSeasonalMedia>(m.clone()).ok());
+                            out.push(AlListEntry {
+                                id,
+                                media_id,
+                                status,
+                                progress,
+                                score,
+                                updated_at,
+                                media,
+                            });
                         }
                     }
                 }

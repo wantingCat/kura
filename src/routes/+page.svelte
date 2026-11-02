@@ -12,8 +12,11 @@
     AIRING,
     filters,
     SORTS,
+    WATCH_TABS,
+    watchBucket,
     type FormatFilter,
     type SortKey,
+    type WatchFilter,
   } from "$lib/libraryFilters.svelte";
 
   const libId = $derived(page.url.searchParams.get("lib"));
@@ -30,11 +33,6 @@
     const denom = total(c) ?? c.ownedCount;
     return denom > 0 ? Math.min(1, c.watchedCount / denom) : 0;
   };
-  const isCompleted = (c: MediaCard) => {
-    const t = total(c);
-    return t !== null && t > 0 && c.watchedCount >= t;
-  };
-  const isWatching = (c: MediaCard) => c.watchedCount > 0 && !isCompleted(c);
 
   const formatOk = (c: MediaCard, f: FormatFilter) => {
     if (f === "tv") return ["TV", "TV_SHORT", "ONA"].includes(c.format ?? "");
@@ -46,11 +44,10 @@
   const present = (list: MediaCard[]) => groupCards(list, app.groupSeasons);
   const all = $derived(present(scoped));
 
-  const filtered = $derived.by(() => {
+  const baseEntries = $derived.by(() => {
     const q = norm(app.query);
     const terms = q ? q.split(" ") : [];
-    // Title, format and facet filters look at individual entries (so "Movies" pulls the movie out of its franchise)…
-    const entries = scoped.filter((c) => {
+    return scoped.filter((c) => {
       if (terms.length) {
         const h = haystacks.get(c.anilistId) ?? "";
         if (!terms.every((t) => h.includes(t))) return false;
@@ -58,13 +55,32 @@
       if (!formatOk(c, filters.format)) return false;
       return filters.matches(c);
     });
-    // …while watch status is judged for the franchise as a whole.
-    const list = present(entries).filter((c) => {
-      if (filters.watch === "unwatched" && c.watchedCount > 0) return false;
-      if (filters.watch === "watching" && !isWatching(c)) return false;
-      if (filters.watch === "completed" && !isCompleted(c)) return false;
-      return true;
-    });
+  });
+
+  const watchCounts = $derived({
+    watching: present(baseEntries.filter((c) => watchBucket(c) === "watching")).length,
+    planning: present(baseEntries.filter((c) => watchBucket(c) === "planning")).length,
+    completed: present(baseEntries.filter((c) => watchBucket(c) === "completed")).length,
+    paused: present(baseEntries.filter((c) => watchBucket(c) === "paused")).length,
+    dropped: present(baseEntries.filter((c) => watchBucket(c) === "dropped")).length,
+    all: present(baseEntries).length,
+  });
+
+  $effect(() => {
+    if (!filters.userPickedWatch && scoped.length > 0 && watchCounts[filters.watch] === 0) {
+      if (watchCounts.watching > 0) filters.watch = "watching";
+      else if (watchCounts.planning > 0) filters.watch = "planning";
+      else if (watchCounts.completed > 0) filters.watch = "completed";
+      else filters.watch = "all";
+    }
+  });
+
+  const filtered = $derived.by(() => {
+    const entries =
+      filters.watch === "all"
+        ? baseEntries
+        : baseEntries.filter((c) => watchBucket(c) === filters.watch);
+    const list = present(entries);
     const dir = filters.desc ? -1 : 1;
     const tie = (a: LibraryItem, b: LibraryItem) => displayTitle(a).localeCompare(displayTitle(b));
     const by: Record<SortKey, (a: LibraryItem, b: LibraryItem) => number> = {
@@ -78,10 +94,14 @@
     return list.sort(by[filters.sort]);
   });
 
-  const browsing = $derived(!app.query && !filters.active);
+  const browsing = $derived(!app.query && !filters.active && (filters.watch === "watching" || filters.watch === "all"));
   const recentlyAdded = $derived([...all].sort((a, b) => b.addedAt - a.addedAt).slice(0, 12));
 
-  const panelScoped = $derived(scoped.filter((c) => filters.matches(c)));
+  const panelScoped = $derived(
+    scoped.filter(
+      (c) => filters.matches(c) && (filters.watch === "all" || watchBucket(c) === filters.watch),
+    ),
+  );
   const counts = $derived({
     all: present(panelScoped).length,
     tv: present(panelScoped.filter((c) => formatOk(c, "tv"))).length,
@@ -89,6 +109,9 @@
     extra: present(panelScoped.filter((c) => formatOk(c, "extra"))).length,
   });
 
+  const activeWatchLabel = $derived(
+    WATCH_TABS.find((t) => t.key === filters.watch)?.label ?? "Library",
+  );
   const airingLabel = $derived(AIRING.find((a) => a.key === filters.airing)?.label ?? "");
 </script>
 
@@ -172,12 +195,29 @@
     {/if}
 
     <section class="row">
+      <nav class="status-tabs" aria-label="Watch status">
+        {#each WATCH_TABS as tab (tab.key)}
+          {@const cnt = watchCounts[tab.key]}
+          {#if tab.key === "watching" || tab.key === "planning" || tab.key === "completed" || tab.key === "all" || cnt > 0 || filters.watch === tab.key}
+            <button
+              class="status-tab"
+              class:active={filters.watch === tab.key}
+              onclick={() => filters.setWatch(tab.key as WatchFilter)}
+              id={`tab-watch-${tab.key}`}
+            >
+              <span>{tab.label}</span>
+              <span class="tab-badge">{cnt}</span>
+            </button>
+          {/if}
+        {/each}
+      </nav>
+
       <div class="toolbar">
         <h2 class="section-title">
           {#if app.query}
-            Results for “{app.query}” <span class="count">{filtered.length}</span>
+            Results for “{app.query}” · {activeWatchLabel} <span class="count">{filtered.length}</span>
           {:else}
-            {library?.name ?? "Library"} <span class="count">{filtered.length}</span>
+            {library ? `${library.name} · ${activeWatchLabel}` : activeWatchLabel} <span class="count">{filtered.length}</span>
           {/if}
         </h2>
         <div class="right">
@@ -194,12 +234,6 @@
               <span class="filter-badge">{filters.advancedCount}</span>
             {/if}
           </button>
-          <select class="input select" bind:value={filters.watch} id="filter-watch" aria-label="Watch status">
-            <option value="all">Any status</option>
-            <option value="unwatched">Unwatched</option>
-            <option value="watching">Watching</option>
-            <option value="completed">Completed</option>
-          </select>
           <div class="sort-group">
             <select
               class="input select"
@@ -334,6 +368,69 @@
     flex-wrap: wrap;
     gap: 8px;
     margin-bottom: 18px;
+  }
+
+  /* Library status tabs ---------------------------------------------------- */
+  .status-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 18px;
+    padding-bottom: 14px;
+    border-bottom: var(--bw) solid var(--border);
+  }
+  .status-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 38px;
+    padding: 0 16px;
+    border-radius: var(--r-sm);
+    border: var(--bw) solid var(--border);
+    background: var(--surface);
+    color: var(--text-2);
+    font-family: var(--font-display);
+    font-size: 13.5px;
+    font-weight: 800;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    box-shadow: 2px 2px 0 var(--shadow-color);
+    transition:
+      transform 0.14s var(--ease-spring),
+      box-shadow 0.14s var(--ease-spring),
+      background 0.14s ease,
+      color 0.14s ease,
+      border-color 0.14s ease;
+  }
+  .status-tab:hover {
+    transform: translate(-1px, -1px);
+    box-shadow: 3px 3px 0 var(--shadow-color);
+    color: var(--text);
+    background: var(--surface-2);
+  }
+  .status-tab.active {
+    background: var(--coral);
+    color: var(--on-coral);
+    border-color: var(--ink);
+    box-shadow: 3px 3px 0 var(--ink);
+  }
+  .tab-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--bg-2);
+    color: var(--text-3);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .status-tab.active .tab-badge {
+    background: rgba(20, 12, 13, 0.24);
+    color: var(--on-coral);
   }
 
   /* Library toolbar -------------------------------------------------------- */

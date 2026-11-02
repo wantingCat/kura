@@ -501,6 +501,72 @@ pub fn apply_remote_progress_to_local(conn: &Connection, anilist_id: i64, remote
     Ok(added)
 }
 
+/// Ensure a single media entry's cached AniList progress is reflected in `watch_state`.
+pub fn reconcile_media_entry(conn: &Connection, anilist_id: i64, total_eps: Option<i64>) {
+    let Some(rem) = get_remote_entry(conn, anilist_id) else {
+        return;
+    };
+    let eps = total_eps.or_else(|| {
+        conn.query_row(
+            "SELECT episodes FROM media WHERE anilist_id = ?1",
+            [anilist_id],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .ok()
+        .flatten()
+    });
+    let eff_prog = if rem.status == "COMPLETED" {
+        rem.progress.max(eps.unwrap_or(1))
+    } else {
+        rem.progress
+    };
+    if eff_prog > 0 {
+        let local_prog = local_watched_progress(conn, anilist_id);
+        if eff_prog > local_prog {
+            let _ = apply_remote_progress_to_local(conn, anilist_id, eff_prog);
+        }
+    }
+}
+
+/// Reconcile all cached `anilist_entries` rows into `watch_state` so both offline and streaming shows reflect watched episodes.
+pub fn reconcile_cached_entries(conn: &Connection) {
+    let _ = conn.execute_batch(db::SCHEMA_V5);
+    let rows: Vec<(i64, i64)> = {
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT ae.anilist_id,
+                    CASE WHEN ae.status = 'COMPLETED'
+                         THEN MAX(ae.progress, COALESCE(m.episodes, 1))
+                         ELSE ae.progress
+                    END AS eff_prog,
+                    (SELECT COUNT(*) FROM watch_state w
+                     WHERE w.anilist_id = ae.anilist_id
+                       AND w.ep_key NOT LIKE 'S%'
+                       AND w.ep_key NOT LIKE 'extra:%') AS local_cnt
+             FROM anilist_entries ae
+             LEFT JOIN media m ON m.anilist_id = ae.anilist_id
+             WHERE ae.progress > 0 OR ae.status = 'COMPLETED'",
+        ) else {
+            return;
+        };
+        stmt.query_map([], |r| {
+            let id: i64 = r.get(0)?;
+            let eff: i64 = r.get(1)?;
+            let loc: i64 = r.get(2)?;
+            Ok((id, eff, loc))
+        })
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|(_, eff, loc)| *eff > *loc)
+        .map(|(id, eff, _)| (id, eff))
+        .collect()
+    };
+    for (id, eff) in rows {
+        let _ = apply_remote_progress_to_local(conn, id, eff);
+    }
+}
+
 /// Enqueue a scrobble when an episode is marked watched locally, and trigger an async flush.
 pub fn on_episode_watched(app: &AppHandle, st: &Arc<AppState>, anilist_id: i64) {
     let should_flush = {
@@ -565,6 +631,68 @@ pub fn on_episode_watched(app: &AppHandle, st: &Arc<AppState>, anilist_id: i64) 
         let st_c = st.clone();
         tauri::async_runtime::spawn(async move {
             let _ = flush_queue(&app_c, &st_c).await;
+        });
+    }
+}
+
+/// Update `anilist_entries` (and AniList if auto-scrobble is enabled) when an episode is unmarked as watched locally.
+pub fn on_episode_unwatched(app: &AppHandle, st: &Arc<AppState>, anilist_id: i64) {
+    let push_target: Option<(String, i64, String)> = {
+        let conn = st.db();
+        let Some(remote) = get_remote_entry(&conn, anilist_id) else {
+            return;
+        };
+        let local_prog = local_watched_progress(&conn, anilist_id);
+        if local_prog >= remote.progress && remote.status != "COMPLETED" {
+            return;
+        }
+        let next_status = if remote.status == "COMPLETED" {
+            if local_prog > 0 {
+                "CURRENT".to_string()
+            } else {
+                "PLANNING".to_string()
+            }
+        } else {
+            remote.status.clone()
+        };
+        let _ = conn.execute(
+            "UPDATE anilist_entries SET progress = ?2, status = ?3, updated_at = ?4 WHERE anilist_id = ?1",
+            params![anilist_id, local_prog, next_status, now()],
+        );
+        let acct = get_account(&conn);
+        if acct.connected && acct.auto_scrobble {
+            db::get_setting(&conn, "anilist.token")
+                .ok()
+                .flatten()
+                .filter(|s| !s.trim().is_empty())
+                .map(|tok| (tok, local_prog, next_status))
+        } else {
+            None
+        }
+    };
+    if let Some((token, prog, status)) = push_target {
+        let app_c = app.clone();
+        let st_c = st.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Ok(saved) = st_c
+                .providers
+                .anilist_save_entry(&token, anilist_id, prog, Some(&status))
+                .await
+            {
+                let conn = st_c.db();
+                let _ = conn.execute(
+                    "UPDATE anilist_entries SET entry_id = ?2, status = ?3, progress = ?4, updated_at = ?5 WHERE anilist_id = ?1",
+                    params![
+                        anilist_id,
+                        saved.id,
+                        saved.status,
+                        saved.progress,
+                        saved.updated_at.unwrap_or_else(now)
+                    ],
+                );
+                let acct = get_account(&conn);
+                let _ = app_c.emit("anilist-changed", &acct);
+            }
         });
     }
 }
@@ -796,15 +924,26 @@ pub async fn flush_queue(app: &AppHandle, st: &Arc<AppState>) -> Result<usize> {
 
 /// Full two-way synchronization between Kura and AniList.
 pub async fn sync_now(app: &AppHandle, st: &Arc<AppState>) -> Result<AnilistSyncReport> {
-    let (token, user_id) = {
+    let (token, maybe_user_id) = {
         let conn = st.db();
+        let _ = conn.execute_batch(db::SCHEMA_V5);
         let token = db::get_setting(&conn, "anilist.token")?
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| anyhow::anyhow!("AniList is not connected."))?;
         let user_id = db::get_setting(&conn, "anilist.user_id")?
-            .and_then(|s| s.parse::<i64>().ok())
-            .ok_or_else(|| anyhow::anyhow!("AniList user ID missing."))?;
+            .and_then(|s| s.parse::<i64>().ok());
         (token, user_id)
+    };
+
+    let user_id = match maybe_user_id {
+        Some(uid) => uid,
+        None => {
+            let viewer = st.providers.anilist_viewer(&token).await?;
+            let conn = st.db();
+            let _ = db::set_setting(&conn, "anilist.user_id", &viewer.id.to_string());
+            let _ = db::set_setting(&conn, "anilist.user_name", &viewer.name);
+            viewer.id
+        }
     };
 
     let flushed_queue = flush_queue(app, st).await.unwrap_or(0);
@@ -827,6 +966,15 @@ pub async fn sync_now(app: &AppHandle, st: &Arc<AppState>) -> Result<AnilistSync
         let mut conn = st.db();
         let tx = conn.transaction()?;
         for e in remote_by_media.values() {
+            if let Some(m) = &e.media {
+                let _ = crate::store::upsert_seasonal_media(&tx, m);
+            }
+            let media_eps = e.media.as_ref().and_then(|m| m.episodes);
+            let eff_prog = if e.status == "COMPLETED" {
+                e.progress.max(media_eps.unwrap_or(1))
+            } else {
+                e.progress
+            };
             tx.execute(
                 "INSERT INTO anilist_entries (anilist_id, entry_id, status, progress, score, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -840,19 +988,26 @@ pub async fn sync_now(app: &AppHandle, st: &Arc<AppState>) -> Result<AnilistSync
                     e.media_id,
                     e.id,
                     e.status,
-                    e.progress,
+                    eff_prog,
                     e.score,
                     e.updated_at.unwrap_or_else(now)
                 ],
             )?;
         }
 
-        // Collect all local media IDs (owned files or local watch state).
+        // Collect all local media IDs (owned files, stream library, or local watch state).
         let mut owned_ids: HashSet<i64> = HashSet::new();
-        {
-            let mut stmt = tx.prepare("SELECT DISTINCT anilist_id FROM local_files WHERE anilist_id IS NOT NULL")?;
-            for id in stmt.query_map([], |r| r.get::<_, i64>(0))?.flatten() {
-                owned_ids.insert(id);
+        for sql in [
+            "SELECT DISTINCT anilist_id FROM local_files WHERE anilist_id IS NOT NULL",
+            "SELECT DISTINCT anilist_id FROM watch_state WHERE anilist_id IS NOT NULL",
+            "SELECT DISTINCT anilist_id FROM stream_library WHERE anilist_id IS NOT NULL",
+        ] {
+            if let Ok(mut stmt) = tx.prepare(sql) {
+                if let Ok(rows) = stmt.query_map([], |r| r.get::<_, i64>(0)) {
+                    for id in rows.flatten() {
+                        owned_ids.insert(id);
+                    }
+                }
             }
         }
         let mut all_ids: HashSet<i64> = owned_ids.clone();
@@ -869,14 +1024,21 @@ pub async fn sync_now(app: &AppHandle, st: &Arc<AppState>) -> Result<AnilistSync
                 .optional()?
                 .flatten();
             let rem = remote_by_media.get(&id);
+            let rem_eff_prog = rem.map(|r| {
+                if r.status == "COMPLETED" {
+                    r.progress.max(total_eps.unwrap_or(1))
+                } else {
+                    r.progress
+                }
+            });
             let (merged_prog, status, pull, push) = decide_merge(
                 local_prog,
                 total_eps,
-                rem.map(|r| r.progress),
+                rem_eff_prog,
                 rem.map(|r| r.status.as_str()),
                 owned_ids.contains(&id),
             );
-            if pull && owned_ids.contains(&id) {
+            if pull {
                 let added = apply_remote_progress_to_local(&tx, id, merged_prog)?;
                 if added > 0 {
                     pulled_s += 1;
@@ -938,10 +1100,10 @@ pub async fn sync_now(app: &AppHandle, st: &Arc<AppState>) -> Result<AnilistSync
         let conn = st.db();
         let _ = db::set_setting(&conn, "anilist.last_sync_at", &now().to_string());
     }
-    if pulled_episodes > 0 {
+    if pulled_episodes > 0 || total_remote > 0 {
         crate::backup::mark_dirty();
-        let _ = app.emit("library-changed", ());
     }
+    let _ = app.emit("library-changed", ());
     let acct = get_account(&st.db());
     let _ = app.emit("anilist-changed", &acct);
 
@@ -957,12 +1119,42 @@ pub async fn sync_now(app: &AppHandle, st: &Arc<AppState>) -> Result<AnilistSync
     })
 }
 
-/// Background worker: retries offline scrobbles every 60s and fires airing notifications.
+/// Background worker: reconciles cached entries on startup, runs an initial AniList sync, retries offline scrobbles every 60s, and fires airing notifications.
 pub fn start_worker(app: AppHandle, st: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
+        {
+            let conn = st.db();
+            reconcile_cached_entries(&conn);
+        }
+        let has_token = {
+            let conn = st.db();
+            db::get_setting(&conn, "anilist.token")
+                .ok()
+                .flatten()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        };
+        if has_token {
+            let _ = sync_now(&app, &st).await;
+        }
+        let mut ticks: u64 = 0;
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
+            ticks = ticks.wrapping_add(1);
             let _ = flush_queue(&app, &st).await;
+            if ticks % 15 == 0 {
+                let connected = {
+                    let conn = st.db();
+                    db::get_setting(&conn, "anilist.token")
+                        .ok()
+                        .flatten()
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false)
+                };
+                if connected {
+                    let _ = sync_now(&app, &st).await;
+                }
+            }
             check_airing_notifications(&app, &st);
         }
     });

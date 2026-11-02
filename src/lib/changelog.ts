@@ -16,10 +16,39 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.6",
+    title: "Built-In Memento Player, Hover Yomitan Dictionary & Modular Torrent Extensions",
+    date: "November 2026",
+    badge: "Latest",
+    summary:
+      "Kura v0.6 introduces the built-in Memento-style video player with pause-to-hover Yomitan Japanese dictionary lookup, transitions torrent streaming to a 100% modular bring-your-own-extension architecture (compatible with Hayase index.json manifests, RSS feeds, SubsPlease, and SeaDex), upgrades the BitTorrent engine with DHT/PEX/WebSeeds and a live player HUD, and adds live subtitle auto-sync for streaming episodes with distributor intro bumpers.",
+    items: [
+      {
+        type: "new",
+        text: "Kura Built-In (Memento) Video Player: watch episodes directly inside Kura with hardware-accelerated playback, live H.264/AAC stream transcoding fallback for 10-bit HEVC/AC3, embedded MKV subtitle & chapter extraction, AniSkip OP/ED skip, and a live top-bar torrent stats HUD (downloaded %, MB, download speed, upload speed, and peers).",
+      },
+      {
+        type: "new",
+        text: "Pause-to-Hover Yomitan Japanese Dictionary: pause the built-in player and hover over any Japanese subtitle word to deinflect conjugated verbs/adjectives and view furigana readings, pitch accent, word frequencies, definitions, audio pronunciation, and Kanji breakdowns — with a 1-Click Full JMdict + KANJIDIC downloader and Yomitan .zip importer in Settings → Audio & Subtitles.",
+      },
+      {
+        type: "new",
+        text: "Modular Torrent Extensions (Zero Built-In Piracy): add Hayase-compatible extension manifests (index.json), Kura JSON manifests, or custom RSS / SubsPlease / SeaDex endpoints in Settings → Playback while keeping Kura completely clean of hardcoded piracy domains.",
+      },
+      {
+        type: "improvement",
+        text: "Sub-Second Concurrent Torrent Search & Swarm Engine: queries all enabled extensions concurrently in a single wave with early straggler cancellation, highlights ★ SeaDex Best releases, and adds Mainline DHT (BEP 5), Peer Exchange (BEP 11), Tracker Scrape (BEP 48), and WebSeed (BEP 19) support.",
+      },
+      {
+        type: "improvement",
+        text: "Live Streaming Subtitle Auto-Sync & AniList Status Tabs: automatically aligns external Jimaku Japanese subtitles against embedded MKV dialogue cues during live sequential streaming (compensating for Viz Media / Crunchyroll / Netflix intro bumpers), plus adds Watching / Planning / Completed / Paused / Dropped / All tabs to the library.",
+      },
+    ],
+  },
+  {
     version: "0.5",
     title: "2-Mode Streaming & Hybrid Architecture, Jimaku Subtitles & Auto-Retiming",
     date: "November 2026",
-    badge: "Latest",
     summary:
       "A massive leap forward for Kura: switch between classic Offline Library Mode and Hayase-style Streaming & Hybrid Mode with built-in Nyaa BitTorrent sequential streaming into mpv & Memento, browse the full AniList catalog and Voice Actors (Seiyuu) with infinite scroll, plus the complete Japanese Immersion Suite — Jimaku.cc subtitle fetching, Smart Subtitle Matcher, and automatic Alass-style subtitle retiming.",
     items: [

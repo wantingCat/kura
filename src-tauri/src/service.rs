@@ -65,7 +65,14 @@ pub async fn ensure_media(st: &AppState, id: i64) -> Result<()> {
     if !stale {
         return Ok(());
     }
-    match st.providers.anilist_media(id).await {
+    let token = {
+        let conn = st.db();
+        db::get_setting(&conn, "anilist.token")
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+    };
+    match st.providers.anilist_media_authed(id, token.as_deref()).await {
         Ok(m) => store::upsert_media(&st.db(), &m),
         // Offline / API error: fall back to whatever we have.
         Err(e) if existing.is_some() => {
@@ -220,11 +227,15 @@ pub async fn fetch_episodes(st: &AppState, m: &MediaLite) -> Result<()> {
     }
 
     // Fill gaps so every expected episode has a row.
+    let remote_prog = crate::anilist_sync::get_remote_entry(&st.db(), m.id)
+        .map(|r| r.progress)
+        .unwrap_or(0);
     let expected = m
         .episodes
         .or(m.next_airing_episode.map(|n| n - 1))
         .unwrap_or(0)
-        .max(if m.format.as_deref() == Some("MOVIE") { 1 } else { 0 });
+        .max(if m.format.as_deref() == Some("MOVIE") { 1 } else { 0 })
+        .max(remote_prog);
     let present: HashSet<String> = eps.iter().map(|e| e.ep_key.clone()).collect();
     for n in 1..=expected {
         if !present.contains(&n.to_string()) {

@@ -261,11 +261,13 @@ pub struct MediaCard {
     franchise_id: i64,
     franchise_index: usize,
     franchise_size: usize,
+    anilist_status: Option<String>,
 }
 
 #[tauri::command]
 pub async fn get_library(st: St<'_>, library_id: Option<i64>) -> CmdResult<Vec<MediaCard>> {
     let conn = st.db();
+    crate::anilist_sync::reconcile_cached_entries(&conn);
     let mut stmt = conn
         .prepare(
             "SELECT m.anilist_id, m.title_romaji, m.title_english, m.title_native, m.synonyms, m.format, m.status,
@@ -275,9 +277,13 @@ pub async fn get_library(st: St<'_>, library_id: Option<i64>) -> CmdResult<Vec<M
                     MIN(f.added_at) AS added,
                     MIN(CASE WHEN g.manual = 1 THEN 1.0 ELSE COALESCE(g.confidence, 1.0) END) AS conf,
                     GROUP_CONCAT(DISTINCT f.library_id) AS libs,
-                    (SELECT COUNT(*) FROM watch_state w WHERE w.anilist_id = m.anilist_id AND w.ep_key NOT LIKE 'S%') AS watched,
+                    MAX(
+                      (SELECT COUNT(*) FROM watch_state w WHERE w.anilist_id = m.anilist_id AND w.ep_key NOT LIKE 'S%' AND w.ep_key NOT LIKE 'extra:%'),
+                      COALESCE((SELECT CASE WHEN ae.status = 'COMPLETED' THEN MAX(ae.progress, COALESCE(m.episodes, 1)) ELSE ae.progress END FROM anilist_entries ae WHERE ae.anilist_id = m.anilist_id), 0)
+                    ) AS watched,
                     (SELECT MAX(watched_at) FROM watch_state w WHERE w.anilist_id = m.anilist_id) AS last_watched,
-                    NULLIF(m.logo_url, ''), m.logo_path, m.tags, m.studios
+                    NULLIF(m.logo_url, ''), m.logo_path, m.tags, m.studios,
+                    (SELECT ae.status FROM anilist_entries ae WHERE ae.anilist_id = m.anilist_id) AS al_status
              FROM media m
              JOIN local_files f ON f.anilist_id = m.anilist_id
              LEFT JOIN match_groups g ON g.id = f.group_id
@@ -326,6 +332,7 @@ pub async fn get_library(st: St<'_>, library_id: Option<i64>) -> CmdResult<Vec<M
                 franchise_id: 0,
                 franchise_index: 0,
                 franchise_size: 1,
+                anilist_status: r.get(28)?,
             })
         })
         .map_err(err)?
@@ -356,16 +363,17 @@ pub async fn get_library(st: St<'_>, library_id: Option<i64>) -> CmdResult<Vec<M
                     m.cover_color, m.banner_url, m.banner_path, m.description,
                     COALESCE(sl.added_at, ae.updated_at, m.fetched_at) AS added,
                     MAX(
-                      (SELECT COUNT(*) FROM watch_state w WHERE w.anilist_id = m.anilist_id AND w.ep_key NOT LIKE 'S%'),
-                      COALESCE(ae.progress, 0)
+                      (SELECT COUNT(*) FROM watch_state w WHERE w.anilist_id = m.anilist_id AND w.ep_key NOT LIKE 'S%' AND w.ep_key NOT LIKE 'extra:%'),
+                      CASE WHEN ae.status = 'COMPLETED' THEN MAX(COALESCE(ae.progress, 0), COALESCE(m.episodes, 1)) ELSE COALESCE(ae.progress, 0) END
                     ) AS watched,
                     (SELECT MAX(watched_at) FROM watch_state w WHERE w.anilist_id = m.anilist_id) AS last_watched,
-                    NULLIF(m.logo_url, ''), m.logo_path, m.tags, m.studios
+                    NULLIF(m.logo_url, ''), m.logo_path, m.tags, m.studios,
+                    (SELECT ae.status FROM anilist_entries ae WHERE ae.anilist_id = m.anilist_id) AS al_status
              FROM media m
              LEFT JOIN stream_library sl ON sl.anilist_id = m.anilist_id
              LEFT JOIN anilist_entries ae ON ae.anilist_id = m.anilist_id
              WHERE sl.anilist_id IS NOT NULL
-                OR (ae.anilist_id IS NOT NULL AND ae.status IN ('CURRENT', 'PLANNING', 'COMPLETED', 'PAUSED', 'REPEATING'))",
+                OR (ae.anilist_id IS NOT NULL AND ae.status IN ('CURRENT', 'PLANNING', 'COMPLETED', 'PAUSED', 'DROPPED', 'REPEATING'))",
         ) {
             if let Ok(extra_iter) = s_stmt.query_map([], |r: &Row| {
                 let id: i64 = r.get(0)?;
@@ -401,6 +409,7 @@ pub async fn get_library(st: St<'_>, library_id: Option<i64>) -> CmdResult<Vec<M
                     franchise_id: id,
                     franchise_index: 0,
                     franchise_size: 1,
+                    anilist_status: r.get(25)?,
                 })
             }) {
                 for card in extra_iter.flatten() {
@@ -666,7 +675,7 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
         let _ = conn.execute_batch(db::SCHEMA_V5);
         let hm: bool = conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM media WHERE anilist_id = ?1)",
+                "SELECT EXISTS(SELECT 1 FROM media WHERE anilist_id = ?1 AND fetched_at > 0)",
                 [anilist_id],
                 |r| r.get(0),
             )
@@ -689,16 +698,8 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
         let _ = crate::service::ensure_episodes(&st, anilist_id).await;
     }
     let _ = crate::service::ensure_credits(&st, anilist_id).await;
-    if let Some(rem) = crate::anilist_sync::get_remote_entry(&st.db(), anilist_id) {
-        if rem.progress > 0 {
-            let _ = crate::anilist_sync::apply_remote_progress_to_local(
-                &st.db(),
-                anilist_id,
-                rem.progress,
-            );
-        }
-    }
     let conn = st.db();
+    crate::anilist_sync::reconcile_media_entry(&conn, anilist_id, None);
     let mut d = conn
         .query_row(
             "SELECT anilist_id, id_mal, title_romaji, title_english, title_native, synonyms, format, status, episodes,
@@ -938,38 +939,60 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
     d.episode_list.retain(|e| {
         !e.is_special || !e.files.is_empty() || e.title_en.is_some() || e.title_ja.is_some()
     });
-    if !d.episode_list.iter().any(|e| !e.is_special) {
-        let fallback_count = d
-            .episodes
-            .or_else(|| d.next_airing_episode)
-            .unwrap_or(if d.format.as_deref() == Some("MOVIE") {
-                1
-            } else {
-                12
-            })
-            .clamp(1, 200);
-        for n in 1..=fallback_count {
-            let key = n.to_string();
-            d.episode_list.push(EpisodeRow {
-                ep_key: key.clone(),
-                number: n,
-                is_special: false,
-                title_en: None,
-                title_ja: None,
-                title_romaji: None,
-                overview: None,
-                air_date: None,
-                runtime: d.duration,
-                thumb_url: None,
-                thumb_path: None,
-                filler: false,
-                recap: false,
-                files: Vec::new(),
-                watched_at: watched.get(&key).copied(),
-                progress_pos: None,
-                progress_dur: None,
-                subtitles: Vec::new(),
-            });
+    let max_watched_ep: i64 = watched
+        .keys()
+        .filter(|k| !k.starts_with('S') && !k.starts_with("extra:"))
+        .filter_map(|k| k.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0);
+    let has_any_regular = d.episode_list.iter().any(|e| !e.is_special);
+    let expected_regular = d
+        .episodes
+        .or_else(|| d.next_airing_episode.map(|n| (n - 1).max(1)))
+        .unwrap_or(if d.format.as_deref() == Some("MOVIE") {
+            1
+        } else if has_any_regular {
+            0
+        } else {
+            12
+        })
+        .max(max_watched_ep)
+        .clamp(0, 2000);
+    if expected_regular > 0 {
+        let existing_regular: std::collections::HashSet<i64> = d
+            .episode_list
+            .iter()
+            .filter(|e| !e.is_special)
+            .map(|e| e.number)
+            .collect();
+        for n in 1..=expected_regular {
+            if !existing_regular.contains(&n) {
+                let key = n.to_string();
+                let (progress_pos, progress_dur) = progress
+                    .get(&key)
+                    .map(|(p, dur)| (Some(*p), Some(*dur)))
+                    .unwrap_or((None, None));
+                d.episode_list.push(EpisodeRow {
+                    ep_key: key.clone(),
+                    number: n,
+                    is_special: false,
+                    title_en: None,
+                    title_ja: None,
+                    title_romaji: None,
+                    overview: None,
+                    air_date: None,
+                    runtime: d.duration,
+                    thumb_url: None,
+                    thumb_path: None,
+                    filler: false,
+                    recap: false,
+                    files: Vec::new(),
+                    watched_at: watched.get(&key).copied(),
+                    progress_pos,
+                    progress_dur,
+                    subtitles: Vec::new(),
+                });
+            }
         }
     }
     d.episode_list.sort_by(|a, b| {
@@ -1077,7 +1100,10 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
                             m.season_year, m.episodes,
                             (SELECT COUNT(DISTINCT f.ep_key) FROM local_files f
                               WHERE f.anilist_id = m.anilist_id AND f.ep_key NOT LIKE 'S%'),
-                            (SELECT COUNT(*) FROM watch_state w WHERE w.anilist_id = m.anilist_id AND w.ep_key NOT LIKE 'S%')
+                            MAX(
+                              (SELECT COUNT(*) FROM watch_state w WHERE w.anilist_id = m.anilist_id AND w.ep_key NOT LIKE 'S%' AND w.ep_key NOT LIKE 'extra:%'),
+                              COALESCE((SELECT CASE WHEN ae.status = 'COMPLETED' THEN MAX(ae.progress, COALESCE(m.episodes, 1)) ELSE ae.progress END FROM anilist_entries ae WHERE ae.anilist_id = m.anilist_id), 0)
+                            )
                      FROM media m WHERE m.anilist_id = ?1",
                 )
                 .map_err(err)?;
@@ -1200,6 +1226,8 @@ pub async fn set_watched(
     drop(conn);
     if watched {
         crate::anilist_sync::on_episode_watched(&app, &st, anilist_id);
+    } else {
+        crate::anilist_sync::on_episode_unwatched(&app, &st, anilist_id);
     }
     let _ = app.emit("library-changed", ());
     crate::backup::mark_dirty();
@@ -1297,7 +1325,18 @@ pub async fn fix_match(
 /// Re-fetch metadata + episodes for one entry.
 #[tauri::command]
 pub async fn refresh_media(app: AppHandle, st: St<'_>, anilist_id: i64) -> CmdResult<()> {
-    let m = st.providers.anilist_media(anilist_id).await.map_err(err)?;
+    let token = {
+        let conn = st.db();
+        db::get_setting(&conn, "anilist.token")
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+    };
+    let m = st
+        .providers
+        .anilist_media_authed(anilist_id, token.as_deref())
+        .await
+        .map_err(err)?;
     store::upsert_media(&st.db(), &m).map_err(err)?;
     let lite = db::media_lite(&st.db(), anilist_id)
         .map_err(err)?
@@ -3046,4 +3085,127 @@ pub async fn list_torrent_sessions() -> CmdResult<Vec<crate::torrent::TorrentSes
 pub async fn cancel_torrent_session(session_id: String) -> CmdResult<()> {
     crate::torrent::cancel_session(&session_id);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn list_torrent_extensions(
+    st: St<'_>,
+) -> CmdResult<Vec<crate::torrent::TorrentExtension>> {
+    let conn = st.db();
+    Ok(crate::torrent::list_torrent_extensions(&conn))
+}
+
+#[tauri::command]
+pub async fn import_torrent_extension(
+    st: St<'_>,
+    input: String,
+) -> CmdResult<Vec<crate::torrent::TorrentExtension>> {
+    crate::torrent::import_torrent_extension(st.inner(), &input)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn toggle_torrent_extension(
+    st: St<'_>,
+    id: String,
+    enabled: bool,
+) -> CmdResult<Vec<crate::torrent::TorrentExtension>> {
+    crate::torrent::toggle_torrent_extension(st.inner(), &id, enabled).map_err(err)
+}
+
+#[tauri::command]
+pub async fn remove_torrent_extension(
+    st: St<'_>,
+    id: String,
+) -> CmdResult<Vec<crate::torrent::TorrentExtension>> {
+    crate::torrent::remove_torrent_extension(st.inner(), &id).map_err(err)
+}
+
+// ---------------------------------------------------------------------------
+// Built-in Memento Player & Yomitan Dictionary Commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn builtin_player_get_state() -> CmdResult<crate::embedded_player::BuiltinPlayerState> {
+    Ok(crate::embedded_player::get_state())
+}
+
+#[tauri::command]
+pub async fn builtin_player_command(
+    app: AppHandle,
+    st: St<'_>,
+    command: crate::embedded_player::BuiltinCommand,
+) -> CmdResult<crate::embedded_player::BuiltinPlayerState> {
+    crate::embedded_player::dispatch_command(app, st.inner().clone(), command)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn lookup_japanese_at(
+    st: St<'_>,
+    text: String,
+    char_offset: usize,
+) -> CmdResult<crate::dictionary::LookupResult> {
+    let data_dir = st.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = crate::dictionary::open_dict_db(&data_dir)?;
+        crate::dictionary::lookup_at(&conn, &text, char_offset)
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
+}
+
+#[tauri::command]
+pub async fn list_dictionaries(
+    st: St<'_>,
+) -> CmdResult<Vec<crate::dictionary::DictionaryInfo>> {
+    let data_dir = st.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = crate::dictionary::open_dict_db(&data_dir)?;
+        crate::dictionary::list_dictionaries(&conn)
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
+}
+
+#[tauri::command]
+pub async fn import_yomitan_dictionary(
+    st: St<'_>,
+    zip_path: String,
+) -> CmdResult<crate::dictionary::DictionaryInfo> {
+    let data_dir = st.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let bytes = std::fs::read(&zip_path)?;
+        let mut conn = crate::dictionary::open_dict_db(&data_dir)?;
+        crate::dictionary::import_yomitan_zip_bytes(&mut conn, &bytes)
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
+}
+
+#[tauri::command]
+pub async fn download_recommended_dictionaries(
+    app: AppHandle,
+    st: St<'_>,
+) -> CmdResult<Vec<crate::dictionary::DictionaryInfo>> {
+    crate::dictionary::download_recommended_dictionaries(&app, &st.data_dir)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn remove_dictionary(st: St<'_>, id: i64) -> CmdResult<()> {
+    let data_dir = st.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = crate::dictionary::open_dict_db(&data_dir)?;
+        crate::dictionary::remove_dictionary(&conn, id)
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
 }

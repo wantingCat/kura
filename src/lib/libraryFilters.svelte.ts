@@ -6,10 +6,33 @@
 import type { MediaCard } from "$lib/api";
 
 export type FormatFilter = "all" | "tv" | "movie" | "extra";
-export type WatchFilter = "all" | "unwatched" | "watching" | "completed";
+export type WatchFilter = "watching" | "planning" | "completed" | "paused" | "dropped" | "all";
 export type AiringFilter = "all" | "airing" | "finished" | "upcoming";
 export type SortKey = "added" | "watched" | "title" | "year" | "score" | "progress";
 export type FacetKey = "genres" | "tags" | "studios";
+
+export const WATCH_TABS: { key: WatchFilter; label: string }[] = [
+  { key: "watching", label: "Watching" },
+  { key: "planning", label: "Planning" },
+  { key: "completed", label: "Watched" },
+  { key: "paused", label: "Paused" },
+  { key: "dropped", label: "Dropped" },
+  { key: "all", label: "All" },
+];
+
+export function watchBucket(c: MediaCard): Exclude<WatchFilter, "all"> {
+  const t = c.episodes ?? (c.format === "MOVIE" ? 1 : null);
+  const doneByCount = t !== null && t > 0 && c.watchedCount >= t;
+  const st = c.anilistStatus;
+  if (st === "DROPPED") return "dropped";
+  if (st === "PAUSED") return "paused";
+  if (st === "COMPLETED") return "completed";
+  if (st === "REPEATING") return "watching";
+  if (doneByCount) return "completed";
+  if (st === "CURRENT") return "watching";
+  if (c.watchedCount > 0) return "watching";
+  return "planning";
+}
 
 export const SORTS: { key: SortKey; label: string; desc: boolean }[] = [
   { key: "added", label: "Date added", desc: true },
@@ -54,7 +77,8 @@ function loadSort(): { sort: SortKey; desc: boolean } {
 
 class LibraryFilters {
   format = $state<FormatFilter>("all");
-  watch = $state<WatchFilter>("all");
+  watch = $state<WatchFilter>("watching");
+  userPickedWatch = $state(false);
   airing = $state<AiringFilter>("all");
   genres = $state<string[]>([]);
   tags = $state<string[]>([]);
@@ -75,7 +99,12 @@ class LibraryFilters {
   }
 
   get active() {
-    return this.format !== "all" || this.watch !== "all" || this.advancedCount > 0;
+    return this.format !== "all" || this.advancedCount > 0;
+  }
+
+  setWatch(w: WatchFilter) {
+    this.watch = w;
+    this.userPickedWatch = true;
   }
 
   has(facet: FacetKey, value: string) {
@@ -97,7 +126,6 @@ class LibraryFilters {
   clearAll() {
     this.clearAdvanced();
     this.format = "all";
-    this.watch = "all";
   }
 
   setSort(key: SortKey) {
