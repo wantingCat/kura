@@ -16,16 +16,16 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
-    version: "0.6",
-    title: "Built-In Memento Player, Hover Yomitan Dictionary & Modular Torrent Extensions",
+    version: "0.6.1",
+    title: "Built-In Memento Player (Bundled MPV + GPU HEVC Main10), Hover Yomitan Dictionary & Modular Torrent Extensions",
     date: "November 2026",
     badge: "Latest",
     summary:
-      "Kura v0.6 introduces the built-in Memento-style video player with pause-to-hover Yomitan Japanese dictionary lookup, transitions torrent streaming to a 100% modular bring-your-own-extension architecture (compatible with Hayase index.json manifests, RSS feeds, SubsPlease, and SeaDex), upgrades the BitTorrent engine with DHT/PEX/WebSeeds and a live player HUD, and adds live subtitle auto-sync for streaming episodes with distributor intro bumpers.",
+      "Kura v0.6.1 introduces the built-in Memento-style video player with bundled portable MPV, native WebView2 GPU 10-bit HEVC (Main10) hardware decoding, and pause-to-hover Yomitan Japanese dictionary lookup, transitions torrent streaming to a 100% modular bring-your-own-extension architecture (compatible with Hayase index.json manifests, RSS feeds, SubsPlease, and SeaDex), upgrades the BitTorrent engine with DHT/PEX/WebSeeds and a live player HUD, and adds live subtitle auto-sync for streaming episodes with distributor intro bumpers.",
     items: [
       {
         type: "new",
-        text: "Kura Built-In (Memento) Video Player: watch episodes directly inside Kura with hardware-accelerated playback, live H.264/AAC stream transcoding fallback for 10-bit HEVC/AC3, embedded MKV subtitle & chapter extraction, AniSkip OP/ED skip, and a live top-bar torrent stats HUD (downloaded %, MB, download speed, upload speed, and peers).",
+        text: "Kura Built-In (Memento) Video Player with Bundled MPV & GPU 10-bit HEVC Decode: watch episodes directly inside Kura out-of-the-box with bundled portable mpv, native GPU D3D11/DXVA2 10-bit HEVC (Main10) hardware decoding, zero-copy multi-audio/AC3/TrueHD remuxing, embedded MKV subtitle & chapter extraction, AniSkip OP/ED skip, and a live top-bar torrent stats HUD.",
       },
       {
         type: "new",
