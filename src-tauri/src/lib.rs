@@ -23,6 +23,26 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Enable native GPU 10-bit HEVC (Main/Main10) hardware decoding and zero-copy video
+    // rendering inside Windows WebView2 so 10-bit HEVC anime plays directly on the GPU
+    // without CPU transcoding.
+    #[cfg(target_os = "windows")]
+    {
+        const WV2_ARGS: &str = "--enable-features=PlatformHEVCDecoderSupport,PlatformHEVCEncoderSupport --autoplay-policy=no-user-gesture-required --ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy";
+        match std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") {
+            Ok(existing) if !existing.contains("PlatformHEVCDecoderSupport") => {
+                std::env::set_var(
+                    "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                    format!("{existing} {WV2_ARGS}"),
+                );
+            }
+            Err(_) => {
+                std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", WV2_ARGS);
+            }
+            _ => {}
+        }
+    }
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

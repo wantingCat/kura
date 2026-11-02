@@ -442,6 +442,7 @@ async fn handle_transcode_stream(
     let mut cmd = std::process::Command::new(&mpv_exe);
     cmd.arg("--no-config")
         .arg("--no-terminal")
+        .arg("--hwdec=auto")
         .arg("--sub=no")
         .arg("--vid=1");
 
@@ -450,7 +451,7 @@ async fn handle_transcode_stream(
     } else {
         cmd.arg("--vf=format=yuv420p")
             .arg("--ovc=libx264")
-            .arg("--ovcopts=preset=ultrafast,crf=21");
+            .arg("--ovcopts=preset=ultrafast,tune=zerolatency,crf=20");
     }
 
     cmd.arg("--audio-channels=stereo")

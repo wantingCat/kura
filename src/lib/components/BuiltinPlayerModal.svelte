@@ -64,13 +64,11 @@
     }
   });
 
-  // Automatically engage zero-CPU live mpv audio remux (`vc=copy`) for local files whose
-  // Matroska audio codec is unsupported by WebView2 (FLAC, E-AC3, AC3, DTS, TrueHD, PCM)
+  // Automatically engage zero-CPU live mpv audio remux (`vc=copy`) when the selected
+  // Matroska audio codec is unsupported by WebView2 (E-AC3, AC3, DTS, TrueHD, MLP)
+  // or when switching to a secondary audio track (e.g. Dual-Audio releases).
   $effect(() => {
-    const isRemoteStream =
-      playerState.path.startsWith("http://") || playerState.path.startsWith("https://");
     if (
-      !isRemoteStream &&
       !useTranscode &&
       playerState.transcodeBaseUrl &&
       playerState.audioTracks.length > 0
@@ -80,7 +78,7 @@
       const codec = (selectedTrack?.codec ?? "").toLowerCase();
       const needsAudioTranscode =
         (selectedTrack && selectedTrack.id > 1) ||
-        /flac|eac3|ac3|dts|truehd|pcm|mlp/.test(codec);
+        /eac3|ac3|dts|truehd|mlp/.test(codec);
       if (needsAudioTranscode) {
         transcodeVideoCodec = "copy";
         transcodeStartOffset = playerState.position > 1.0 ? playerState.position : 0;
