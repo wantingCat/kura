@@ -67,6 +67,7 @@ pub fn run() {
             );
             let _ = app.asset_protocol_scope().allow_directory(&data_dir, true);
             let conn = db::open(&data_dir.join("kura.db"))?;
+            let _ = subtitles::cleanup_watched_subtitles(&conn, &data_dir);
             let (watcher, reload_rx) = watcher::WatcherHandle::new();
             let state = Arc::new(service::AppState::new(conn, data_dir.clone(), watcher));
             app.manage(state.clone());
@@ -182,6 +183,17 @@ pub fn run() {
             commands::download_recommended_dictionaries,
             commands::remove_dictionary,
         ])
+        .on_window_event(|window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+            ) {
+                if let Some(st) = window.try_state::<Arc<service::AppState>>() {
+                    let conn = st.db();
+                    let _ = subtitles::cleanup_watched_subtitles(&conn, &st.data_dir);
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

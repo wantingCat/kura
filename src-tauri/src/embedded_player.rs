@@ -442,14 +442,14 @@ async fn handle_transcode_stream(
     let mut cmd = std::process::Command::new(&mpv_exe);
     cmd.arg("--no-config")
         .arg("--no-terminal")
-        .arg("--hwdec=auto")
         .arg("--sub=no")
         .arg("--vid=1");
 
     if copy_video {
         cmd.arg("--ovc=copy");
     } else {
-        cmd.arg("--vf=format=yuv420p")
+        cmd.arg("--hwdec=auto-copy")
+            .arg("--vf=format=yuv420p")
             .arg("--ovc=libx264")
             .arg("--ovcopts=preset=ultrafast,tune=zerolatency,crf=20");
     }
@@ -463,8 +463,7 @@ async fn handle_transcode_stream(
     if aid > 0 {
         cmd.arg(format!("--aid={aid}"));
     } else {
-        cmd.arg("--aid=1")
-            .arg("--alang=jpn,ja,japanese,eng,en");
+        cmd.arg("--alang=jpn,ja,jp,japanese,und,eng,en");
     }
     if start_sec > 0.5 {
         cmd.arg(format!("--start=+{start_sec:.1}"));

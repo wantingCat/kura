@@ -201,6 +201,7 @@ CREATE TABLE IF NOT EXISTS linked_subtitles (
     source      TEXT NOT NULL DEFAULT 'matcher',
     retimed     INTEGER NOT NULL DEFAULT 0,
     offset_ms   INTEGER,
+    content     TEXT,
     created_at  INTEGER NOT NULL,
     UNIQUE(anilist_id, ep_key, path)
 );
@@ -369,6 +370,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     } else {
         conn.execute_batch(SCHEMA_V6)?;
     }
+    let _ = conn.execute("ALTER TABLE linked_subtitles ADD COLUMN content TEXT", []);
     if version < 8 {
         conn.execute_batch(&format!(
             "BEGIN; {SCHEMA_V7} PRAGMA user_version = 8; COMMIT;"

@@ -42,19 +42,104 @@
   let refreshing = $state(false);
   let expanded = $state<Set<string>>(new Set());
 
+  const detailCache = new Map<number, MediaDetail>();
+
+  function buildOptimisticDetail(target: number): MediaDetail | null {
+    const cached = detailCache.get(target);
+    if (cached) return cached;
+    const card = app.cards.find((c) => c.anilistId === target);
+    if (!card) return null;
+    const epCount = Math.max(card.episodes ?? (card.format === "MOVIE" ? 1 : 12), card.watchedCount ?? 0);
+    const episodeList: EpisodeRow[] = [];
+    for (let n = 1; n <= epCount; n++) {
+      episodeList.push({
+        epKey: String(n),
+        number: n,
+        isSpecial: false,
+        titleEn: null,
+        titleJa: null,
+        titleRomaji: null,
+        overview: null,
+        airDate: null,
+        runtime: null,
+        thumbUrl: null,
+        thumbPath: null,
+        filler: false,
+        recap: false,
+        files: [],
+        watchedAt: n <= card.watchedCount ? 1 : null,
+        subtitles: [],
+        progressPos: null,
+        progressDur: null,
+      });
+    }
+    return {
+      anilistId: card.anilistId,
+      idMal: null,
+      titleRomaji: card.titleRomaji,
+      titleEnglish: card.titleEnglish,
+      titleNative: card.titleNative,
+      synonyms: card.synonyms,
+      format: card.format,
+      status: card.status,
+      episodes: card.episodes,
+      duration: null,
+      season: card.season,
+      seasonYear: card.seasonYear,
+      startDate: null,
+      endDate: null,
+      description: card.description,
+      genres: card.genres,
+      tags: card.tags,
+      studios: card.studios,
+      coverUrl: card.coverUrl,
+      coverPath: card.coverPath,
+      coverColor: card.coverColor,
+      bannerUrl: card.bannerUrl,
+      bannerPath: card.bannerPath,
+      logoUrl: card.logoUrl,
+      logoPath: card.logoPath,
+      averageScore: card.averageScore,
+      nextAiringEpisode: null,
+      nextAiringAt: null,
+      episodesSource: null,
+      episodeList,
+      relations: [],
+      extras: [],
+      otherFiles: [],
+      groups: [],
+      franchise: [],
+      trackPref: null,
+      anilistStatus: card.anilistStatus,
+      anilistProgress: card.watchedCount || null,
+      anilistScore: null,
+      characters: [],
+      staff: [],
+      inStreamLibrary: false,
+    };
+  }
+
   async function load(target: number) {
     if (!d || d.anilistId !== target) {
-      loading = true;
-      error = null;
+      const optimistic = buildOptimisticDetail(target);
+      if (optimistic) {
+        d = optimistic;
+        loading = false;
+        error = null;
+      } else {
+        loading = true;
+        error = null;
+      }
     }
     try {
       const res = await api.getMediaDetail(target);
+      detailCache.set(target, res);
       if (target === id) {
         d = res;
         error = null;
       }
     } catch (e) {
-      if (target === id) {
+      if (target === id && !d) {
         error = String(e);
       }
     } finally {

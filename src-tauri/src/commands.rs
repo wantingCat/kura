@@ -669,10 +669,18 @@ fn file_ref(id: i64, path: String, size: i64) -> FileRef {
 }
 
 #[tauri::command]
-pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDetail> {
-    let (has_media, has_episodes) = {
+pub async fn get_media_detail(app: AppHandle, st: St<'_>, anilist_id: i64) -> CmdResult<MediaDetail> {
+    let (has_any_row, has_full_media, has_episodes, has_credits) = {
         let conn = st.db();
         let _ = conn.execute_batch(db::SCHEMA_V5);
+        let _ = conn.execute_batch(db::SCHEMA_V6);
+        let any: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM media WHERE anilist_id = ?1)",
+                [anilist_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
         let hm: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM media WHERE anilist_id = ?1 AND fetched_at > 0)",
@@ -687,17 +695,54 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
                 |r| r.get(0),
             )
             .unwrap_or(false);
-        (hm, he)
+        let hc: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM media_characters WHERE anilist_id = ?1)",
+                [anilist_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        (any, hm, he, hc)
     };
-    if !has_media {
+
+    // Only block if we have zero row in SQLite for this `anilist_id`.
+    // If we already have a seeded row (from Library, Discover, Seasonal Calendar, or AniList sync),
+    // return immediately in ~1ms and hydrate missing episode titles/credits in the background!
+    if !has_any_row {
         crate::service::ensure_media(&st, anilist_id)
             .await
             .map_err(err)?;
     }
-    if !has_episodes {
-        let _ = crate::service::ensure_episodes(&st, anilist_id).await;
+
+    if !has_full_media || !has_episodes || !has_credits {
+        let st_bg = st.inner().clone();
+        let app_bg = app.clone();
+        let need_media = has_any_row && !has_full_media;
+        let need_eps = !has_episodes;
+        let need_creds = !has_credits && has_full_media;
+        tokio::spawn(async move {
+            let mut changed = false;
+            if need_media {
+                if crate::service::ensure_media(&st_bg, anilist_id).await.is_ok() {
+                    changed = true;
+                }
+            }
+            if need_eps {
+                if crate::service::ensure_episodes(&st_bg, anilist_id).await.is_ok() {
+                    changed = true;
+                }
+            }
+            if need_creds {
+                if crate::service::ensure_credits(&st_bg, anilist_id).await.is_ok() {
+                    changed = true;
+                }
+            }
+            if changed {
+                let _ = app_bg.emit("library-changed", ());
+            }
+        });
     }
-    let _ = crate::service::ensure_credits(&st, anilist_id).await;
+
     let conn = st.db();
     crate::anilist_sync::reconcile_media_entry(&conn, anilist_id, None);
     let mut d = conn
@@ -1184,6 +1229,35 @@ pub async fn get_media_detail(st: St<'_>, anilist_id: i64) -> CmdResult<MediaDet
             }
         }
     }
+    let is_streaming_mode = db::get_setting(&conn, "pref.app_mode")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("streaming");
+    drop(conn);
+
+    if is_streaming_mode {
+        let remote_prog = d.anilist_progress.unwrap_or(0);
+        let next_ep = d
+            .episode_list
+            .iter()
+            .find(|e| !e.is_special && e.watched_at.is_none() && e.files.is_empty() && e.progress_pos.unwrap_or(0.0) > 0.0)
+            .or_else(|| {
+                d.episode_list
+                    .iter()
+                    .find(|e| !e.is_special && e.watched_at.is_none() && e.files.is_empty() && e.number > remote_prog)
+            })
+            .or_else(|| d.episode_list.iter().find(|e| !e.is_special && e.files.is_empty()))
+            .map(|e| e.number);
+
+        if let Some(ep_num) = next_ep.filter(|&n| n > 0) {
+            let st_pf = st.inner().clone();
+            tokio::spawn(async move {
+                let _ = crate::torrent::search_episode_torrents(&st_pf, anilist_id, ep_num, None).await;
+            });
+        }
+    }
+
     Ok(d)
 }
 

@@ -50,15 +50,20 @@ impl Providers {
     pub fn new() -> Self {
         let http = reqwest::Client::builder()
             .user_agent(concat!("Kura/", env!("CARGO_PKG_VERSION"), " (+https://github.com/kura-app/kura)"))
+            .connect_timeout(Duration::from_secs(4))
             .timeout(Duration::from_secs(10))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(16)
+            .tcp_nodelay(true)
+            .tcp_keepalive(Duration::from_secs(30))
             .build()
             .expect("http client");
         Self {
             http,
-            // AniList is currently limited to ~30 req/min; adjusted from response headers.
-            anilist_rl: RateLimiter::new(Duration::from_millis(2100)),
-            anizip_rl: RateLimiter::new(Duration::from_millis(250)),
-            jikan_rl: RateLimiter::new(Duration::from_millis(1100)),
+            // Allow fast interactive UI bursts while dynamically throttling if `x-ratelimit-remaining` drops low.
+            anilist_rl: RateLimiter::new(Duration::from_millis(100)),
+            anizip_rl: RateLimiter::new(Duration::from_millis(80)),
+            jikan_rl: RateLimiter::new(Duration::from_millis(650)),
         }
     }
 }
@@ -394,15 +399,19 @@ impl Providers {
             }
             let resp = req.send().await?;
 
-            if let Some(limit) = resp
+            let remaining = resp
                 .headers()
-                .get("x-ratelimit-limit")
+                .get("x-ratelimit-remaining")
                 .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-            {
-                if limit > 0 {
-                    // Stay slightly under the advertised per-minute limit.
-                    self.anilist_rl.set_interval(Duration::from_millis(60_000 / limit + 150));
+                .and_then(|v| v.parse::<u64>().ok());
+
+            if let Some(rem) = remaining {
+                if rem < 10 {
+                    self.anilist_rl.set_interval(Duration::from_millis(1500));
+                } else if rem < 25 {
+                    self.anilist_rl.set_interval(Duration::from_millis(450));
+                } else {
+                    self.anilist_rl.set_interval(Duration::from_millis(80));
                 }
             }
 

@@ -66,7 +66,7 @@
 
   // Automatically engage zero-CPU live mpv audio remux (`vc=copy`) when the selected
   // Matroska audio codec is unsupported by WebView2 (E-AC3, AC3, DTS, TrueHD, MLP)
-  // or when switching to a secondary audio track (e.g. Dual-Audio releases).
+  // or when switching to a secondary audio track (e.g. Dual-Audio releases where Track #1 is English Dub and Track #2 is Japanese).
   $effect(() => {
     if (
       !useTranscode &&
@@ -416,10 +416,11 @@
         playsinline
         onloadedmetadata={(e) => {
           const v = e.currentTarget;
-          if (!useTranscode && v.videoWidth === 0 && playerState.transcodeBaseUrl) {
+          if ((!useTranscode || transcodeVideoCodec === "copy") && v.videoWidth === 0 && playerState.transcodeBaseUrl) {
             transcodeVideoCodec = "h264";
             transcodeStartOffset = playerState.position > 1.0 ? playerState.position : 0;
             useTranscode = true;
+            transcodeRev += 1;
             return;
           }
           if (!useTranscode && !initialSeekDone && playerState.position > 1.0) {
@@ -431,10 +432,11 @@
           v.playbackRate = playerState.speed;
         }}
         onerror={() => {
-          if (!useTranscode && playerState.transcodeBaseUrl) {
+          if ((!useTranscode || transcodeVideoCodec === "copy") && playerState.transcodeBaseUrl) {
             transcodeVideoCodec = "h264";
             transcodeStartOffset = playerState.position > 1.0 ? playerState.position : 0;
             useTranscode = true;
+            transcodeRev += 1;
           }
         }}
         ontimeupdate={(e) => {
