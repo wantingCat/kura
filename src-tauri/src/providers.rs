@@ -345,6 +345,14 @@ where
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AlCustomListGroup {
+    pub name: String,
+    pub is_custom_list: bool,
+    pub entries: Vec<AlListEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AlListEntry {
     #[serde(default)]
     pub id: i64,
@@ -700,6 +708,181 @@ impl Providers {
             }
         }
         Ok(out)
+    }
+
+    pub async fn anilist_user_lists_grouped(
+        &self,
+        token: &str,
+        user_id: i64,
+    ) -> Result<Vec<AlCustomListGroup>> {
+        let q = r#"
+            query ($userId: Int) {
+              MediaListCollection(userId: $userId, type: ANIME) {
+                user {
+                  mediaListOptions {
+                    animeList {
+                      customLists
+                    }
+                  }
+                }
+                lists {
+                  name
+                  isCustomList
+                  entries {
+                    id
+                    mediaId
+                    status
+                    progress
+                    private
+                    customLists
+                    score(format: POINT_10_DECIMAL)
+                    updatedAt
+                    media {
+                      id
+                      format
+                      status
+                      episodes
+                      duration
+                      season
+                      seasonYear
+                      averageScore
+                      genres
+                      title { romaji english native }
+                      startDate { year month day }
+                      coverImage { extraLarge large color }
+                      bannerImage
+                      studios(isMain: true) { nodes { name } }
+                      nextAiringEpisode { episode airingAt }
+                    }
+                  }
+                }
+              }
+            }
+        "#;
+        let data = self
+            .anilist_authed_query(Some(token), q, json!({ "userId": user_id }))
+            .await?;
+
+        let mut groups: Vec<AlCustomListGroup> = Vec::new();
+        let mut custom_by_name: std::collections::HashMap<String, Vec<AlListEntry>> =
+            std::collections::HashMap::new();
+        let mut private_entries: Vec<AlListEntry> = Vec::new();
+        let mut seen_private_ids = std::collections::HashSet::new();
+
+        // Seed any custom list names configured on the user's AniList profile
+        if let Some(cfg_lists) =
+            data["MediaListCollection"]["user"]["mediaListOptions"]["animeList"]["customLists"]
+                .as_array()
+        {
+            for cl in cfg_lists {
+                if let Some(name) = cl.as_str().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    custom_by_name.entry(name.to_string()).or_default();
+                }
+            }
+        }
+
+        if let Some(lists) = data["MediaListCollection"]["lists"].as_array() {
+            for list in lists {
+                let list_name = list["name"]
+                    .as_str()
+                    .unwrap_or("List")
+                    .trim()
+                    .to_string();
+                let is_custom = list["isCustomList"].as_bool().unwrap_or(false);
+                let mut parsed_entries = Vec::new();
+
+                if let Some(entries) = list["entries"].as_array() {
+                    for e in entries {
+                        let parsed = if let Ok(entry) = serde_json::from_value::<AlListEntry>(e.clone()) {
+                            Some(entry)
+                        } else if let Some(media_id) = e.get("mediaId").and_then(|v| v.as_i64()) {
+                            let id = e.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+                            let status = e
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("PLANNING")
+                                .to_string();
+                            let progress = e.get("progress").and_then(|v| v.as_i64()).unwrap_or(0);
+                            let score = e.get("score").and_then(|v| v.as_f64());
+                            let updated_at = e.get("updatedAt").and_then(|v| v.as_i64());
+                            let media = e
+                                .get("media")
+                                .and_then(|m| serde_json::from_value::<AlSeasonalMedia>(m.clone()).ok());
+                            Some(AlListEntry {
+                                id,
+                                media_id,
+                                status,
+                                progress,
+                                score,
+                                updated_at,
+                                media,
+                            })
+                        } else {
+                            None
+                        };
+
+                        if let Some(entry) = parsed {
+                            if e.get("private").and_then(|v| v.as_bool()).unwrap_or(false)
+                                && seen_private_ids.insert(entry.media_id)
+                            {
+                                private_entries.push(entry.clone());
+                            }
+                            if let Some(cl_obj) = e.get("customLists").and_then(|v| v.as_object()) {
+                                for (cname, enabled) in cl_obj {
+                                    if enabled.as_bool().unwrap_or(false) {
+                                        let bucket = custom_by_name.entry(cname.clone()).or_default();
+                                        if !bucket.iter().any(|x| x.media_id == entry.media_id) {
+                                            bucket.push(entry.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            parsed_entries.push(entry);
+                        }
+                    }
+                }
+
+                if is_custom {
+                    let bucket = custom_by_name.entry(list_name.clone()).or_default();
+                    for pe in parsed_entries {
+                        if !bucket.iter().any(|x| x.media_id == pe.media_id) {
+                            bucket.push(pe);
+                        }
+                    }
+                } else {
+                    groups.push(AlCustomListGroup {
+                        name: list_name,
+                        is_custom_list: false,
+                        entries: parsed_entries,
+                    });
+                }
+            }
+        }
+
+        let mut custom_groups: Vec<AlCustomListGroup> = custom_by_name
+            .into_iter()
+            .map(|(name, entries)| AlCustomListGroup {
+                name,
+                is_custom_list: true,
+                entries,
+            })
+            .collect();
+        custom_groups.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+        if !private_entries.is_empty() {
+            custom_groups.insert(
+                0,
+                AlCustomListGroup {
+                    name: "Private Entries (All Private Shows)".to_string(),
+                    is_custom_list: true,
+                    entries: private_entries,
+                },
+            );
+        }
+
+        // Put Custom / Private lists first so they are right at the top of the selector
+        custom_groups.extend(groups);
+        Ok(custom_groups)
     }
 
     pub async fn anilist_save_entry(

@@ -311,6 +311,15 @@ pub fn run() {
             commands::import_yomitan_dictionary,
             commands::download_recommended_dictionaries,
             commands::remove_dictionary,
+            commands::record_word_lookup,
+            commands::set_word_status,
+            commands::delete_immersion_word,
+            commands::get_tracked_surface_forms,
+            commands::set_immersion_daily_goal,
+            commands::log_manual_immersion,
+            commands::get_immersion_overview,
+            commands::get_anilist_immersion_lists,
+            commands::set_anilist_immersion_list,
         ])
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {

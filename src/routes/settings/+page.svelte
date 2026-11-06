@@ -523,6 +523,39 @@
   let anilistSyncing = $state(false);
   let anilistSyncReport = $state<AnilistSyncReport | null>(null);
   let anilistConnecting = $state(false);
+  let immersionListsData = $state<import("$lib/api").AnilistImmersionListsResponse | null>(null);
+  let immersionListsLoading = $state(false);
+
+  async function loadImmersionLists() {
+    immersionListsLoading = true;
+    try {
+      immersionListsData = await api.getAnilistImmersionLists();
+    } catch {
+      // ignore
+    } finally {
+      immersionListsLoading = false;
+    }
+  }
+
+  async function selectImmersionList(listName: string) {
+    immersionListsLoading = true;
+    try {
+      immersionListsData = await api.setAnilistImmersionList(listName || null);
+      if (listName) {
+        app.toast(
+          `Synced "${listName}" (${immersionListsData.syncedShowCount} shows · ${immersionListsData.syncedHours}h) for Japanese Immersion!`,
+          "info",
+          5000
+        );
+      } else {
+        app.toast("Cleared AniList Japanese Immersion list.", "info", 4000);
+      }
+    } catch (e) {
+      app.toast(`Couldn't update immersion list: ${e}`, "error", 6000);
+    } finally {
+      immersionListsLoading = false;
+    }
+  }
 
   async function loadAnilist() {
     anilistLoading = true;
@@ -530,6 +563,9 @@
       const acct = await api.getAnilistAccount();
       anilist = acct;
       app.anilist = acct;
+      if (acct.connected) {
+        void loadImmersionLists();
+      }
     } catch {
       anilist = null;
     } finally {
@@ -573,6 +609,9 @@
             const wasConnected = !!app.anilist?.connected;
             anilist = acct;
             app.anilist = acct;
+      if (acct.connected) {
+        void loadImmersionLists();
+      }
             anilistConnecting = false;
             if (!wasConnected) {
               app.toast(`Connected to AniList as ${acct.userName ?? "user"}!`, "info", 6000);
@@ -1796,6 +1835,51 @@
               >
                 Disconnect
               </button>
+            </div>
+          </div>
+
+          <div class="rows" style="margin-bottom: 10px;">
+            <div class="row" style="align-items: flex-start; gap: 16px; flex-wrap: wrap;">
+              <div class="row-text" style="flex: 1; min-width: 240px;">
+                <strong>Japanese Immersion List (Custom / Private List)</strong>
+                <small>
+                  Select a custom or private list on your AniList account containing shows you watched in Japanese. Only shows in this list (plus active playback in Kura) will be counted toward your Immersion hours.
+                  {#if immersionListsData?.selectedList}
+                    <br />
+                    <span style="color: var(--accent); font-weight: 700;">
+                      ✓ Counting {immersionListsData.syncedShowCount} shows ({immersionListsData.syncedHours} hrs) from "{immersionListsData.selectedList}"
+                    </span>
+                  {/if}
+                </small>
+              </div>
+              <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+                <select
+                  class="input select"
+                  style="min-width: 230px;"
+                  disabled={immersionListsLoading}
+                  value={immersionListsData?.selectedList ?? ""}
+                  onchange={(e) => selectImmersionList(e.currentTarget.value)}
+                  id="pref-anilist-immersion-list"
+                >
+                  <option value="">— None (Only track in-app Kura playback) —</option>
+                  {#if immersionListsData}
+                    {#each immersionListsData.lists as lst (lst.name)}
+                      <option value={lst.name}>
+                        {lst.isCustomList ? "★ " : ""}{lst.name} ({lst.entryCount} shows · ~{lst.estimatedHours}h)
+                      </option>
+                    {/each}
+                  {/if}
+                </select>
+                <button
+                  type="button"
+                  class="btn btn-sm"
+                  disabled={immersionListsLoading}
+                  onclick={loadImmersionLists}
+                  title="Refresh custom/private lists from AniList"
+                >
+                  <Icon name="refresh" size={14} />
+                </button>
+              </div>
             </div>
           </div>
 

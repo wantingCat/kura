@@ -119,6 +119,8 @@ pub struct TermEntry {
     pub score: i64,
     pub frequencies: Vec<String>,
     pub pitches: Vec<PitchAccent>,
+    pub word_status: Option<String>,
+    pub lookup_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -822,6 +824,8 @@ pub fn lookup_at(conn: &Connection, text: &str, char_offset: usize) -> Result<Lo
                     score,
                     frequencies,
                     pitches,
+                    word_status: None,
+                    lookup_count: 0,
                 });
             }
         }

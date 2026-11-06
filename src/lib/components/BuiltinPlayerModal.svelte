@@ -22,6 +22,32 @@
   let popupAnchorY = $state<number>(560);
   let popupPinned = $state<boolean>(false);
   let lookupReqCounter = 0;
+  let lookupDwellTimer: ReturnType<typeof setTimeout> | null = null;
+  let trackedForms = $state<string[]>([]);
+
+  async function refreshTrackedForms() {
+    try {
+      trackedForms = await api.getTrackedSurfaceForms();
+    } catch {
+      // ignore
+    }
+  }
+
+  $effect(() => {
+    if (playerState.active) {
+      void refreshTrackedForms();
+    }
+  });
+
+  function formatImmersionBadge(sec: number): string {
+    const mins = Math.max(0, Math.floor(sec / 60));
+    if (mins >= 60) {
+      const h = Math.floor(mins / 60);
+      const m = mins % 60;
+      return m > 0 ? `${h}h ${m}m` : `${h}h`;
+    }
+    return `${mins}m`;
+  }
 
   // In-window HTML5 video surface binding + automatic live mpv transcoding fallback
   let html5Video = $state<HTMLVideoElement | null>(null);
@@ -128,6 +154,35 @@
     return Array.from(raw).map((ch, idx) => ({ ch, idx }));
   });
 
+  // Identify character indices belonging to tracked ('learning') Japanese words
+  let trackedCharIndices = $derived.by(() => {
+    const indices = new Set<number>();
+    const raw = playerState.subText || "";
+    if (!raw || trackedForms.length === 0) return indices;
+    const codepoints = Array.from(raw);
+    for (const form of trackedForms) {
+      if (!form) continue;
+      const formChars = Array.from(form);
+      const fLen = formChars.length;
+      if (fLen === 0 || fLen > codepoints.length) continue;
+      for (let i = 0; i <= codepoints.length - fLen; i++) {
+        let match = true;
+        for (let j = 0; j < fLen; j++) {
+          if (codepoints[i + j] !== formChars[j]) {
+            match = false;
+            break;
+          }
+        }
+        if (match) {
+          for (let j = 0; j < fLen; j++) {
+            indices.add(i + j);
+          }
+        }
+      }
+    }
+    return indices;
+  });
+
   // Detect active OP / ED skip window
   let activeSkip = $derived.by(() => {
     const pos = displayPosition;
@@ -169,10 +224,48 @@
   });
 
   function clearLookup() {
+    if (lookupDwellTimer) {
+      clearTimeout(lookupDwellTimer);
+      lookupDwellTimer = null;
+    }
     lookupResult = null;
     highlightStart = -1;
     highlightEnd = -1;
     popupPinned = false;
+  }
+
+  async function logTopTermLookup(res: LookupResult) {
+    const top = res.terms[0];
+    if (!top) return;
+    try {
+      const saved = await api.recordWordLookup({
+        expression: top.expression,
+        reading: top.reading || top.expression,
+        matchedText: top.matchedText || res.matchedText,
+        furigana: top.furigana,
+        glossaries: top.glossaries,
+        pitches: top.pitches,
+        frequencies: top.frequencies,
+        posTags: [...top.definitionTags, ...top.termTags].join(" "),
+        anilistId: playerState.anilistId,
+        epKey: playerState.epKey,
+        sentence: playerState.subText,
+        positionSec: displayPosition,
+      });
+      if (lookupResult && lookupResult.matchedText === res.matchedText) {
+        lookupResult = {
+          ...lookupResult,
+          terms: lookupResult.terms.map((t, idx) =>
+            idx === 0
+              ? { ...t, wordStatus: saved.status, lookupCount: saved.lookupCount }
+              : t
+          ),
+        };
+      }
+      void refreshTrackedForms();
+    } catch {
+      // ignore
+    }
   }
 
   function bumpControls(forcePlaying = false) {
@@ -207,8 +300,19 @@
         lookupResult = res;
         highlightStart = charIdx;
         highlightEnd = charIdx + res.matchLen;
+        if (lookupDwellTimer) {
+          clearTimeout(lookupDwellTimer);
+          lookupDwellTimer = null;
+        }
         if (pin) {
           popupPinned = true;
+          void logTopTermLookup(res);
+        } else {
+          lookupDwellTimer = setTimeout(() => {
+            if (playerState.paused && lookupResult?.matchedText === res.matchedText) {
+              void logTopTermLookup(res);
+            }
+          }, 360);
         }
       } else if (!popupPinned) {
         clearLookup();
@@ -643,8 +747,12 @@
         </div>
       </div>
 
-      {#if activeTorrentSession}
-        <div class="top-right-badges">
+      <div class="top-right-badges">
+        <div class="immersion-hud-pill" title="Active Japanese immersion time tracked today">
+          <span class="im-dot"></span>
+          <span>Today: {formatImmersionBadge(playerState.todayImmersionSec ?? 0)}</span>
+        </div>
+        {#if activeTorrentSession}
           <div class="torrent-hud-pill" title={activeTorrentSession.fileName}>
             <span class="th-prog">
               {activeTorrentSession.progressPct.toFixed(1)}%
@@ -659,8 +767,8 @@
             <span class="th-sep">·</span>
             <span class="th-peers">{activeTorrentSession.peers}p</span>
           </div>
-        </div>
-      {/if}
+        {/if}
+      </div>
     </header>
 
     <!-- Skip OP / ED Floating Button -->
@@ -688,6 +796,7 @@
             {:else}
               <span
                 class="sub-char"
+                class:tracked={trackedCharIndices.has(item.idx)}
                 class:highlighted={playerState.paused &&
                   item.idx >= highlightStart &&
                   item.idx < highlightEnd}
@@ -707,6 +816,11 @@
         anchorX={popupAnchorX}
         anchorY={popupAnchorY}
         pinned={popupPinned}
+        anilistId={playerState.anilistId}
+        epKey={playerState.epKey}
+        sentence={playerState.subText}
+        positionSec={displayPosition}
+        onStatusChanged={refreshTrackedForms}
         onClose={clearLookup}
       />
     {/if}
@@ -1092,6 +1206,30 @@
     flex-shrink: 0;
   }
 
+  .immersion-hud-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    padding: 6px 12px;
+    border-radius: 99px;
+    background: rgba(12, 12, 16, 0.84);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(244, 162, 97, 0.35);
+    color: #f7ede2;
+    white-space: nowrap;
+  }
+
+  .im-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #f4a261;
+    box-shadow: 0 0 8px rgba(244, 162, 97, 0.8);
+  }
+
   .torrent-hud-pill {
     display: inline-flex;
     align-items: center;
@@ -1221,6 +1359,10 @@
 
   .subtitle-stage.interactive .sub-char:hover {
     background: rgba(249, 115, 22, 0.28);
+  }
+
+  .sub-char.tracked {
+    border-bottom: 2.5px dotted rgba(244, 162, 97, 0.92);
   }
 
   .sub-char.highlighted {

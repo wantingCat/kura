@@ -78,6 +78,7 @@ pub struct BuiltinPlayerState {
     pub ed_end: Option<f64>,
     pub has_next_episode: bool,
     pub external_sub_path: Option<String>,
+    pub today_immersion_sec: i64,
 }
 
 impl Default for BuiltinPlayerState {
@@ -111,6 +112,7 @@ impl Default for BuiltinPlayerState {
             ed_end: None,
             has_next_episode: false,
             external_sub_path: None,
+            today_immersion_sec: 0,
         }
     }
 }
@@ -156,6 +158,8 @@ struct RuntimeSession {
     user_adjusted_offset: bool,
     user_selected_sub_track: bool,
     track_prefs: player::EffectiveTrackPrefs,
+    last_unpaused_tick: Option<std::time::Instant>,
+    unflushed_immersion_sec: f64,
 }
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -177,6 +181,8 @@ fn runtime() -> &'static Mutex<RuntimeSession> {
             user_adjusted_offset: false,
             user_selected_sub_track: false,
             track_prefs: player::EffectiveTrackPrefs::default(),
+            last_unpaused_tick: None,
+            unflushed_immersion_sec: 0.0,
         })
     })
 }
@@ -767,6 +773,7 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         ext_sub_path,
         ext_cues,
         track_prefs,
+        today_immersion_sec,
     ) = {
         let conn = st.db();
         let p = player::prefs(&conn);
@@ -781,6 +788,13 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         let (ext_sub_path, ext_cues) =
             subtitles::load_cues_for_episode(&conn, ep.anilist_id, &ep.ep_key, &ep.path);
         let track_prefs = player::effective_track_prefs(&conn, ep.anilist_id);
+        let today_sec: i64 = conn
+            .query_row(
+                "SELECT active_seconds FROM immersion_daily WHERE day_key = ?1",
+                [db::today_day_key()],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
         (
             start_pos,
             p.threshold,
@@ -791,6 +805,7 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             ext_sub_path,
             ext_cues,
             track_prefs,
+            today_sec,
         )
     };
 
@@ -870,6 +885,7 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         ed_end: None,
         has_next_episode: has_next,
         external_sub_path: ext_sub_path,
+        today_immersion_sec,
     };
 
     {
@@ -887,6 +903,8 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         g.user_adjusted_offset = false;
         g.user_selected_sub_track = false;
         g.track_prefs = track_prefs;
+        g.last_unpaused_tick = None;
+        g.unflushed_immersion_sec = 0.0;
     }
 
     emit_state(&app, &initial_state);
@@ -1184,10 +1202,20 @@ fn save_watched(conn: &rusqlite::Connection, ep: &Ep) {
     if ep.ep_key.starts_with("extra:") {
         return;
     }
-    let _ = conn.execute(
-        "INSERT OR IGNORE INTO watch_state (anilist_id, ep_key, watched_at) VALUES (?1, ?2, ?3)",
-        params![ep.anilist_id, ep.ep_key, db::now()],
-    );
+    let inserted = conn
+        .execute(
+            "INSERT OR IGNORE INTO watch_state (anilist_id, ep_key, watched_at) VALUES (?1, ?2, ?3)",
+            params![ep.anilist_id, ep.ep_key, db::now()],
+        )
+        .unwrap_or(0);
+    if inserted > 0 {
+        let _ = conn.execute(
+            "INSERT INTO immersion_daily (day_key, active_seconds, lookup_count, words_tracked, episodes_completed)
+             VALUES (?1, 0, 0, 0, 1)
+             ON CONFLICT(day_key) DO UPDATE SET episodes_completed = episodes_completed + 1",
+            params![db::today_day_key()],
+        );
+    }
     let _ = conn.execute(
         "DELETE FROM watch_progress WHERE anilist_id = ?1 AND ep_key = ?2",
         params![ep.anilist_id, ep.ep_key],
@@ -1212,14 +1240,27 @@ pub async fn dispatch_command(
         BuiltinCommand::SyncBounds => {}
         BuiltinCommand::Stop => {
             SESSION_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let (pos, dur) = {
+            let (pos, dur, flush_sec, show_title) = {
                 let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
                 let pos = g.state.position;
                 let dur = g.state.duration;
+                let flush_sec = g.unflushed_immersion_sec.round() as i64;
+                let show_title = g.state.show_title.clone();
+                g.unflushed_immersion_sec = 0.0;
+                g.last_unpaused_tick = None;
                 g.state.active = false;
                 emit_state(&app, &g.state);
-                (pos, dur)
+                (pos, dur, flush_sec, show_title)
             };
+            if flush_sec > 0 {
+                let _ = db::record_immersion_time(
+                    &st.db(),
+                    Some(cur_ep.anilist_id),
+                    Some(&cur_ep.ep_key),
+                    Some(&show_title),
+                    flush_sec,
+                );
+            }
             if pos > 15.0 && dur > 0.0 {
                 save_ep_progress(&st.db(), &cur_ep, pos, dur);
             }
@@ -1428,11 +1469,46 @@ pub async fn dispatch_command(
             paused,
             ended,
         } => {
-            let (eff_dur, threshold, autoplay, should_mark_watched, should_save_prog, should_query_aniskip, sid_opt) = {
+            let (
+                eff_dur,
+                threshold,
+                autoplay,
+                should_mark_watched,
+                should_save_prog,
+                should_query_aniskip,
+                sid_opt,
+                flush_immersion_sec,
+                show_title,
+            ) = {
                 let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
                 if !g.state.active {
                     return Ok(g.state.clone());
                 }
+                let now_inst = std::time::Instant::now();
+                if !paused && !ended {
+                    if let Some(prev) = g.last_unpaused_tick {
+                        let dt = now_inst.duration_since(prev).as_secs_f64();
+                        if (0.01..=2.5).contains(&dt) {
+                            g.unflushed_immersion_sec += dt;
+                        }
+                    }
+                    g.last_unpaused_tick = Some(now_inst);
+                } else {
+                    g.last_unpaused_tick = None;
+                }
+
+                let flush_immersion_sec = if g.unflushed_immersion_sec >= 5.0
+                    || ((paused || ended) && g.unflushed_immersion_sec >= 1.0)
+                {
+                    let sec = g.unflushed_immersion_sec.floor() as i64;
+                    g.unflushed_immersion_sec -= sec as f64;
+                    g.state.today_immersion_sec += sec;
+                    sec
+                } else {
+                    0
+                };
+                let show_title = g.state.show_title.clone();
+
                 g.state.position = position;
                 if duration > 0.0 && duration.is_finite() {
                     g.state.duration = duration;
@@ -1469,9 +1545,21 @@ pub async fn dispatch_command(
                     should_save_prog,
                     should_query_aniskip,
                     sid_opt,
+                    flush_immersion_sec,
+                    show_title,
                 )
             };
             let _ = (threshold, sid_opt);
+
+            if flush_immersion_sec > 0 {
+                let _ = db::record_immersion_time(
+                    &st.db(),
+                    Some(cur_ep.anilist_id),
+                    Some(&cur_ep.ep_key),
+                    Some(&show_title),
+                    flush_immersion_sec,
+                );
+            }
 
             if should_query_aniskip {
                 let app_c = app.clone();

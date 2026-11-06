@@ -220,6 +220,18 @@
       <span class="rail-label">Schedule</span>
     </a>
 
+    <a
+      class="rail-item"
+      class:active={path.startsWith("/immersion")}
+      href="/immersion"
+      id="nav-immersion"
+      title="Japanese Immersion Time & Vocabulary Bank"
+      aria-label="Immersion"
+    >
+      <Icon name="book-open" size={19} />
+      <span class="rail-label">Immersion</span>
+    </a>
+
     {#if app.reviewCount > 0}
       <a
         class="rail-item warn"

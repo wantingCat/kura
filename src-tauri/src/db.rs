@@ -243,6 +243,73 @@ CREATE INDEX IF NOT EXISTS idx_staff_person ON media_staff(staff_id);
 "#;
 
 /// v0.5 (Streaming & Hybrid Mode): bookmarked stream shows in unified library.
+pub const SCHEMA_V8: &str = r#"
+CREATE TABLE IF NOT EXISTS immersion_daily (
+    day_key             TEXT PRIMARY KEY,
+    active_seconds      INTEGER NOT NULL DEFAULT 0,
+    lookup_count        INTEGER NOT NULL DEFAULT 0,
+    words_tracked       INTEGER NOT NULL DEFAULT 0,
+    episodes_completed  INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS immersion_sessions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    day_key         TEXT NOT NULL,
+    anilist_id      INTEGER NOT NULL DEFAULT 0,
+    ep_key          TEXT NOT NULL DEFAULT '',
+    source_label    TEXT NOT NULL DEFAULT '',
+    active_seconds  INTEGER NOT NULL DEFAULT 0,
+    started_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    UNIQUE(day_key, anilist_id, ep_key)
+);
+CREATE INDEX IF NOT EXISTS idx_immersion_sessions_day ON immersion_sessions(day_key);
+CREATE INDEX IF NOT EXISTS idx_immersion_sessions_media ON immersion_sessions(anilist_id);
+
+CREATE TABLE IF NOT EXISTS immersion_words (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    expression      TEXT NOT NULL,
+    reading         TEXT NOT NULL,
+    matched_forms   TEXT NOT NULL DEFAULT '[]',
+    status          TEXT NOT NULL DEFAULT 'learning',
+    lookup_count    INTEGER NOT NULL DEFAULT 1,
+    first_seen_at   INTEGER NOT NULL,
+    last_seen_at    INTEGER NOT NULL,
+    furigana_json   TEXT NOT NULL DEFAULT '[]',
+    glossary_json   TEXT NOT NULL DEFAULT '[]',
+    pitch_json      TEXT NOT NULL DEFAULT '[]',
+    freq_json       TEXT NOT NULL DEFAULT '[]',
+    pos_tags        TEXT NOT NULL DEFAULT '',
+    UNIQUE(expression, reading)
+);
+CREATE INDEX IF NOT EXISTS idx_immersion_words_count ON immersion_words(lookup_count DESC, last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_immersion_words_status ON immersion_words(status);
+
+CREATE TABLE IF NOT EXISTS immersion_contexts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    word_id         INTEGER NOT NULL REFERENCES immersion_words(id) ON DELETE CASCADE,
+    anilist_id      INTEGER,
+    ep_key          TEXT,
+    sentence        TEXT NOT NULL,
+    matched_surface TEXT NOT NULL DEFAULT '',
+    position_sec    REAL,
+    created_at      INTEGER NOT NULL,
+    UNIQUE(word_id, sentence)
+);
+CREATE INDEX IF NOT EXISTS idx_immersion_contexts_word ON immersion_contexts(word_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS immersion_anilist_shows (
+    anilist_id        INTEGER PRIMARY KEY,
+    list_name         TEXT NOT NULL,
+    title             TEXT NOT NULL,
+    cover_url         TEXT,
+    episodes_watched  INTEGER NOT NULL DEFAULT 0,
+    duration_mins     INTEGER NOT NULL DEFAULT 24,
+    active_seconds    INTEGER NOT NULL DEFAULT 0,
+    updated_at        INTEGER NOT NULL
+);
+"#;
+
 pub const SCHEMA_V7: &str = r#"
 CREATE TABLE IF NOT EXISTS stream_library (
     anilist_id  INTEGER PRIMARY KEY,
@@ -323,6 +390,8 @@ pub fn seed_default_prefs_if_missing(conn: &Connection) -> Result<()> {
         ("pref.nyaa_url", ""),
         ("pref.torrent_extensions", "[]"),
         ("pref.builtin_player_migrated_v1", "0"),
+        ("pref.immersion_daily_goal", "60"),
+        ("pref.anilist_immersion_list", ""),
     ];
 
     for (k, v) in defaults {
@@ -371,9 +440,17 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch(SCHEMA_V6)?;
     }
     let _ = conn.execute("ALTER TABLE linked_subtitles ADD COLUMN content TEXT", []);
+    if version < 9 {
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA_V8} PRAGMA user_version = 9; COMMIT;"
+        ))?;
+    } else {
+        conn.execute_batch(SCHEMA_V8)?;
+    }
+    let _ = backfill_immersion_from_watch_state(conn);
     if version < 8 {
         conn.execute_batch(&format!(
-            "BEGIN; {SCHEMA_V7} PRAGMA user_version = 8; COMMIT;"
+            "BEGIN; {SCHEMA_V7} PRAGMA user_version = 9; COMMIT;"
         ))?;
     } else {
         conn.execute_batch(SCHEMA_V7)?;
@@ -384,6 +461,107 @@ fn migrate(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 pub(crate) fn migrate_for_tests(conn: &Connection) -> Result<()> {
     migrate(conn)
+}
+
+pub fn today_day_key() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+pub fn timestamp_to_day_key(ts: i64) -> String {
+    use chrono::TimeZone;
+    if let chrono::LocalResult::Single(dt) = chrono::Local.timestamp_opt(ts, 0) {
+        dt.format("%Y-%m-%d").to_string()
+    } else {
+        today_day_key()
+    }
+}
+
+/// Record active unpaused immersion time (in seconds) for today and the given anime episode.
+pub fn record_immersion_time(
+    conn: &Connection,
+    anilist_id: Option<i64>,
+    ep_key: Option<&str>,
+    source_label: Option<&str>,
+    delta_seconds: i64,
+) -> Result<()> {
+    if delta_seconds <= 0 {
+        return Ok(());
+    }
+    let day = today_day_key();
+    let aid = anilist_id.unwrap_or(0);
+    let ek = ep_key.unwrap_or("");
+    let now_ts = now();
+
+    let label = match source_label.filter(|s| !s.trim().is_empty()) {
+        Some(s) => s.to_string(),
+        None if aid > 0 => conn
+            .query_row(
+                "SELECT COALESCE(title_english, title_romaji, title_native, '') FROM media WHERE anilist_id = ?1",
+                [aid],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default(),
+        None => "Manual Immersion".to_string(),
+    };
+
+    conn.execute(
+        "INSERT INTO immersion_daily (day_key, active_seconds, lookup_count, words_tracked, episodes_completed)
+         VALUES (?1, ?2, 0, 0, 0)
+         ON CONFLICT(day_key) DO UPDATE SET active_seconds = active_seconds + excluded.active_seconds",
+        params![day, delta_seconds],
+    )?;
+
+    conn.execute(
+        "INSERT INTO immersion_sessions (day_key, anilist_id, ep_key, source_label, active_seconds, started_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+         ON CONFLICT(day_key, anilist_id, ep_key) DO UPDATE SET
+            active_seconds = active_seconds + excluded.active_seconds,
+            source_label = CASE WHEN excluded.source_label != '' THEN excluded.source_label ELSE immersion_sessions.source_label END,
+            updated_at = excluded.updated_at",
+        params![day, aid, ek, label, delta_seconds, now_ts],
+    )?;
+
+    Ok(())
+}
+
+/// Ensure legacy blanket `watch_state` backfill is purged so only real-time Kura immersion
+/// and the user's selected AniList Japanese Immersion List are counted.
+pub fn backfill_immersion_from_watch_state(conn: &Connection) -> Result<()> {
+    if get_setting(conn, "pref.immersion_watch_state_purged_v1")?.as_deref() == Some("1") {
+        return Ok(());
+    }
+    if get_setting(conn, "pref.immersion_backfilled_v1")?.as_deref() == Some("1") {
+        // Remove sessions that were synthetically backfilled from watch_state
+        conn.execute(
+            "DELETE FROM immersion_sessions
+             WHERE EXISTS (
+                 SELECT 1 FROM watch_state ws
+                 WHERE ws.anilist_id = immersion_sessions.anilist_id
+                   AND ws.ep_key = immersion_sessions.ep_key
+                   AND ws.watched_at = immersion_sessions.started_at
+                   AND ws.watched_at = immersion_sessions.updated_at
+             )",
+            [],
+        )?;
+        // Recompute daily active_seconds from remaining real-time sessions
+        conn.execute(
+            "UPDATE immersion_daily
+             SET active_seconds = COALESCE((
+                 SELECT SUM(s.active_seconds)
+                 FROM immersion_sessions s
+                 WHERE s.day_key = immersion_daily.day_key
+             ), 0),
+             episodes_completed = 0",
+            [],
+        )?;
+        conn.execute(
+            "DELETE FROM immersion_daily
+             WHERE active_seconds <= 0 AND lookup_count <= 0 AND words_tracked <= 0 AND episodes_completed <= 0",
+            [],
+        )?;
+    }
+    set_setting(conn, "pref.immersion_watch_state_purged_v1", "1")?;
+    Ok(())
 }
 
 pub fn now() -> i64 {

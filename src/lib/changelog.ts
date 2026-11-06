@@ -16,10 +16,39 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.8.0",
+    title: "Japanese Immersion Hub, Looked-Up Words Leaderboard, Migaku-Style Word Tracking & Immersion Time Analytics",
+    date: "November 2026",
+    badge: "Latest",
+    summary:
+      "Kura 0.8.0 introduces a dedicated Japanese Immersion Suite: automatic unpaused immersion time tracking, a Looked-Up Words Leaderboard & Revision Bank ranked by lookup frequency (20× → 1×) with full Yomitan definitions and anime context sentences, Migaku-style word status controls (Track, Known, Ignore) inside the Yomitan popup, live subtitle underlining, and selective AniList custom/private immersion list syncing.",
+    items: [
+      {
+        type: "new",
+        text: "Dedicated Immersion Hub (/immersion): track your daily immersion goal ring (15m–120m), day streak, weekly/monthly immersion velocity, 14/30-day activity bar chart, Top Immersed Anime leaderboard, and manual outside-immersion logging.",
+      },
+      {
+        type: "new",
+        text: "Looked-Up Words Leaderboard & Revision Bank: every word you look up in Yomitan is automatically counted and ranked from highest to lowest lookup count (20× → 1×) so you can revise the exact words you keep forgetting, complete with expandable Yomitan definitions, pitch accents, frequency tags, captured anime subtitle sentences, Self-Test flashcard mode, and 1-click Anki export.",
+      },
+      {
+        type: "new",
+        text: "Migaku-style Yomitan Popup Controls & Live Subtitle Underlining: see your N× lookup count badge and mark words as Tracked, Known, or Ignored directly inside the Yomitan dictionary popup, with live dotted amber underlining of tracked words in Japanese subtitles during playback.",
+      },
+      {
+        type: "new",
+        text: "Real-Time Immersion Time Tracking: Kura automatically tracks active unpaused playback time in both the Built-In Player (with a live today's immersion badge in the player top bar) and external players (mpv, VLC, MPC-HC).",
+      },
+      {
+        type: "new",
+        text: "AniList Custom / Private Immersion List Selector: choose a dedicated custom or private AniList list in Settings → Integrations so only shows in your Japanese immersion list count toward your all-time immersion hours and Top Immersed Anime.",
+      },
+    ],
+  },
+  {
     version: "0.7.1",
     title: "System Performance, Single-Instance Tray Resume & Subtitle Language Fixes",
     date: "November 2026",
-    badge: "Latest",
     summary:
       "Kura 0.7.1 fixes duplicate background processes when reopening from the system tray, eliminates GPU compositing and SQLite write bottlenecks, and ensures English subtitle preferences are strictly respected without forcing retimed Japanese subtitles.",
     items: [

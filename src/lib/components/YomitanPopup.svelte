@@ -1,21 +1,77 @@
 <script lang="ts">
-  import type { LookupResult } from "$lib/api";
+  import { api, type LookupResult, type TermEntry } from "$lib/api";
 
   let {
     result,
     anchorX,
     anchorY,
     pinned = false,
+    anilistId = null,
+    epKey = null,
+    sentence = null,
+    positionSec = null,
+    onStatusChanged,
     onClose,
   }: {
     result: LookupResult;
     anchorX: number;
     anchorY: number;
     pinned?: boolean;
+    anilistId?: number | null;
+    epKey?: string | null;
+    sentence?: string | null;
+    positionSec?: number | null;
+    onStatusChanged?: () => void;
     onClose: () => void;
   } = $props();
 
   let activeTab = $state<"terms" | "kanji">("terms");
+  let statusOverrides = $state<Record<string, { status: string; count: number }>>({});
+
+  function termKey(t: TermEntry): string {
+    return `${t.expression}::${t.reading || t.expression}`;
+  }
+
+  function effectiveStatus(t: TermEntry): string | null {
+    return statusOverrides[termKey(t)]?.status ?? t.wordStatus ?? null;
+  }
+
+  function effectiveCount(t: TermEntry): number {
+    return statusOverrides[termKey(t)]?.count ?? t.lookupCount ?? 0;
+  }
+
+  async function changeStatus(t: TermEntry, nextStatus: "learning" | "known" | "ignored") {
+    const key = termKey(t);
+    const prevCount = effectiveCount(t);
+    statusOverrides = {
+      ...statusOverrides,
+      [key]: { status: nextStatus, count: Math.max(1, prevCount) },
+    };
+    try {
+      const saved = await api.setWordStatus({
+        expression: t.expression,
+        reading: t.reading || t.expression,
+        status: nextStatus,
+        matchedText: t.matchedText,
+        furigana: t.furigana,
+        glossaries: t.glossaries,
+        pitches: t.pitches,
+        frequencies: t.frequencies,
+        posTags: [...t.definitionTags, ...t.termTags].join(" "),
+        anilistId,
+        epKey,
+        sentence,
+        positionSec,
+      });
+      statusOverrides = {
+        ...statusOverrides,
+        [key]: { status: saved.status, count: saved.lookupCount },
+      };
+      onStatusChanged?.();
+    } catch {
+      // ignore
+    }
+  }
 
   // Reset tab when lookup result changes
   $effect(() => {
@@ -138,6 +194,42 @@
               </div>
 
               <div class="yt-actions">
+                {#if effectiveCount(term) > 0}
+                  <span
+                    class="yt-lookup-badge"
+                    class:hot={effectiveCount(term) >= 3}
+                    title={`Looked up ${effectiveCount(term)} time${effectiveCount(term) === 1 ? "" : "s"}`}
+                  >
+                    {effectiveCount(term)}×
+                  </span>
+                {/if}
+                <button
+                  type="button"
+                  class="yt-status-pill learning"
+                  class:active={effectiveStatus(term) === "learning"}
+                  title="Mark as Tracked / Learning (underlines in subtitles & adds to revision bank)"
+                  onclick={() => changeStatus(term, "learning")}
+                >
+                  {effectiveStatus(term) === "learning" ? "● Tracked" : "+ Track"}
+                </button>
+                <button
+                  type="button"
+                  class="yt-status-pill known"
+                  class:active={effectiveStatus(term) === "known"}
+                  title="Mark as Known"
+                  onclick={() => changeStatus(term, "known")}
+                >
+                  {effectiveStatus(term) === "known" ? "✓ Known" : "Known"}
+                </button>
+                <button
+                  type="button"
+                  class="yt-status-pill ignored"
+                  class:active={effectiveStatus(term) === "ignored"}
+                  title="Ignore this word"
+                  onclick={() => changeStatus(term, "ignored")}
+                >
+                  ✕
+                </button>
                 <button
                   type="button"
                   class="yt-icon-btn"
@@ -397,8 +489,62 @@
   .yt-actions {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
     flex-shrink: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .yt-lookup-badge {
+    font-size: 10.5px;
+    font-weight: 800;
+    padding: 2px 6px;
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(247, 237, 226, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+  }
+
+  .yt-lookup-badge.hot {
+    background: rgba(244, 162, 97, 0.22);
+    color: #f4a261;
+    border-color: rgba(244, 162, 97, 0.48);
+  }
+
+  .yt-status-pill {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: rgba(247, 237, 226, 0.72);
+    font-size: 11px;
+    font-weight: 700;
+    padding: 3px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 120ms ease;
+    line-height: 1.2;
+  }
+
+  .yt-status-pill:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+  }
+
+  .yt-status-pill.learning.active {
+    background: rgba(231, 111, 81, 0.24);
+    border-color: rgba(231, 111, 81, 0.65);
+    color: #ff9b82;
+  }
+
+  .yt-status-pill.known.active {
+    background: rgba(42, 157, 143, 0.26);
+    border-color: rgba(42, 157, 143, 0.68);
+    color: #6ee7d8;
+  }
+
+  .yt-status-pill.ignored.active {
+    background: rgba(255, 255, 255, 0.16);
+    border-color: rgba(255, 255, 255, 0.35);
+    color: rgba(247, 237, 226, 0.9);
   }
 
   .yt-icon-btn {

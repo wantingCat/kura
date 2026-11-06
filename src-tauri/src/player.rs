@@ -2148,6 +2148,7 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
     let mut last_discord_playing: Option<bool> = None;
     let mut last_discord_sync = std::time::Instant::now();
     let mut last_discord_pos: f64 = 0.0;
+    let mut unflushed_immersion_sec: i64 = 0;
     sync_discord_activity(&st, &ep, 0.0, 0.0, true);
     emit(&app, "tracking", p.kind, &ep, 0.0, 0.0, None);
     loop {
@@ -2180,6 +2181,28 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
         }
 
         let playing = s.playing;
+        if playing && !s.ended {
+            unflushed_immersion_sec += 1;
+            if unflushed_immersion_sec >= 5 {
+                let _ = db::record_immersion_time(
+                    &st.db(),
+                    Some(ep.anilist_id),
+                    Some(&ep.ep_key),
+                    None,
+                    unflushed_immersion_sec,
+                );
+                unflushed_immersion_sec = 0;
+            }
+        } else if unflushed_immersion_sec > 0 {
+            let _ = db::record_immersion_time(
+                &st.db(),
+                Some(ep.anilist_id),
+                Some(&ep.ep_key),
+                None,
+                unflushed_immersion_sec,
+            );
+            unflushed_immersion_sec = 0;
+        }
         let playing_changed = last_discord_playing != Some(playing);
         let seeked = (pos - (last_discord_pos + last_discord_sync.elapsed().as_secs_f64())).abs() > 8.0;
         let periodic = last_discord_sync.elapsed() > Duration::from_secs(20);
@@ -2253,6 +2276,15 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
     }
 
     // 3. Final save.
+    if unflushed_immersion_sec > 0 {
+        let _ = db::record_immersion_time(
+            &st.db(),
+            Some(ep.anilist_id),
+            Some(&ep.ep_key),
+            None,
+            unflushed_immersion_sec,
+        );
+    }
     if !marked && pos > 15.0 && dur > 0.0 {
         if reached(pos, dur, p.threshold) {
             mark_watched(&st.db(), &ep);

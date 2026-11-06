@@ -3220,9 +3220,27 @@ pub async fn lookup_japanese_at(
     char_offset: usize,
 ) -> CmdResult<crate::dictionary::LookupResult> {
     let data_dir = st.data_dir.clone();
+    let st_arc = st.inner().clone();
     tokio::task::spawn_blocking(move || {
-        let conn = crate::dictionary::open_dict_db(&data_dir)?;
-        crate::dictionary::lookup_at(&conn, &text, char_offset)
+        let dict_conn = crate::dictionary::open_dict_db(&data_dir)?;
+        let mut res = crate::dictionary::lookup_at(&dict_conn, &text, char_offset)?;
+        if !res.terms.is_empty() {
+            let kura_conn = st_arc.db();
+            if let Ok(mut stmt) = kura_conn.prepare(
+                "SELECT status, lookup_count FROM immersion_words WHERE expression = ?1 AND reading = ?2",
+            ) {
+                for term in &mut res.terms {
+                    if let Ok((status, count)) = stmt.query_row(
+                        rusqlite::params![&term.expression, &term.reading],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                    ) {
+                        term.word_status = Some(status);
+                        term.lookup_count = count;
+                    }
+                }
+            };
+        }
+        Ok::<_, anyhow::Error>(res)
     })
     .await
     .map_err(err)?
@@ -3279,4 +3297,1147 @@ pub async fn remove_dictionary(st: St<'_>, id: i64) -> CmdResult<()> {
     .await
     .map_err(err)?
     .map_err(err)
+}
+
+// ---------------------------------------------------------------------------
+// Japanese Immersion Suite Commands (Vocabulary Bank & Immersion Time Analytics)
+// ---------------------------------------------------------------------------
+
+static LAST_LOOKUP_DEDUP: std::sync::OnceLock<
+    std::sync::Mutex<Option<(String, String, String, std::time::Instant)>>,
+> = std::sync::OnceLock::new();
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordWordLookupInput {
+    pub expression: String,
+    pub reading: String,
+    pub matched_text: String,
+    pub furigana: Vec<crate::dictionary::FuriganaSegment>,
+    pub glossaries: Vec<String>,
+    pub pitches: Vec<crate::dictionary::PitchAccent>,
+    pub frequencies: Vec<String>,
+    pub pos_tags: String,
+    pub anilist_id: Option<i64>,
+    pub ep_key: Option<String>,
+    pub sentence: Option<String>,
+    pub position_sec: Option<f64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetWordStatusInput {
+    pub expression: String,
+    pub reading: String,
+    pub status: String,
+    pub matched_text: Option<String>,
+    pub furigana: Option<Vec<crate::dictionary::FuriganaSegment>>,
+    pub glossaries: Option<Vec<String>>,
+    pub pitches: Option<Vec<crate::dictionary::PitchAccent>>,
+    pub frequencies: Option<Vec<String>>,
+    pub pos_tags: Option<String>,
+    pub anilist_id: Option<i64>,
+    pub ep_key: Option<String>,
+    pub sentence: Option<String>,
+    pub position_sec: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordStatusResult {
+    pub id: i64,
+    pub expression: String,
+    pub reading: String,
+    pub status: String,
+    pub lookup_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImmersionContextItem {
+    pub id: i64,
+    pub anilist_id: Option<i64>,
+    pub ep_key: Option<String>,
+    pub anime_title: Option<String>,
+    pub cover_url: Option<String>,
+    pub cover_path: Option<String>,
+    pub sentence: String,
+    pub matched_surface: String,
+    pub position_sec: Option<f64>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImmersionWordItem {
+    pub id: i64,
+    pub expression: String,
+    pub reading: String,
+    pub matched_forms: Vec<String>,
+    pub status: String,
+    pub lookup_count: i64,
+    pub first_seen_at: i64,
+    pub last_seen_at: i64,
+    pub furigana: Vec<crate::dictionary::FuriganaSegment>,
+    pub glossaries: Vec<String>,
+    pub pitches: Vec<crate::dictionary::PitchAccent>,
+    pub frequencies: Vec<String>,
+    pub pos_tags: String,
+    pub contexts: Vec<ImmersionContextItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImmersionDayPoint {
+    pub day_key: String,
+    pub label: String,
+    pub active_seconds: i64,
+    pub lookup_count: i64,
+    pub words_tracked: i64,
+    pub episodes_completed: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImmersionAnimeSummary {
+    pub anilist_id: i64,
+    pub title: String,
+    pub cover_url: Option<String>,
+    pub cover_path: Option<String>,
+    pub active_seconds: i64,
+    pub episodes_watched: i64,
+    pub words_looked_up: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImmersionSessionItem {
+    pub id: i64,
+    pub day_key: String,
+    pub anilist_id: i64,
+    pub ep_key: String,
+    pub source_label: String,
+    pub cover_url: Option<String>,
+    pub cover_path: Option<String>,
+    pub active_seconds: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImmersionOverview {
+    pub today_immersion_sec: i64,
+    pub week_immersion_sec: i64,
+    pub month_immersion_sec: i64,
+    pub total_immersion_sec: i64,
+    pub daily_goal_minutes: i64,
+    pub current_streak_days: i64,
+    pub best_streak_days: i64,
+    pub total_episodes_completed: i64,
+    pub total_lookups: i64,
+    pub unique_words_count: i64,
+    pub learning_words_count: i64,
+    pub known_words_count: i64,
+    pub ignored_words_count: i64,
+    pub daily_activity: Vec<ImmersionDayPoint>,
+    pub top_anime: Vec<ImmersionAnimeSummary>,
+    pub recent_sessions: Vec<ImmersionSessionItem>,
+    pub words: Vec<ImmersionWordItem>,
+    pub anilist_immersion_list: Option<String>,
+    pub anilist_immersion_shows_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnilistListOption {
+    pub name: String,
+    pub is_custom_list: bool,
+    pub entry_count: usize,
+    pub total_episodes: i64,
+    pub estimated_hours: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnilistImmersionListsResponse {
+    pub selected_list: Option<String>,
+    pub synced_show_count: i64,
+    pub synced_hours: f64,
+    pub lists: Vec<AnilistListOption>,
+}
+
+fn save_word_context_if_present(
+    conn: &rusqlite::Connection,
+    word_id: i64,
+    anilist_id: Option<i64>,
+    ep_key: Option<&str>,
+    sentence: Option<&str>,
+    matched_surface: &str,
+    position_sec: Option<f64>,
+    now_ts: i64,
+) {
+    let Some(sent_raw) = sentence else { return };
+    let sent = sent_raw.trim();
+    if sent.is_empty() {
+        return;
+    }
+    let _ = conn.execute(
+        "INSERT INTO immersion_contexts (word_id, anilist_id, ep_key, sentence, matched_surface, position_sec, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(word_id, sentence) DO UPDATE SET
+            anilist_id = COALESCE(excluded.anilist_id, immersion_contexts.anilist_id),
+            ep_key = COALESCE(excluded.ep_key, immersion_contexts.ep_key),
+            matched_surface = CASE WHEN excluded.matched_surface != '' THEN excluded.matched_surface ELSE immersion_contexts.matched_surface END,
+            position_sec = COALESCE(excluded.position_sec, immersion_contexts.position_sec),
+            created_at = excluded.created_at",
+        rusqlite::params![word_id, anilist_id, ep_key, sent, matched_surface, position_sec, now_ts],
+    );
+    // Keep up to 8 most recent context sentences per word
+    let _ = conn.execute(
+        "DELETE FROM immersion_contexts
+         WHERE word_id = ?1 AND id NOT IN (
+             SELECT id FROM immersion_contexts WHERE word_id = ?1 ORDER BY created_at DESC LIMIT 8
+         )",
+        [word_id],
+    );
+}
+
+#[tauri::command]
+pub async fn record_word_lookup(
+    st: St<'_>,
+    input: RecordWordLookupInput,
+) -> CmdResult<WordStatusResult> {
+    let expr = input.expression.trim().to_string();
+    let read = if input.reading.trim().is_empty() {
+        expr.clone()
+    } else {
+        input.reading.trim().to_string()
+    };
+    if expr.is_empty() {
+        return Err("Empty word expression".into());
+    }
+
+    let sent_clean = input.sentence.clone().unwrap_or_default().trim().to_string();
+    let is_duplicate = {
+        let mtx = LAST_LOOKUP_DEDUP.get_or_init(|| std::sync::Mutex::new(None));
+        let mut g = mtx.lock().unwrap_or_else(|e| e.into_inner());
+        let now_inst = std::time::Instant::now();
+        let dup = match g.as_ref() {
+            Some((prev_e, prev_r, prev_s, prev_t)) => {
+                prev_e == &expr
+                    && prev_r == &read
+                    && ((prev_s == &sent_clean && now_inst.duration_since(*prev_t).as_secs() < 30)
+                        || now_inst.duration_since(*prev_t).as_secs() < 6)
+            }
+            None => false,
+        };
+        if !dup {
+            *g = Some((expr.clone(), read.clone(), sent_clean.clone(), now_inst));
+        }
+        dup
+    };
+
+    let conn = st.db();
+    let now_ts = db::now();
+
+    if is_duplicate {
+        if let Ok((id, status, count)) = conn.query_row(
+            "SELECT id, status, lookup_count FROM immersion_words WHERE expression = ?1 AND reading = ?2",
+            rusqlite::params![&expr, &read],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+        ) {
+            return Ok(WordStatusResult {
+                id,
+                expression: expr,
+                reading: read,
+                status,
+                lookup_count: count,
+            });
+        }
+    }
+
+    let furi_json = serde_json::to_string(&input.furigana).unwrap_or_else(|_| "[]".into());
+    let gloss_json = serde_json::to_string(&input.glossaries).unwrap_or_else(|_| "[]".into());
+    let pitch_json = serde_json::to_string(&input.pitches).unwrap_or_else(|_| "[]".into());
+    let freq_json = serde_json::to_string(&input.frequencies).unwrap_or_else(|_| "[]".into());
+    let surface = input.matched_text.trim().to_string();
+
+    let existing: Option<(i64, String, i64, String)> = conn
+        .query_row(
+            "SELECT id, status, lookup_count, matched_forms FROM immersion_words WHERE expression = ?1 AND reading = ?2",
+            rusqlite::params![&expr, &read],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .ok();
+
+    let (word_id, status, new_count) = if let Some((id, st_val, count, forms_str)) = existing {
+        let mut forms: Vec<String> = serde_json::from_str(&forms_str).unwrap_or_default();
+        if !surface.is_empty() && !forms.contains(&surface) {
+            forms.push(surface.clone());
+        }
+        let forms_json = serde_json::to_string(&forms).unwrap_or_else(|_| "[]".into());
+        let next_count = count + 1;
+        conn.execute(
+            "UPDATE immersion_words SET
+                lookup_count = ?1,
+                last_seen_at = ?2,
+                matched_forms = ?3,
+                furigana_json = CASE WHEN ?4 != '[]' THEN ?4 ELSE furigana_json END,
+                glossary_json = CASE WHEN ?5 != '[]' THEN ?5 ELSE glossary_json END,
+                pitch_json = CASE WHEN ?6 != '[]' THEN ?6 ELSE pitch_json END,
+                freq_json = CASE WHEN ?7 != '[]' THEN ?7 ELSE freq_json END,
+                pos_tags = CASE WHEN ?8 != '' THEN ?8 ELSE pos_tags END
+             WHERE id = ?9",
+            rusqlite::params![
+                next_count,
+                now_ts,
+                forms_json,
+                furi_json,
+                gloss_json,
+                pitch_json,
+                freq_json,
+                input.pos_tags,
+                id
+            ],
+        )
+        .map_err(err)?;
+        (id, st_val, next_count)
+    } else {
+        let forms = if surface.is_empty() {
+            vec![expr.clone()]
+        } else {
+            vec![surface.clone()]
+        };
+        let forms_json = serde_json::to_string(&forms).unwrap_or_else(|_| "[]".into());
+        conn.execute(
+            "INSERT INTO immersion_words
+             (expression, reading, matched_forms, status, lookup_count, first_seen_at, last_seen_at, furigana_json, glossary_json, pitch_json, freq_json, pos_tags)
+             VALUES (?1, ?2, ?3, 'learning', 1, ?4, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                &expr,
+                &read,
+                forms_json,
+                now_ts,
+                furi_json,
+                gloss_json,
+                pitch_json,
+                freq_json,
+                input.pos_tags
+            ],
+        )
+        .map_err(err)?;
+        let id = conn.last_insert_rowid();
+        let _ = conn.execute(
+            "INSERT INTO immersion_daily (day_key, active_seconds, lookup_count, words_tracked, episodes_completed)
+             VALUES (?1, 0, 0, 1, 0)
+             ON CONFLICT(day_key) DO UPDATE SET words_tracked = words_tracked + 1",
+            [db::today_day_key()],
+        );
+        (id, "learning".to_string(), 1)
+    };
+
+    let _ = conn.execute(
+        "INSERT INTO immersion_daily (day_key, active_seconds, lookup_count, words_tracked, episodes_completed)
+         VALUES (?1, 0, 1, 0, 0)
+         ON CONFLICT(day_key) DO UPDATE SET lookup_count = lookup_count + 1",
+        [db::today_day_key()],
+    );
+
+    save_word_context_if_present(
+        &conn,
+        word_id,
+        input.anilist_id,
+        input.ep_key.as_deref(),
+        input.sentence.as_deref(),
+        &surface,
+        input.position_sec,
+        now_ts,
+    );
+
+    crate::backup::mark_dirty();
+
+    Ok(WordStatusResult {
+        id: word_id,
+        expression: expr,
+        reading: read,
+        status,
+        lookup_count: new_count,
+    })
+}
+
+#[tauri::command]
+pub async fn set_word_status(
+    st: St<'_>,
+    input: SetWordStatusInput,
+) -> CmdResult<WordStatusResult> {
+    let expr = input.expression.trim().to_string();
+    let read = if input.reading.trim().is_empty() {
+        expr.clone()
+    } else {
+        input.reading.trim().to_string()
+    };
+    let status = match input.status.trim().to_ascii_lowercase().as_str() {
+        "known" => "known",
+        "ignored" | "ignore" => "ignored",
+        _ => "learning",
+    }
+    .to_string();
+
+    let conn = st.db();
+    let now_ts = db::now();
+    let surface = input.matched_text.clone().unwrap_or_default().trim().to_string();
+
+    let existing: Option<(i64, i64, String)> = conn
+        .query_row(
+            "SELECT id, lookup_count, matched_forms FROM immersion_words WHERE expression = ?1 AND reading = ?2",
+            rusqlite::params![&expr, &read],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)),
+        )
+        .ok();
+
+    let (word_id, count) = if let Some((id, lookup_count, forms_str)) = existing {
+        let mut forms: Vec<String> = serde_json::from_str(&forms_str).unwrap_or_default();
+        if !surface.is_empty() && !forms.contains(&surface) {
+            forms.push(surface.clone());
+        }
+        let forms_json = serde_json::to_string(&forms).unwrap_or_else(|_| "[]".into());
+        conn.execute(
+            "UPDATE immersion_words SET status = ?1, matched_forms = ?2, last_seen_at = ?3 WHERE id = ?4",
+            rusqlite::params![&status, forms_json, now_ts, id],
+        )
+        .map_err(err)?;
+        (id, lookup_count)
+    } else {
+        let forms = if surface.is_empty() {
+            vec![expr.clone()]
+        } else {
+            vec![surface.clone()]
+        };
+        let forms_json = serde_json::to_string(&forms).unwrap_or_else(|_| "[]".into());
+        let furi_json = input
+            .furigana
+            .as_ref()
+            .and_then(|v| serde_json::to_string(v).ok())
+            .unwrap_or_else(|| "[]".into());
+        let gloss_json = input
+            .glossaries
+            .as_ref()
+            .and_then(|v| serde_json::to_string(v).ok())
+            .unwrap_or_else(|| "[]".into());
+        let pitch_json = input
+            .pitches
+            .as_ref()
+            .and_then(|v| serde_json::to_string(v).ok())
+            .unwrap_or_else(|| "[]".into());
+        let freq_json = input
+            .frequencies
+            .as_ref()
+            .and_then(|v| serde_json::to_string(v).ok())
+            .unwrap_or_else(|| "[]".into());
+        let pos_tags = input.pos_tags.clone().unwrap_or_default();
+
+        conn.execute(
+            "INSERT INTO immersion_words
+             (expression, reading, matched_forms, status, lookup_count, first_seen_at, last_seen_at, furigana_json, glossary_json, pitch_json, freq_json, pos_tags)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                &expr,
+                &read,
+                forms_json,
+                &status,
+                now_ts,
+                furi_json,
+                gloss_json,
+                pitch_json,
+                freq_json,
+                pos_tags
+            ],
+        )
+        .map_err(err)?;
+        let id = conn.last_insert_rowid();
+        let _ = conn.execute(
+            "INSERT INTO immersion_daily (day_key, active_seconds, lookup_count, words_tracked, episodes_completed)
+             VALUES (?1, 0, 1, 1, 0)
+             ON CONFLICT(day_key) DO UPDATE SET lookup_count = lookup_count + 1, words_tracked = words_tracked + 1",
+            [db::today_day_key()],
+        );
+        (id, 1)
+    };
+
+    save_word_context_if_present(
+        &conn,
+        word_id,
+        input.anilist_id,
+        input.ep_key.as_deref(),
+        input.sentence.as_deref(),
+        &surface,
+        input.position_sec,
+        now_ts,
+    );
+
+    crate::backup::mark_dirty();
+
+    Ok(WordStatusResult {
+        id: word_id,
+        expression: expr,
+        reading: read,
+        status,
+        lookup_count: count,
+    })
+}
+
+#[tauri::command]
+pub async fn delete_immersion_word(st: St<'_>, id: i64) -> CmdResult<()> {
+    let conn = st.db();
+    conn.execute("DELETE FROM immersion_words WHERE id = ?1", [id])
+        .map_err(err)?;
+    crate::backup::mark_dirty();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_tracked_surface_forms(st: St<'_>) -> CmdResult<Vec<String>> {
+    let conn = st.db();
+    let mut stmt = conn
+        .prepare("SELECT expression, reading, matched_forms FROM immersion_words WHERE status = 'learning'")
+        .map_err(err)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(err)?;
+
+    let mut set = std::collections::HashSet::new();
+    for row in rows.flatten() {
+        let (expr, read, forms_str) = row;
+        if !expr.trim().is_empty() {
+            set.insert(expr);
+        }
+        if !read.trim().is_empty() && read.chars().count() >= 2 {
+            set.insert(read);
+        }
+        if let Ok(forms) = serde_json::from_str::<Vec<String>>(&forms_str) {
+            for f in forms {
+                if !f.trim().is_empty() {
+                    set.insert(f);
+                }
+            }
+        }
+    }
+    let mut out: Vec<String> = set.into_iter().collect();
+    out.sort_by(|a, b| b.chars().count().cmp(&a.chars().count()));
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn set_immersion_daily_goal(st: St<'_>, minutes: i64) -> CmdResult<i64> {
+    let clamped = minutes.clamp(5, 720);
+    let conn = st.db();
+    db::set_setting(&conn, "pref.immersion_daily_goal", &clamped.to_string()).map_err(err)?;
+    crate::backup::mark_dirty();
+    Ok(clamped)
+}
+
+#[tauri::command]
+pub async fn log_manual_immersion(
+    st: St<'_>,
+    minutes: i64,
+    label: String,
+    anilist_id: Option<i64>,
+    ep_key: Option<String>,
+) -> CmdResult<()> {
+    let mins = minutes.clamp(1, 720);
+    let conn = st.db();
+    let clean_label = if label.trim().is_empty() {
+        "Manual Immersion"
+    } else {
+        label.trim()
+    };
+    let ek = ep_key.unwrap_or_else(|| format!("manual:{}", db::now()));
+    db::record_immersion_time(&conn, anilist_id, Some(&ek), Some(clean_label), mins * 60)
+        .map_err(err)?;
+    crate::backup::mark_dirty();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_immersion_overview(st: St<'_>) -> CmdResult<ImmersionOverview> {
+    let conn = st.db();
+    let _ = db::backfill_immersion_from_watch_state(&conn);
+
+    let daily_goal_minutes: i64 = db::get_setting(&conn, "pref.immersion_daily_goal")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(60)
+        .clamp(5, 720);
+
+    // Load all daily rows into a map
+    let mut daily_map: std::collections::HashMap<String, (i64, i64, i64, i64)> =
+        std::collections::HashMap::new();
+    let mut total_immersion_sec = 0i64;
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT day_key, active_seconds, lookup_count, words_tracked, episodes_completed FROM immersion_daily",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        }) {
+            for row in rows.flatten() {
+                total_immersion_sec += row.1.max(0);
+                daily_map.insert(row.0, (row.1.max(0), row.2.max(0), row.3.max(0), row.4.max(0)));
+            }
+        }
+    }
+
+    let now_local = chrono::Local::now().date_naive();
+    let today_key = now_local.format("%Y-%m-%d").to_string();
+    let today_immersion_sec = daily_map.get(&today_key).map(|x| x.0).unwrap_or(0);
+
+    let mut week_immersion_sec = 0i64;
+    let mut month_immersion_sec = 0i64;
+    let mut daily_activity = Vec::with_capacity(30);
+
+    for days_ago in (0..30).rev() {
+        let d = now_local - chrono::Days::new(days_ago);
+        let key = d.format("%Y-%m-%d").to_string();
+        let label = d.format("%b %d").to_string();
+        let (act_sec, l_cnt, w_trk, ep_cmp) = daily_map.get(&key).copied().unwrap_or((0, 0, 0, 0));
+        if days_ago < 7 {
+            week_immersion_sec += act_sec;
+        }
+        month_immersion_sec += act_sec;
+        daily_activity.push(ImmersionDayPoint {
+            day_key: key,
+            label,
+            active_seconds: act_sec,
+            lookup_count: l_cnt,
+            words_tracked: w_trk,
+            episodes_completed: ep_cmp,
+        });
+    }
+
+    // Calculate current streak and best streak
+    let is_active_day = |key: &str| -> bool {
+        daily_map
+            .get(key)
+            .map(|(sec, lookups, _, eps)| *sec >= 60 || *lookups > 0 || *eps > 0)
+            .unwrap_or(false)
+    };
+
+    let mut current_streak_days = 0i64;
+    let mut cursor = now_local;
+    if !is_active_day(&cursor.format("%Y-%m-%d").to_string()) {
+        cursor = cursor - chrono::Days::new(1);
+    }
+    while is_active_day(&cursor.format("%Y-%m-%d").to_string()) {
+        current_streak_days += 1;
+        cursor = cursor - chrono::Days::new(1);
+    }
+
+    let mut active_dates: Vec<chrono::NaiveDate> = daily_map
+        .iter()
+        .filter(|(_, (sec, lookups, _, eps))| *sec >= 60 || *lookups > 0 || *eps > 0)
+        .filter_map(|(k, _)| chrono::NaiveDate::parse_from_str(k, "%Y-%m-%d").ok())
+        .collect();
+    active_dates.sort();
+    let mut best_streak_days = 0i64;
+    let mut run = 0i64;
+    let mut prev_date: Option<chrono::NaiveDate> = None;
+    for d in active_dates {
+        if let Some(p) = prev_date {
+            if d == p + chrono::Days::new(1) {
+                run += 1;
+            } else if d != p {
+                run = 1;
+            }
+        } else {
+            run = 1;
+        }
+        if run > best_streak_days {
+            best_streak_days = run;
+        }
+        prev_date = Some(d);
+    }
+
+    let anilist_immersion_list = db::get_setting(&conn, "pref.anilist_immersion_list")
+        .ok()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let mut total_episodes_completed: i64 = daily_map.values().map(|(_, _, _, eps)| *eps).sum();
+
+    // Real-time sessions grouped by anilist_id
+    let mut session_sec_by_aid: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    let mut top_anime_map: std::collections::HashMap<String, ImmersionAnimeSummary> =
+        std::collections::HashMap::new();
+
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT s.anilist_id,
+                MAX(COALESCE(m.title_english, m.title_romaji, m.title_native, NULLIF(s.source_label, ''), 'Unknown Anime')),
+                m.cover_url,
+                m.cover_path,
+                SUM(s.active_seconds) AS total_sec,
+                COUNT(DISTINCT CASE WHEN s.ep_key != '' THEN s.ep_key END) AS ep_cnt,
+                (SELECT COUNT(DISTINCT c.word_id) FROM immersion_contexts c WHERE c.anilist_id = s.anilist_id AND s.anilist_id > 0) AS word_cnt
+         FROM immersion_sessions s
+         LEFT JOIN media m ON m.anilist_id = s.anilist_id
+         GROUP BY CASE WHEN s.anilist_id > 0 THEN CAST(s.anilist_id AS TEXT) ELSE s.source_label END
+         HAVING total_sec > 0",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok(ImmersionAnimeSummary {
+                anilist_id: r.get::<_, i64>(0)?,
+                title: r.get::<_, String>(1)?,
+                cover_url: r.get(2)?,
+                cover_path: r.get(3)?,
+                active_seconds: r.get::<_, i64>(4)?,
+                episodes_watched: r.get::<_, i64>(5)?,
+                words_looked_up: r.get::<_, i64>(6).unwrap_or(0),
+            })
+        }) {
+            for item in rows.flatten() {
+                if item.anilist_id > 0 {
+                    session_sec_by_aid.insert(item.anilist_id, item.active_seconds);
+                    top_anime_map.insert(format!("aid:{}", item.anilist_id), item);
+                } else {
+                    top_anime_map.insert(format!("lbl:{}", item.title), item);
+                }
+            }
+        }
+    }
+
+    // Merge shows from the user's selected AniList Japanese Immersion List (if configured)
+    let mut anilist_immersion_shows_count = 0i64;
+    if anilist_immersion_list.is_some() {
+        let _ = conn.execute_batch(db::SCHEMA_V8);
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT a.anilist_id,
+                    COALESCE(m.title_english, m.title_romaji, m.title_native, a.title),
+                    COALESCE(m.cover_url, a.cover_url),
+                    m.cover_path,
+                    a.episodes_watched,
+                    a.active_seconds,
+                    (SELECT COUNT(DISTINCT c.word_id) FROM immersion_contexts c WHERE c.anilist_id = a.anilist_id) AS word_cnt
+             FROM immersion_anilist_shows a
+             LEFT JOIN media m ON m.anilist_id = a.anilist_id
+             WHERE a.active_seconds > 0",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6).unwrap_or(0),
+                ))
+            }) {
+                for (aid, title, cover_url, cover_path, eps_w, act_sec, word_cnt) in rows.flatten() {
+                    anilist_immersion_shows_count += 1;
+                    let already_counted_sec = session_sec_by_aid.get(&aid).copied().unwrap_or(0);
+                    let extra_sec = (act_sec - already_counted_sec).max(0);
+                    total_immersion_sec += extra_sec;
+                    total_episodes_completed += eps_w.max(0);
+
+                    let key = format!("aid:{aid}");
+                    if let Some(existing) = top_anime_map.get_mut(&key) {
+                        existing.active_seconds = existing.active_seconds.max(act_sec);
+                        existing.episodes_watched = existing.episodes_watched.max(eps_w);
+                        if existing.cover_url.is_none() {
+                            existing.cover_url = cover_url;
+                        }
+                    } else {
+                        top_anime_map.insert(
+                            key,
+                            ImmersionAnimeSummary {
+                                anilist_id: aid,
+                                title,
+                                cover_url,
+                                cover_path,
+                                active_seconds: act_sec,
+                                episodes_watched: eps_w,
+                                words_looked_up: word_cnt,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let mut top_anime: Vec<ImmersionAnimeSummary> = top_anime_map.into_values().collect();
+    top_anime.sort_by(|a, b| b.active_seconds.cmp(&a.active_seconds));
+    top_anime.truncate(16);
+
+    // Recent sessions
+    let mut recent_sessions = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT s.id, s.day_key, s.anilist_id, s.ep_key,
+                COALESCE(m.title_english, m.title_romaji, m.title_native, NULLIF(s.source_label, ''), 'Immersion Session'),
+                m.cover_url, m.cover_path, s.active_seconds, s.updated_at
+         FROM immersion_sessions s
+         LEFT JOIN media m ON m.anilist_id = s.anilist_id
+         WHERE s.active_seconds > 0
+         ORDER BY s.updated_at DESC
+         LIMIT 15",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok(ImmersionSessionItem {
+                id: r.get(0)?,
+                day_key: r.get(1)?,
+                anilist_id: r.get(2)?,
+                ep_key: r.get(3)?,
+                source_label: r.get(4)?,
+                cover_url: r.get(5)?,
+                cover_path: r.get(6)?,
+                active_seconds: r.get(7)?,
+                updated_at: r.get(8)?,
+            })
+        }) {
+            for item in rows.flatten() {
+                recent_sessions.push(item);
+            }
+        }
+    }
+
+    // Load all contexts grouped by word_id
+    let mut contexts_by_word: std::collections::HashMap<i64, Vec<ImmersionContextItem>> =
+        std::collections::HashMap::new();
+    if let Ok(mut ctx_stmt) = conn.prepare(
+        "SELECT c.id, c.word_id, c.anilist_id, c.ep_key,
+                COALESCE(m.title_english, m.title_romaji, m.title_native),
+                m.cover_url, m.cover_path,
+                c.sentence, c.matched_surface, c.position_sec, c.created_at
+         FROM immersion_contexts c
+         LEFT JOIN media m ON m.anilist_id = c.anilist_id
+         ORDER BY c.created_at DESC",
+    ) {
+        if let Ok(rows) = ctx_stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(1)?,
+                ImmersionContextItem {
+                    id: r.get(0)?,
+                    anilist_id: r.get(2)?,
+                    ep_key: r.get(3)?,
+                    anime_title: r.get(4)?,
+                    cover_url: r.get(5)?,
+                    cover_path: r.get(6)?,
+                    sentence: r.get(7)?,
+                    matched_surface: r.get(8)?,
+                    position_sec: r.get(9)?,
+                    created_at: r.get(10)?,
+                },
+            ))
+        }) {
+            for (word_id, ctx) in rows.flatten() {
+                contexts_by_word.entry(word_id).or_default().push(ctx);
+            }
+        }
+    }
+
+    // Load all words ordered by lookup_count DESC, last_seen_at DESC
+    let mut words = Vec::new();
+    let mut total_lookups = 0i64;
+    let mut unique_words_count = 0i64;
+    let mut learning_words_count = 0i64;
+    let mut known_words_count = 0i64;
+    let mut ignored_words_count = 0i64;
+
+    if let Ok(mut w_stmt) = conn.prepare(
+        "SELECT id, expression, reading, matched_forms, status, lookup_count,
+                first_seen_at, last_seen_at, furigana_json, glossary_json,
+                pitch_json, freq_json, pos_tags
+         FROM immersion_words
+         ORDER BY lookup_count DESC, last_seen_at DESC",
+    ) {
+        if let Ok(rows) = w_stmt.query_map([], |r| {
+            let id: i64 = r.get(0)?;
+            let expression: String = r.get(1)?;
+            let reading: String = r.get(2)?;
+            let forms_json: String = r.get(3)?;
+            let status: String = r.get(4)?;
+            let lookup_count: i64 = r.get(5)?;
+            let first_seen_at: i64 = r.get(6)?;
+            let last_seen_at: i64 = r.get(7)?;
+            let furi_json: String = r.get(8)?;
+            let gloss_json: String = r.get(9)?;
+            let pitch_json: String = r.get(10)?;
+            let freq_json: String = r.get(11)?;
+            let pos_tags: String = r.get(12)?;
+
+            let matched_forms: Vec<String> = serde_json::from_str(&forms_json).unwrap_or_default();
+            let furigana: Vec<crate::dictionary::FuriganaSegment> =
+                serde_json::from_str(&furi_json).unwrap_or_default();
+            let glossaries: Vec<String> = serde_json::from_str(&gloss_json).unwrap_or_default();
+            let pitches: Vec<crate::dictionary::PitchAccent> =
+                serde_json::from_str(&pitch_json).unwrap_or_default();
+            let frequencies: Vec<String> = serde_json::from_str(&freq_json).unwrap_or_default();
+
+            Ok(ImmersionWordItem {
+                id,
+                expression,
+                reading,
+                matched_forms,
+                status,
+                lookup_count,
+                first_seen_at,
+                last_seen_at,
+                furigana,
+                glossaries,
+                pitches,
+                frequencies,
+                pos_tags,
+                contexts: Vec::new(),
+            })
+        }) {
+            for mut item in rows.flatten() {
+                match item.status.as_str() {
+                    "known" => {
+                        known_words_count += 1;
+                        unique_words_count += 1;
+                        total_lookups += item.lookup_count;
+                    }
+                    "ignored" => {
+                        ignored_words_count += 1;
+                    }
+                    _ => {
+                        learning_words_count += 1;
+                        unique_words_count += 1;
+                        total_lookups += item.lookup_count;
+                    }
+                }
+                if let Some(ctxs) = contexts_by_word.remove(&item.id) {
+                    item.contexts = ctxs;
+                }
+                words.push(item);
+            }
+        }
+    }
+
+    Ok(ImmersionOverview {
+        today_immersion_sec,
+        week_immersion_sec,
+        month_immersion_sec,
+        total_immersion_sec,
+        daily_goal_minutes,
+        current_streak_days,
+        best_streak_days,
+        total_episodes_completed,
+        total_lookups,
+        unique_words_count,
+        learning_words_count,
+        known_words_count,
+        ignored_words_count,
+        daily_activity,
+        top_anime,
+        recent_sessions,
+        words,
+        anilist_immersion_list,
+        anilist_immersion_shows_count,
+    })
+}
+
+fn entry_immersion_episodes_and_mins(e: &crate::providers::AlListEntry) -> (i64, i64, String, Option<String>) {
+    let total_eps = e.media.as_ref().and_then(|m| m.episodes).unwrap_or(0);
+    let eps = if e.status == "COMPLETED" && total_eps > 0 {
+        e.progress.max(total_eps)
+    } else {
+        e.progress.max(0)
+    };
+    let dur_mins = e
+        .media
+        .as_ref()
+        .and_then(|m| m.duration)
+        .filter(|&d| d > 0 && d <= 240)
+        .unwrap_or(24);
+    let title = e
+        .media
+        .as_ref()
+        .and_then(|m| {
+            m.title
+                .english
+                .clone()
+                .or_else(|| m.title.romaji.clone())
+                .or_else(|| m.title.native.clone())
+        })
+        .unwrap_or_else(|| format!("Anime #{}", e.media_id));
+    let cover = e
+        .media
+        .as_ref()
+        .and_then(|m| m.cover_image.as_ref())
+        .and_then(|c| c.extra_large.clone().or_else(|| c.large.clone()));
+    (eps, dur_mins, title, cover)
+}
+
+fn apply_anilist_immersion_group_to_db(
+    conn: &rusqlite::Connection,
+    list_name: &str,
+    entries: &[crate::providers::AlListEntry],
+) -> anyhow::Result<()> {
+    conn.execute_batch(db::SCHEMA_V8)?;
+    conn.execute("DELETE FROM immersion_anilist_shows", [])?;
+    let now_ts = db::now();
+    for e in entries {
+        let (eps, dur_mins, title, cover) = entry_immersion_episodes_and_mins(e);
+        if eps <= 0 {
+            continue;
+        }
+        let active_sec = eps * dur_mins * 60;
+        conn.execute(
+            "INSERT INTO immersion_anilist_shows
+             (anilist_id, list_name, title, cover_url, episodes_watched, duration_mins, active_seconds, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(anilist_id) DO UPDATE SET
+                list_name = excluded.list_name,
+                title = excluded.title,
+                cover_url = COALESCE(excluded.cover_url, immersion_anilist_shows.cover_url),
+                episodes_watched = excluded.episodes_watched,
+                duration_mins = excluded.duration_mins,
+                active_seconds = excluded.active_seconds,
+                updated_at = excluded.updated_at",
+            rusqlite::params![
+                e.media_id,
+                list_name,
+                title,
+                cover,
+                eps,
+                dur_mins,
+                active_sec,
+                now_ts
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_anilist_immersion_lists(
+    st: St<'_>,
+) -> CmdResult<AnilistImmersionListsResponse> {
+    let (token, user_id, selected_list, mut synced_show_count, mut synced_hours) = {
+        let conn = st.db();
+        let _ = conn.execute_batch(db::SCHEMA_V8);
+        let token = db::get_setting(&conn, "anilist.token")
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty());
+        let user_id = db::get_setting(&conn, "anilist.user_id")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<i64>().ok());
+        let selected = db::get_setting(&conn, "pref.anilist_immersion_list")
+            .ok()
+            .flatten()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let (cnt, sec): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(active_seconds), 0) FROM immersion_anilist_shows",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or((0, 0));
+        (token, user_id, selected, cnt, (sec as f64) / 3600.0)
+    };
+
+    let (Some(tok), Some(uid)) = (token, user_id) else {
+        return Ok(AnilistImmersionListsResponse {
+            selected_list,
+            synced_show_count,
+            synced_hours,
+            lists: Vec::new(),
+        });
+    };
+
+    let groups = st
+        .providers
+        .anilist_user_lists_grouped(&tok, uid)
+        .await
+        .map_err(err)?;
+
+    // If a list is currently selected, refresh its cached entries automatically
+    if let Some(ref sel_name) = selected_list {
+        if let Some(g) = groups.iter().find(|g| g.name == *sel_name) {
+            let conn = st.db();
+            let _ = apply_anilist_immersion_group_to_db(&conn, sel_name, &g.entries);
+            let (cnt, sec): (i64, i64) = conn
+                .query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(active_seconds), 0) FROM immersion_anilist_shows",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap_or((0, 0));
+            synced_show_count = cnt;
+            synced_hours = (sec as f64) / 3600.0;
+        }
+    }
+
+    let lists = groups
+        .into_iter()
+        .map(|g| {
+            let mut total_episodes = 0i64;
+            let mut total_sec = 0i64;
+            for e in &g.entries {
+                let (eps, mins, _, _) = entry_immersion_episodes_and_mins(e);
+                total_episodes += eps;
+                total_sec += eps * mins * 60;
+            }
+            AnilistListOption {
+                name: g.name,
+                is_custom_list: g.is_custom_list,
+                entry_count: g.entries.len(),
+                total_episodes,
+                estimated_hours: ((total_sec as f64) / 360.0).round() / 10.0,
+            }
+        })
+        .collect();
+
+    Ok(AnilistImmersionListsResponse {
+        selected_list,
+        synced_show_count,
+        synced_hours: (synced_hours * 10.0).round() / 10.0,
+        lists,
+    })
+}
+
+#[tauri::command]
+pub async fn set_anilist_immersion_list(
+    st: St<'_>,
+    list_name: Option<String>,
+) -> CmdResult<AnilistImmersionListsResponse> {
+    let clean = list_name
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    {
+        let conn = st.db();
+        let _ = conn.execute_batch(db::SCHEMA_V8);
+        db::set_setting(&conn, "pref.anilist_immersion_list", &clean).map_err(err)?;
+        if clean.is_empty() {
+            let _ = conn.execute("DELETE FROM immersion_anilist_shows", []);
+        }
+    }
+    crate::backup::mark_dirty();
+
+    get_anilist_immersion_lists(st).await
 }

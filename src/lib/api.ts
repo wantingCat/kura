@@ -632,6 +632,7 @@ export interface BuiltinPlayerState {
   edEnd: number | null;
   hasNextEpisode: boolean;
   externalSubPath: string | null;
+  todayImmersionSec?: number;
 }
 
 export type BuiltinCommand =
@@ -688,6 +689,8 @@ export interface TermEntry {
   score: number;
   frequencies: string[];
   pitches: PitchAccent[];
+  wordStatus?: "learning" | "known" | "ignored" | string | null;
+  lookupCount?: number;
 }
 
 export interface KanjiEntry {
@@ -705,6 +708,143 @@ export interface LookupResult {
   matchLen: number;
   terms: TermEntry[];
   kanji: KanjiEntry[];
+}
+
+export interface RecordWordLookupInput {
+  expression: string;
+  reading: string;
+  matchedText: string;
+  furigana: FuriganaSegment[];
+  glossaries: string[];
+  pitches: PitchAccent[];
+  frequencies: string[];
+  posTags: string;
+  anilistId?: number | null;
+  epKey?: string | null;
+  sentence?: string | null;
+  positionSec?: number | null;
+}
+
+export interface SetWordStatusInput {
+  expression: string;
+  reading: string;
+  status: "learning" | "known" | "ignored";
+  matchedText?: string | null;
+  furigana?: FuriganaSegment[] | null;
+  glossaries?: string[] | null;
+  pitches?: PitchAccent[] | null;
+  frequencies?: string[] | null;
+  posTags?: string | null;
+  anilistId?: number | null;
+  epKey?: string | null;
+  sentence?: string | null;
+  positionSec?: number | null;
+}
+
+export interface WordStatusResult {
+  id: number;
+  expression: string;
+  reading: string;
+  status: "learning" | "known" | "ignored" | string;
+  lookupCount: number;
+}
+
+export interface ImmersionContextItem {
+  id: number;
+  anilistId: number | null;
+  epKey: string | null;
+  animeTitle: string | null;
+  coverUrl: string | null;
+  coverPath: string | null;
+  sentence: string;
+  matchedSurface: string;
+  positionSec: number | null;
+  createdAt: number;
+}
+
+export interface ImmersionWordItem {
+  id: number;
+  expression: string;
+  reading: string;
+  matchedForms: string[];
+  status: "learning" | "known" | "ignored" | string;
+  lookupCount: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  furigana: FuriganaSegment[];
+  glossaries: string[];
+  pitches: PitchAccent[];
+  frequencies: string[];
+  posTags: string;
+  contexts: ImmersionContextItem[];
+}
+
+export interface ImmersionDayPoint {
+  dayKey: string;
+  label: string;
+  activeSeconds: number;
+  lookupCount: number;
+  wordsTracked: number;
+  episodesCompleted: number;
+}
+
+export interface ImmersionAnimeSummary {
+  anilistId: number;
+  title: string;
+  coverUrl: string | null;
+  coverPath: string | null;
+  activeSeconds: number;
+  episodesWatched: number;
+  wordsLookedUp: number;
+}
+
+export interface ImmersionSessionItem {
+  id: number;
+  dayKey: string;
+  anilistId: number;
+  epKey: string;
+  sourceLabel: string;
+  coverUrl: string | null;
+  coverPath: string | null;
+  activeSeconds: number;
+  updatedAt: number;
+}
+
+export interface ImmersionOverview {
+  todayImmersionSec: number;
+  weekImmersionSec: number;
+  monthImmersionSec: number;
+  totalImmersionSec: number;
+  dailyGoalMinutes: number;
+  currentStreakDays: number;
+  bestStreakDays: number;
+  totalEpisodesCompleted: number;
+  totalLookups: number;
+  uniqueWordsCount: number;
+  learningWordsCount: number;
+  knownWordsCount: number;
+  ignoredWordsCount: number;
+  dailyActivity: ImmersionDayPoint[];
+  topAnime: ImmersionAnimeSummary[];
+  recentSessions: ImmersionSessionItem[];
+  words: ImmersionWordItem[];
+  anilistImmersionList?: string | null;
+  anilistImmersionShowsCount?: number;
+}
+
+export interface AnilistListOption {
+  name: string;
+  isCustomList: boolean;
+  entryCount: number;
+  totalEpisodes: number;
+  estimatedHours: number;
+}
+
+export interface AnilistImmersionListsResponse {
+  selectedList: string | null;
+  syncedShowCount: number;
+  syncedHours: number;
+  lists: AnilistListOption[];
 }
 
 export const api = {
@@ -850,6 +990,31 @@ export const api = {
   downloadRecommendedDictionaries: () =>
     invoke<DictionaryInfo[]>("download_recommended_dictionaries"),
   removeDictionary: (id: number) => invoke<void>("remove_dictionary", { id }),
+  recordWordLookup: (input: RecordWordLookupInput) =>
+    invoke<WordStatusResult>("record_word_lookup", { input }),
+  setWordStatus: (input: SetWordStatusInput) =>
+    invoke<WordStatusResult>("set_word_status", { input }),
+  deleteImmersionWord: (id: number) => invoke<void>("delete_immersion_word", { id }),
+  getTrackedSurfaceForms: () => invoke<string[]>("get_tracked_surface_forms"),
+  setImmersionDailyGoal: (minutes: number) =>
+    invoke<number>("set_immersion_daily_goal", { minutes }),
+  logManualImmersion: (opts: {
+    minutes: number;
+    label: string;
+    anilistId?: number | null;
+    epKey?: string | null;
+  }) =>
+    invoke<void>("log_manual_immersion", {
+      minutes: opts.minutes,
+      label: opts.label,
+      anilistId: opts.anilistId ?? null,
+      epKey: opts.epKey ?? null,
+    }),
+  getImmersionOverview: () => invoke<ImmersionOverview>("get_immersion_overview"),
+  getAnilistImmersionLists: () =>
+    invoke<AnilistImmersionListsResponse>("get_anilist_immersion_lists"),
+  setAnilistImmersionList: (listName: string | null) =>
+    invoke<AnilistImmersionListsResponse>("set_anilist_immersion_list", { listName }),
 };
 
 export const events = {
