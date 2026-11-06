@@ -1,195 +1,84 @@
 # Kura 蔵
 
 <p align="center">
-  <img src="assets/brand/logo.png" alt="Kura Logo" width="128" />
+  <img src="assets/brand/logo.png" alt="Kura logo" width="128" />
   <br>
-  <strong>A local-first, manga-styled desktop anime library, streaming hub & Japanese immersion player.</strong>
+  <strong>A Japanese immersion suite for anime.</strong>
   <br>
-  <em>Current Release: <code>v0.6</code> · Built with AI assistance</em>
+  <em>Watch with Japanese subtitles, look up any word on hover, and keep your learning in one place.</em>
 </p>
 
 ---
 
-**Kura** combines a local-first anime library with a built-in **Memento-style video player**, **pause-to-hover Yomitan Japanese dictionary**, **modular bring-your-own torrent extensions**, and **two-way AniList sync**. Point Kura at your local folders or switch to **Streaming & Hybrid Mode** to browse the full AniList catalog, stream or download episodes with automatic **Jimaku.cc** Japanese subtitle fetching and live subtitle retiming, and look up any Japanese word on hover — all inside a comic-inspired desktop interface.
+Kura is a desktop app for learning Japanese through anime. It plays episodes in a built-in player with Japanese subtitles you can hover for instant dictionary lookups, finds and syncs those subtitles for you, and tracks what you watch — whether the episodes live in your own folders or are streamed through sources you add yourself.
 
----
+## Why Kura
 
-## 📸 Screenshots
+Immersion usually means juggling a player, a subtitle site, a retiming tool, a dictionary extension and a tracker. Kura puts that whole loop in one window:
 
-### Home & Library
-A slim top bar with instant search from anywhere (`Ctrl K`), a comic-inspired "Continue watching" hero panel, recently added titles, and your library with multi-season shows neatly grouped into stacked cards:
+1. **Find something to watch** — your local library, your AniList lists, or the full AniList catalog.
+2. **Get Japanese subtitles automatically** — fetched from [Jimaku](https://jimaku.cc) and retimed to your exact video.
+3. **Watch and look things up** — pause, hover a word, and see its reading, meaning, pitch accent and kanji.
+4. **Keep going** — progress syncs to AniList, and Kura tells you when the next episode and its Japanese subtitles are out.
 
-![Kura Home & Library](assets/screenshots/home-library.png)
+## Features
 
-### Cinematic Backdrop & Season Tabs
-A widescreen cinematic backdrop, cover art overlay, airing and release metadata, watch progress, and seamless tabbed navigation across all seasons and movies in the franchise:
+### Immersion
+- **Hover dictionary (Yomitan-style)** — pause and hover any word in the subtitles. Conjugations are deinflected (`食べさせられた` → `食べる`), with furigana, definitions, pitch accent, frequency, audio and kanji breakdowns.
+- **Bring your own dictionaries** — one-click JMdict + KANJIDIC download, or import any Yomitan `.zip`.
+- **Japanese subtitles from Jimaku** — search and download per episode or as season packs. A 日本語 tag on the show page tells you which episodes already have subtitles.
+- **Automatic subtitle retiming** — Jimaku subtitles are often timed for TV broadcasts. Kura aligns them to your video's own dialogue track, handling intro bumpers and commercial-break shifts, even while an episode is still streaming.
+- **Subtitle matcher** — link or rename a folder of subtitle files to the right episodes, including absolute numbering (`S02E25` → `S02E01`).
+- **Episode & subtitle alerts** — get notified when an episode on your Watching list airs and again when its Japanese subtitles appear on Jimaku (which can take anywhere from hours to a week). Kura can stay in the system tray to keep checking.
 
-![Kura Anime Details](assets/screenshots/anime-details.png)
+### Watching
+- **Built-in player** — powered by mpv with GPU 10-bit HEVC decoding, embedded subtitle and chapter support, instant audio-track switching, OP/ED skip via AniSkip, and resume.
+- **Or use your own player** — mpv, VLC and MPC-HC/BE are detected automatically.
+- **Local library** — point Kura at your folders. It understands real-world release names, groups seasons into one show, and fetches artwork and episode details.
+- **Streaming (optional)** — add your own torrent sources in **Settings → Extensions** and stream episodes you don't have locally. Kura ships with **no built-in sources**.
 
-### Rich Episode Guides & Metadata
-Individual episode thumbnails, Japanese and English titles, air dates, runtimes, file sizes, watch toggles, and detailed synopsis with genres, tags, and studio info:
+### Tracking
+- **AniList two-way sync** — imports your lists and updates progress the moment you mark an episode watched, with an offline queue.
+- **Seasonal calendar** — this week's broadcasts in your timezone, with countdowns.
+- **Global search** (`Ctrl K`) — your library first, then all of AniList.
+- **Discord Rich Presence**, **backup & restore**, and **automatic updates**.
 
-![Kura Episode List & Details](assets/screenshots/episodes-list.png)
+## Download
 
----
+Get the latest build from **[GitHub Releases](https://github.com/wantingCat/kura/releases)**:
 
-## ✨ Features
+- **Windows** — `.exe` installer (recommended) or `.msi`
+- **macOS** — `.dmg` (`aarch64` for Apple Silicon, `x64` for Intel)
+- **Linux** — `.deb`, `.rpm` or `.AppImage`
 
-### New in `v0.6`
-- **Built-In Memento Video Player (`Kura Built-In (Memento)`)**: Watch episodes directly inside Kura without launching an external window. Includes a local HTTP byte-range media server with automatic live `mpv` H.264/AAC stream transcoding fallback for 10-bit HEVC/AC3, pure-Rust Matroska (`.mkv`) embedded subtitle & chapter extraction, AniSkip OP/ED skip, playback speed controls, and a live top-bar torrent HUD (`% downloaded`, `MB downloaded / total`, `↓ download speed`, `↑ upload speed`, and `connected peers`).
-- **Pause-to-Hover Yomitan Japanese Dictionary Engine**: Pause any video and hover over Japanese subtitle characters to instantly deinflect conjugated verbs and adjectives (`食べさせられた` → `食べる`) and view readings/furigana, pitch accent downsteps, frequency badges, definitions, audio pronunciation (`🔊`), and Kanji breakdowns (On/Kun readings, meanings, stroke count, JLPT/grade). Ships with a built-in starter dictionary plus a **1-Click Full JMdict + KANJIDIC Downloader** and custom Yomitan `.zip` importer in **Settings → Audio & Subtitles**.
-- **Modular Torrent Extensions (Zero Built-In Piracy Domains)**: Kura ships with **zero hardcoded piracy domains** so the repository stays 100% safe on GitHub. In **Settings → Playback**, paste any Hayase-compatible extension manifest (`index.json`), Kura JSON manifest, or custom RSS / SubsPlease JSON / SeaDex API URL to enable your own indexers.
-- **Sub-Second Concurrent Search, SeaDex Curated Scoring & Full BitTorrent Swarm Engine**: Queries all enabled extensions concurrently in a single wave with early straggler cancellation, highlights **★ SeaDex Best** and **SubsPlease** verified releases, and powers playback with Mainline DHT (`BEP 5`), Peer Exchange (`BEP 11` `ut_pex`), Tracker Scrape (`BEP 48`), WebSeeds (`BEP 19`), and sliding-window piece pipelining.
-- **Live Streaming Subtitle Auto-Sync (Intro Bumper & Commercial Shift Alignment)**: Automatically synchronizes external Jimaku Japanese subtitles against the video's embedded dialogue track even while a torrent is still sequentially streaming — accurately compensating for Viz Media, Crunchyroll, Netflix, and Aniplex intro bumpers before Episode dialogue begins.
-- **AniList Status Library Tabs**: Full library status tabs (**Watching, Planning, Completed, Paused, Dropped, All**) that import and organize your entire AniList collection alongside local and bookmarked shows.
-
-### Highlights from `v0.5`
-- **2-Mode Operating Architecture (`Offline Library Mode` vs. `Streaming & Hybrid Mode`)**: Switch anytime in **Settings → Playback** between classic offline folder management (**Mode 1**) and catalog discovery + sequential torrent streaming (**Mode 2**), combining your local files, bookmarked stream shows, and AniList entries into a single unified library.
-- **Built-in BitTorrent Sequential Streaming**: Click any episode to stream directly into **Kura Built-In (Memento)**, **mpv**, or **Memento** over Kura's pure-Rust BitTorrent engine and local HTTP `206 Partial Content` range server. Prioritizes Matroska EBML headers and `Cues` seek indices first, lets you choose between **Stream Only (Temp Cache)**, **Stream & Save to Library**, or **Download to Library First**, and includes an optional **Seed while streaming/downloading** toggle (off by default).
-- **Full AniList Catalog & Voice Actor (Seiyuu) Discovery (`/discover`)**: Browse the entire AniList catalog with infinite scroll, multi-filters (**Genre, Format, Status, Season, Year, Sort**), and a dedicated **Voice Actors & Staff** search tab to explore every anime a seiyuu or staff member has worked on.
-- **Jimaku.cc Japanese Subtitle Fetcher & Automatic Subtitle Retiming**: Download Japanese `.srt`/`.ass` subtitles (including automatic `.zip` season pack extraction) directly from Jimaku.cc and automatically synchronize their timing against your video's reference subtitle cues or `.mkv` tracks using Kura's Alass-style dynamic programming alignment engine.
-- **Smart Subtitle Matcher & Characters / Voice Cast**: Automatically match, link (`--sub-file`), or rename mixed-format external subtitle files (including absolute episode numbering like `S02E25` → `S02E01`) with a live preview dialog, plus view full Character, Japanese Seiyuu, and Staff credits on every anime page.
-
-### Highlights from `v0.4`
-- **AniList Two-Way Sync & Auto-Scrobble**: Sign in via browser OAuth (`http://localhost:14876/oauth/callback`) or paste a token in **Settings → Integrations**. Imports your Watching, Planning, Completed, Paused, and Dropped lists, safely merges episode progress without regressing either side, and auto-scrobbles episodes when they reach your watched threshold — with a persistent offline queue that flushes automatically when back online.
-- **Seasonal Airing Calendar & Countdowns**: A dedicated **Calendar** view in the top bar with a Mon–Sun weekly broadcast schedule in your local timezone, live episode countdowns (*"EP 7 in 3h 15m"*), library highlighting (*In Library* vs. external seasonal anime), and season/year navigation.
-- **Airing & New-Episode Notifications**: Optional notifications when a tracked seasonal show airs or when the live folder watcher ingests a newly downloaded episode.
-- **Advanced Library Filtering & Sorting**: Filter by multiple genres, non-spoiler tags, animation studios, airing status, format, and watch status, with quick removable filter pills and multi-criteria sorting (including Watch Progress and ascending/descending order).
-- **Visual Bug Sweep & Layout Hardening**: Hardened long English, Romaji, and Japanese titles across episode badges, poster cards, Continue Watching panels, search results, toasts, and narrow (`~900px`) windows.
-
-### Highlights from `v0.3.7`
-- **No more freeze on first launch**: slow/disconnected library drives and player detection no longer block the window while Kura starts.
-- **Redesigned Settings**: category sidebar plus instant settings search (`Ctrl F`).
-- **Full Backup & Restore**: export settings, libraries, watch history, progress, track preferences and manual matches; preview a backup and pick what to restore. Automatic safety copies now cover watch history too.
-- **Diagnostics**: copy a redacted system report, re-detect players and view the recent log from Settings → About. Kura now writes a rotating log file.
-- **Opens maximized** instead of a small centered window.
-- **Layout fix**: the "Up next" badge no longer breaks on long episode titles.
-
-### Highlights from `v0.3.6`
-- **Skip button no longer triggers on prologues**: the Skip Opening button only appears inside the actual opening/ending; AniSkip timestamps are matched to your file's exact length (TV vs. Blu-ray cuts), and prologue/recap chapters are ignored.
-- **Redesigned skip button**: a rounded Kura-styled pill with a `TAB` key hint and coral hover state.
-- **Styled MPV messages**: the now-playing banner, subtitle delay and skip notices render properly instead of showing raw formatting codes.
-
-### Highlights from `v0.3.5`
-- **macOS & Linux builds restored**: v0.3.4 failed to compile on non-Windows platforms; downloads for all platforms are back.
-- **MPV detection after winget install**: MPV installed through Kura's built-in installer (now `C:\Program Files\MPV Player`) is detected immediately, along with players found via the Windows installed-apps list, WinGet package folders and the up-to-date registry PATH.
-
-### Highlights from `v0.3.4`
-- **Interactive Clickable Skip Button in MPV**: Floating on-screen `[ ⏭ SKIP OPENING (Click or Tab) ]` overlay rendered directly on MPV with real-time mouse hover tracking, glowing coral aesthetics, and click-to-skip.
-- **Frame-Accurate AniSkip API Integration**: Synchronizes with the AniSkip database to identify OP and ED timestamps down to the millisecond, paired with intelligent duration verification ($85\text{s}-95\text{s}$) to avoid false-positive chapter skips on cold opens and prologues.
-- **What's New Changelog Popup**: First-launch version detection presenting an in-app changelog modal on updates, with past release history tabs and a manual "What's New" button in Settings.
-- **Settings & Library Persistence Across Upgrades**: Fixed WiX `upgradeCode` and implemented automated JSON backups (`kura_backup.json`) that preserve your settings, libraries, and theme across every update or reinstall.
-- **First-Launch MPV Assistant**: Detects player readiness on initial launch and offers automated one-click installation via Winget or Chocolatey.
-
-### Highlights from `v0.3.3`
-- **Live Folder Watcher & Background Rescan**: Automatically monitors all configured library roots in the background using native recursive filesystem events (`notify`). Features a 3-second debounce window with file write lock and size stability checks to safely ingest finished downloads without premature reading.
-- **Sub-10ms Targeted Ingestion**: Automatically matches and resolves new episodes of existing series instantly (< 10ms) without full scans or redundant API requests. Also auto-cleans deleted files and detects local artwork drops (`clearlogo.png`, `fanart.jpg`).
-- **Discord Rich Presence (RPC)**: Native Tokio async IPC client broadcasting Activity Type 3 ("Watching Kura") on your Discord profile, complete with anime title, episode number/title, live remaining time countdown bar, cover artwork, and interactive AniList/GitHub action buttons.
-
-### Highlights from `v0.3.2`
-- **Transparent ClearArt / Logos on Backdrops**: Displays high-resolution series typography wordmarks and ClearArt on the cinematic backdrop, powered by Fanart.tv and local folder artwork (`clearlogo.png` / `logo.png`).
-- **Safe Metadata & Artwork Rebuild Tool**: In Settings, easily wipe and reconstruct local artwork and metadata caches from scratch while strictly preserving 100% of your watch history, progress, track preferences, and library folders.
-- **Scanning Pipeline Overhaul & Stability**: Drastically improved scan reliability and concurrency, added strict external provider timeouts, eliminated main thread mutex contention, and streamlined franchise resolution.
-
-### Highlights from `v0.3.1`
-- **Plays in your own player**: [mpv](https://mpv.io), [VLC](https://www.videolan.org/vlc/), [MPC-HC / MPC-BE](https://github.com/clsid2/mpc-hc) and [Memento](https://github.com/ripose-jp/Memento) are detected automatically (or pick the program yourself). The system default player still works too.
-- **Progress & resume**: Kura follows playback, remembers where you stopped, and resumes from there next time. Episode lists show how far into each episode you are.
-- **Auto-marked watched**: An episode counts as watched once you pass 90% of it (adjustable in Settings), so skipping the ending still counts.
-- **Autoplay next episode** *(on by default)*: When an episode ends, the next one you own starts in the same player window — including the first episode of the next season.
-- **Audio & Subtitle Track Defaults**: Set your global preferences (e.g. Japanese audio + Japanese subtitles with English fallback, English dub with subtitles off, etc.) in Settings. Automatically passes track selection flags to mpv, Memento, and VLC. Custom track overrides can also be configured per anime directly on the series detail page.
-- **Plex & Jellyfin folder support**: Robust matching for multi-season libraries organized by folders (`Season 1`, `Season 2`). Handles complex franchise bridges across OVAs, specials, and TV side-stories (*Slime*, *Date A Live*, *Full Metal Panic*).
-- **Extras & Bonus videos**: Automatic classification and dedicated playback section for creditless openings (`NCOP`), endings (`NCED`), trailers, PVs, and bonus features without polluting episode tallies.
-- **Cinematic Backdrop Header**: Expanded widescreen backdrop panel with gradient shade and layered poster artwork on anime detail pages.
-- **New home page**: A comic-page “Continue watching” panel with one-click resume, plus “New episode” and “Finish this” panels above your library.
-- **Top bar instead of a sidebar**: Search from anywhere (`Ctrl K`), scan progress, review queue and settings in one slim bar.
-- **Automatic updates**: Kura checks GitHub for new versions on startup and can update itself in one click.
-
-### Library
-- **Intelligent Filename Parsing**: Handles real-world release formats, fansub group tags `[Group]`, scene conventions, `SxxEyy`, `- 05v2`, batch folders, multi-part titles (`Part 2`), OVA/SP/Movie markings, creditless OP/EDs (`NCOP`/`NCED`), and Japanese numbering (`第N話`).
-- **Season & Sequel Chain Resolution**: Accurately maps absolute episode numbering (e.g. episode `35`) or multi-season releases to the correct sequel/prequel AniList entry.
-- **Rich Episode Details**: Synopses, episode titles (English + Kanji/Kana), thumbnails, and air dates pulled from [ani.zip](https://api.ani.zip) with [Jikan](https://jikan.moe) fallback.
-- **Local-First & Offline Ready**: All metadata and cached artworks are saved locally using SQLite. Fast, lightweight, and works without an internet connection once scanned.
-- **Review Queue & Manual Matcher**: "Needs review" queue and manual "Fix match" search modal for any unrecognized or ambiguous files.
-- **Watched Progress Tracking**: Mark episodes as watched individually or in bulk ("Up to here"), with active progress bars on anime cards.
-- **Grouped Seasons**: AniList splits every season, movie and OVA into its own entry; Kura stitches them back into one card per show with season tabs (switchable to separate cards in Settings).
-
----
-
-## 🗺️ Roadmap (Upcoming Features)
-
-- [x] **External Player Integrations**: mpv, VLC, MPC-HC/BE and Memento, with watch-time and completion detection via player IPC.
-- [x] **Subtitles & Audio Track Defaults**: Configurable default audio language (e.g. Japanese vs. English dub) and subtitle preferences automatically passed to players on launch, with per-show overrides.
-- [x] **Auto-Update**: Cryptographically signed in-app updates from GitHub Releases.
-- [x] **Cross-Platform Release Automation**: Automated CI/CD builds for Windows (`.exe`/`.msi`), macOS (`.dmg`), and Linux (`.deb`/`.rpm`/`.AppImage`) via GitHub Actions.
-- [x] **Manga Mode (Light Theme)**: High-contrast sumi ink on warm manga paper with authentic Japanese vermilion stamp accents (`#e53935`).
-- [x] **Priority Artwork Engine & ClearLogos**: Strict priority pipeline (`Local > Fanart.tv/ani.zip > AniList`) with official transparent anime title logos floating over 1080p backdrops.
-- [x] **Discord Rich Presence (RPC)**: Live watching activity on your Discord profile with anime title, episode number/title, live remaining time bar, and cover thumbnails.
-- [x] **Folder Watcher / Auto-Rescan**: Automatic background scanning triggered when new episode downloads complete in monitored directories.
-- [x] **Library Export / Backup**: Portable JSON backup for watch history, track preferences, and custom matches.
-- [x] **Advanced Filtering & Search**: Filter by genres, tags, studios, format, watch status, and airing status.
-- [x] **AniList Account Sync & Airing Calendar**: OAuth2 login, list import, safe two-way watch progress synchronization, offline scrobble queue, and weekly seasonal broadcast calendar.
-- [x] **Jimaku Subtitle Fetcher, Automatic Retiming & Smart Subtitle Matcher**: Fetch Japanese subtitles from Jimaku.cc, automatically synchronize subtitle timing, and match/rename mixed-format external subtitle files.
-- [x] **Rich Cast & Staff Metadata + Voice Actor Discovery**: Character voice actors (Japanese seiyuu with character portraits), directors, composers, and key studio staff on anime detail pages and in `/discover`.
-- [x] **2-Mode Architecture (Offline Library + Modular Torrent Extensions)**: Bring-your-own Hayase/RSS/API torrent extensions with pure-Rust sequential BitTorrent streaming (`DHT`, `PEX`, `WebSeeds`, `SeaDex` scoring), unified local + stream library, and infinite-scroll catalog discovery.
-- [x] **Built-In Memento Player & Pause-to-Hover Yomitan Dictionary**: In-app video player with interactive Japanese subtitles, deinflection engine, furigana, pitch accent, Kanji breakdowns, 1-click JMdict + KANJIDIC installer, and live streaming subtitle auto-sync.
-- [ ] **Watch-Time & Immersion Analytics**: Total watch hours, Japanese immersion tracking, and GitHub-style yearly activity heatmap.
-
-> For the detailed milestone roadmap and implementation checklists, see **[TODO.md](TODO.md)**.
-
----
-
-## 📦 Download & Installation
-
-### Releases
-Download pre-compiled packages from the **[GitHub Releases](https://github.com/wantingCat/kura/releases)** page:
-- **Windows**: `.exe` (setup wizard, recommended) or `.msi`
-- **macOS**: `.dmg` — `aarch64` for Apple Silicon (M1 and newer), `x64` for Intel Macs
-- **Linux**: `.deb` (Ubuntu / Debian), `.rpm` (Fedora / openSUSE) or `.AppImage` (any distro)
-
-From `v0.2` on, Kura updates itself: when a new version is out you'll see a banner with an **Update & restart** button (you can turn the check off in Settings). On Linux, self-update works with the `.AppImage`; `.deb` / `.rpm` installs are updated by downloading the new package.
+Kura updates itself — when a new version is out you'll see an **Update & restart** banner.
 
 > [!NOTE]
-> Builds are not code-signed yet. On **Windows**, SmartScreen may say "Windows protected your PC" — click **More info → Run anyway**. On **macOS**, right-click the app and choose **Open** the first time.
+> Builds aren't code-signed yet. On Windows, if SmartScreen appears, click **More info → Run anyway**. On macOS, right-click the app and choose **Open** the first time.
 
----
+### Getting started
+1. Add a folder of anime in the first-run screen, or switch to **Streaming & Hybrid Mode** in **Settings → Playback**.
+2. Add a free [Jimaku API key](https://jimaku.cc/account) in **Settings → Integrations** for Japanese subtitles.
+3. Install the full dictionaries in **Settings → Audio & Subtitles**.
+4. Optionally connect AniList in **Settings → Integrations**.
 
-## 🛠️ Building from Source
+## Building from source
 
-### Prerequisites
-- [Node.js](https://nodejs.org) 20+
-- [Rust](https://rustup.rs) (stable)
-- OS-specific [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) (on Windows: C++ Build Tools & WebView2)
+**Prerequisites:** [Node.js](https://nodejs.org) 20+, [Rust](https://rustup.rs) (stable), and the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
 
-### Setup & Run
 ```sh
-# Install dependencies
 npm install
-
-# Start development app with hot reload
 npm run tauri dev
 ```
 
-### Useful Commands
 | Command | Purpose |
 | --- | --- |
-| `npm run check` | Svelte & TypeScript diagnostics |
-| `cargo test --lib` (in `src-tauri`) | Filename parser & matcher unit tests |
-| `npm run tauri build` | Build optimized production executable and installers |
+| `npm run check` | Svelte & TypeScript checks |
+| `cargo test --lib` (in `src-tauri`) | Rust unit tests |
+| `npm run tauri build` | Production build and installers |
 
----
+**Stack:** Tauri v2 · Rust (`tokio`, `rusqlite`, `reqwest`) · SvelteKit / Svelte 5 · mpv. Metadata from [AniList](https://anilist.co), [ani.zip](https://api.ani.zip) and [Jikan](https://jikan.moe); subtitles from [Jimaku](https://jimaku.cc).
 
-## 🧱 Tech Stack
+## License
 
-- **Desktop Framework**: [Tauri v2](https://v2.tauri.app)
-- **Backend / Core**: Rust (`rusqlite`, `reqwest`, `tokio`, custom filename regex parser)
-- **Frontend**: [SvelteKit](https://kit.svelte.dev) (Svelte 5, static SPA adapter)
-- **Language**: TypeScript & Rust
-- **Styling**: Vanilla CSS (comicbook / pop dark aesthetic)
-- **Metadata Sources**: [AniList GraphQL API](https://anilist.gitbook.io/anilist-apiv2-docs), [ani.zip](https://api.ani.zip), [Jikan / MAL](https://jikan.moe)
-
----
-
-## 📄 License
-
-This project is licensed under the [GNU General Public License v3.0 or later (GPL-3.0-or-later)](LICENSE).
-Forks, derivative works, and redistributed versions must remain free and open source under the same license.
+[GPL-3.0-or-later](LICENSE). Forks and redistributed versions must remain free and open source under the same license.
