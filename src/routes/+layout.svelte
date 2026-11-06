@@ -1,5 +1,4 @@
 <script lang="ts">
-  import "@fontsource-variable/fredoka";
   import "@fontsource-variable/nunito";
   import "$lib/styles/global.css";
   import { onMount } from "svelte";
@@ -18,7 +17,6 @@
   let main: HTMLElement | undefined = $state();
 
   onMount(async () => {
-    // Opened in a plain browser during development → use the sample-data preview.
     if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) {
       (await import("$lib/dev/mock")).installMock();
     }
@@ -27,7 +25,6 @@
     mpvModal.checkInitialLaunch();
   });
 
-  // Each page starts at the top (main is the scroll container, not the window).
   afterNavigate(({ type }) => {
     if (type !== "popstate") main?.scrollTo({ top: 0 });
   });
@@ -54,14 +51,16 @@
 <style>
   .shell {
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
     height: 100vh;
     width: 100vw;
     overflow: hidden;
+    background: var(--bg);
   }
 
   main {
     flex: 1;
+    min-width: 0;
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;

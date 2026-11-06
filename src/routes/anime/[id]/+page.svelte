@@ -30,6 +30,34 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let showFix = $state(false);
+  let moreOpen = $state(false);
+
+  // Episodes that have Japanese subtitles on Jimaku (one lookup per show; cached by the backend for 10 min).
+  let jimakuEps = $state<Set<number>>(new Set());
+  let jimakuPack = $state(false);
+  let jimakuFor = 0;
+  $effect(() => {
+    const aid = d?.anilistId;
+    if (!aid || !app.jimakuApiKey || jimakuFor === aid) return;
+    jimakuFor = aid;
+    jimakuEps = new Set();
+    jimakuPack = false;
+    api
+      .jimakuSearch(aid, null)
+      .then((res) => {
+        if (jimakuFor !== aid || !res.configured) return;
+        const eps = new Set<number>();
+        let pack = false;
+        for (const f of res.files) {
+          if (f.isRar) continue;
+          if (f.detectedEpisode != null) eps.add(f.detectedEpisode);
+          else if (f.isArchive) pack = true;
+        }
+        jimakuEps = eps;
+        jimakuPack = pack;
+      })
+      .catch(() => {});
+  });
   let showTracks = $state(false);
   let showMatcher = $state(false);
   let jimakuTarget = $state<{ epKey: string | null; epNumber: number | null } | null>(null);
@@ -385,18 +413,13 @@
   </div>
 {:else}
   {#key d.anilistId}
-    <div class="detail">
+    <div class="detail" style:--cover-accent={d.coverColor || "var(--coral)"}>
       <section class="banner">
         {#if banner}<img src={banner} alt="" class:blur={!d.bannerUrl && !d.bannerPath} />{/if}
         <div class="banner-shade"></div>
-        <button class="btn btn-ghost back" onclick={() => history.back()} id="detail-back">
-          <Icon name="arrow-left" size={16} /> Back
+        <button class="back" onclick={() => history.back()} id="detail-back" title="Back" aria-label="Back">
+          <Icon name="arrow-left" size={18} />
         </button>
-        {#if logo}
-          <div class="banner-clearart">
-            <img src={logo} alt="" onerror={() => (logoFailed = true)} />
-          </div>
-        {/if}
       </section>
 
       <div class="page body">
@@ -405,8 +428,16 @@
             {#if cover}<img src={cover} alt={`${displayTitle(d)} poster`} />{/if}
           </div>
           <div class="head-info">
+            {#if d.titleNative}<p class="alt jp">{d.titleNative}</p>{/if}
+            {#if logo}
+              <img class="title-logo" src={logo} alt={displayTitle(d)} onerror={() => (logoFailed = true)} />
+              <h1 class="sr-only">{displayTitle(d)}</h1>
+            {:else}
+              <h1>{displayTitle(d)}</h1>
+            {/if}
+            {#if d.titleRomaji && d.titleRomaji !== displayTitle(d)}<p class="alt">{d.titleRomaji}</p>{/if}
             <div class="badges">
-              {#if d.format}<span class="badge badge-accent">{formatLabel(d.format)}</span>{/if}
+              {#if d.format}<span class="badge">{formatLabel(d.format)}</span>{/if}
               {#if d.status}
                 <span class="badge" class:badge-ok={d.status === "RELEASING"}>{statusLabel(d.status)}</span>
               {/if}
@@ -420,9 +451,6 @@
                 </span>
               {/if}
             </div>
-            <h1>{displayTitle(d)}</h1>
-            {#if d.titleRomaji && d.titleRomaji !== displayTitle(d)}<p class="alt">{d.titleRomaji}</p>{/if}
-            {#if d.titleNative}<p class="alt jp">{d.titleNative}</p>{/if}
 
             <div class="stats">
               {#if d.format !== "MOVIE"}
@@ -482,7 +510,7 @@
               {/if}
               {#if app.appMode === "streaming" && owned === 0}
                 <button
-                  class="btn"
+                  class="btn btn-glass"
                   onclick={toggleStreamLibrary}
                   disabled={togglingStreamLib}
                   id="detail-toggle-stream-lib"
@@ -494,7 +522,7 @@
               {/if}
               {#if app.appMode === "streaming" && (nextUp || regular[0])}
                 <button
-                  class="btn"
+                  class="btn btn-glass"
                   onclick={() => {
                     const target = nextUp ?? regular[0];
                     if (target) torrentTarget = { epKey: target.epKey, epNumber: target.number, autoStart: false };
@@ -505,39 +533,60 @@
                   <Icon name="download" size={15} /> Torrents
                 </button>
               {/if}
-              {#if owned > 0 || d.groups.length > 0 || app.appMode === "streaming"}
-                <button class="btn" onclick={() => (showTracks = true)} id="detail-track-prefs" title="Audio & Subtitles">
-                  <Icon name="subtitles" size={15} /> Audio & Subs
-                  {#if d.trackPref}
-                    <span class="custom-track-badge">Custom</span>
-                  {/if}
-                </button>
-                <button class="btn" onclick={() => (showMatcher = true)} id="detail-match-subs" title="Match external subtitle files & auto-retime">
-                  <Icon name="languages" size={15} /> Match Subtitles
-                </button>
+              <div class="more-wrap">
                 <button
-                  class="btn"
-                  onclick={() => (jimakuTarget = { epKey: nextUp?.epKey ?? regular[0]?.epKey ?? null, epNumber: nextUp?.number ?? regular[0]?.number ?? null })}
-                  id="detail-jimaku-subs"
-                  title="Download Japanese subtitles from Jimaku.cc"
+                  class="btn btn-glass btn-icon more-btn"
+                  class:open={moreOpen}
+                  onclick={() => (moreOpen = !moreOpen)}
+                  title="More actions"
+                  aria-label="More actions"
+                  aria-expanded={moreOpen}
+                  id="detail-more"
                 >
-                  <Icon name="download" size={15} /> Jimaku Subs
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="19" cy="12" r="1.8" /></svg>
+                  {#if d.trackPref}<span class="more-dot"></span>{/if}
                 </button>
-                <button class="btn" onclick={() => (showFix = true)} id="detail-fix-match">
-                  <Icon name="link" size={15} /> Fix match
-                </button>
-              {/if}
-              <button class="btn btn-ghost btn-icon" onclick={refresh} disabled={refreshing} title="Refresh metadata" id="detail-refresh">
-                {#if refreshing}<div class="spinner"></div>{:else}<Icon name="refresh" size={16} />{/if}
-              </button>
-              <button
-                class="btn btn-ghost btn-icon"
-                onclick={() => openUrl(`https://anilist.co/anime/${d!.anilistId}`)}
-                title="Open on AniList"
-                id="detail-anilist"
-              >
-                <Icon name="external" size={16} />
-              </button>
+                {#if moreOpen}
+                  <!-- svelte-ignore a11y_no_static_element_interactions -->
+                  <!-- svelte-ignore a11y_click_events_have_key_events -->
+                  <div class="more-backdrop" onclick={() => (moreOpen = false)}></div>
+                  <div class="more-menu" role="menu">
+                    {#if owned > 0 || d.groups.length > 0 || app.appMode === "streaming"}
+                      <button role="menuitem" onclick={() => { moreOpen = false; showTracks = true; }} id="detail-track-prefs">
+                        <Icon name="subtitles" size={15} /> Audio &amp; subtitles
+                        {#if d.trackPref}<span class="custom-track-badge">Custom</span>{/if}
+                      </button>
+                      <button
+                        role="menuitem"
+                        onclick={() => {
+                          moreOpen = false;
+                          jimakuTarget = { epKey: nextUp?.epKey ?? regular[0]?.epKey ?? null, epNumber: nextUp?.number ?? regular[0]?.number ?? null };
+                        }}
+                        id="detail-jimaku-subs"
+                      >
+                        <Icon name="download" size={15} /> Japanese subtitles (Jimaku)
+                      </button>
+                      <button role="menuitem" onclick={() => { moreOpen = false; showMatcher = true; }} id="detail-match-subs">
+                        <Icon name="languages" size={15} /> Match subtitle files
+                      </button>
+                      <button role="menuitem" onclick={() => { moreOpen = false; showFix = true; }} id="detail-fix-match">
+                        <Icon name="link" size={15} /> Fix match
+                      </button>
+                      <div class="menu-sep"></div>
+                    {/if}
+                    <button role="menuitem" onclick={() => { moreOpen = false; void refresh(); }} disabled={refreshing} id="detail-refresh">
+                      <Icon name="refresh" size={15} /> {refreshing ? "Refreshing…" : "Refresh metadata"}
+                    </button>
+                    <button
+                      role="menuitem"
+                      onclick={() => { moreOpen = false; openUrl(`https://anilist.co/anime/${d!.anilistId}`); }}
+                      id="detail-anilist"
+                    >
+                      <Icon name="external" size={15} /> Open on AniList
+                    </button>
+                  </div>
+                {/if}
+              </div>
             </div>
 
             <div class="anilist-tracker card" id="detail-anilist-tracker">
@@ -741,6 +790,18 @@
                         {/if}
                         {#if e.filler}<span class="badge">Filler</span>{/if}
                         {#if e.recap}<span class="badge">Recap</span>{/if}
+                        {#if !e.isSpecial && !e.subtitles?.some((s) => s.lang === "ja") && (jimakuEps.has(e.number) || jimakuPack)}
+                          <button
+                            class="jp-sub-badge"
+                            class:pack={!jimakuEps.has(e.number)}
+                            onclick={() => (jimakuTarget = { epKey: e.epKey, epNumber: e.number })}
+                            title={jimakuEps.has(e.number)
+                              ? "Japanese subtitles available on Jimaku — click to download"
+                              : "A Japanese subtitle pack on Jimaku may include this episode"}
+                          >
+                            日本語
+                          </button>
+                        {/if}
                       </div>
                       {#if e.titleJa && e.titleJa !== epTitle(e)}<p class="ep-jp jp">{e.titleJa}</p>{/if}
                       {#if e.overview}
@@ -1146,24 +1207,20 @@
   }
 
   /* Banner ----------------------------------------------------------------
-   * A grand cinematic backdrop panel; the poster overlaps its bottom edge. */
+   * Full-bleed blurred key-art backdrop; the header sits on top of its fade. */
+  .detail {
+    position: relative;
+  }
   .banner {
     position: relative;
-    height: 380px;
-    margin: 20px 28px 0;
-    border: var(--bw) solid var(--line);
-    border-radius: var(--r-xl);
-    background: var(--coral);
-    box-shadow: var(--sticker-lg);
+    height: clamp(360px, 52vh, 500px);
+    margin: 0;
+    background: var(--surface);
     overflow: hidden;
+    isolation: isolate;
   }
   .banner.skeleton {
-    background: linear-gradient(
-      110deg,
-      var(--surface) 25%,
-      var(--surface-2) 37%,
-      var(--surface) 63%
-    );
+    background: linear-gradient(110deg, var(--surface) 25%, var(--surface-2) 37%, var(--surface) 63%);
     background-size: 200% 100%;
     animation: shimmer 1.4s ease infinite;
     display: flex;
@@ -1176,21 +1233,15 @@
     gap: 10px;
     padding: 10px 18px;
     border-radius: 999px;
-    background: var(--bg-elev);
-    border: var(--bw) solid var(--line);
-    box-shadow: var(--sticker);
-    font-family: var(--font-display);
-    font-weight: 700;
+    background: var(--glass);
+    border: 1px solid var(--glass-border);
+    backdrop-filter: var(--blur);
+    font-weight: 600;
     font-size: 14px;
     color: var(--text);
   }
   .skeleton-box {
-    background: linear-gradient(
-      110deg,
-      var(--surface) 25%,
-      var(--surface-2) 37%,
-      var(--surface) 63%
-    );
+    background: linear-gradient(110deg, var(--surface) 25%, var(--surface-2) 37%, var(--surface) 63%);
     background-size: 200% 100%;
     animation: shimmer 1.4s ease infinite;
   }
@@ -1203,15 +1254,9 @@
   .skeleton-line {
     height: 16px;
     border-radius: 8px;
-    background: linear-gradient(
-      110deg,
-      var(--surface) 25%,
-      var(--surface-2) 37%,
-      var(--surface) 63%
-    );
+    background: linear-gradient(110deg, var(--surface) 25%, var(--surface-2) 37%, var(--surface) 63%);
     background-size: 200% 100%;
     animation: shimmer 1.4s ease infinite;
-    border: 1.5px solid var(--border);
   }
   .skeleton-line.h-lg {
     height: 38px;
@@ -1232,74 +1277,71 @@
     height: 100%;
     object-fit: cover;
     object-position: center 25%;
+    filter: blur(2px) saturate(1.1);
+    transform: scale(1.04);
     animation: hero-in 1s var(--ease) both;
   }
   .banner img.blur {
-    filter: blur(24px) saturate(1.2) brightness(0.8);
+    filter: blur(28px) saturate(1.3) brightness(0.75);
     transform: scale(1.2);
   }
   @keyframes hero-in {
     from {
       opacity: 0;
-      transform: scale(1.05);
     }
   }
   .banner-shade {
-    display: block;
     position: absolute;
     inset: 0;
-    background: linear-gradient(
-      to bottom,
-      color-mix(in srgb, var(--line) 20%, transparent) 0%,
-      transparent 35%,
-      color-mix(in srgb, var(--bg) 40%, transparent) 70%,
-      var(--bg) 100%
-    );
+    background:
+      linear-gradient(0deg, var(--bg) 0%, rgba(8, 8, 11, 0.82) 38%, rgba(8, 8, 11, 0.35) 75%, rgba(8, 8, 11, 0.45) 100%),
+      linear-gradient(90deg, rgba(8, 8, 11, 0.55) 0%, transparent 60%);
     pointer-events: none;
   }
   .back {
     position: absolute;
-    z-index: 2;
-    top: 16px;
-    left: 16px;
-    height: 36px;
-    background: var(--surface);
-    border: var(--bw) solid var(--line);
-    box-shadow: var(--sticker);
-    color: var(--text);
+    z-index: 3;
+    top: 20px;
+    left: var(--page-x);
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: var(--glass);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
+    border: 1px solid var(--glass-border);
+    color: #fff;
+    cursor: pointer;
+    transition: background var(--t-fast) var(--ease);
   }
   .back:hover {
-    background: var(--surface-3);
-    transform: translate(-1px, -1px);
-    box-shadow: 4px 4px 0 var(--line);
+    background: rgba(255, 255, 255, 0.16);
   }
 
   /* Header ---------------------------------------------------------------- */
   .body {
     position: relative;
+    z-index: 2;
+    margin-top: -250px;
   }
   .head {
     display: flex;
-    gap: 32px;
-    align-items: flex-start;
-    padding: 0 24px;
-    animation: fade-up 500ms var(--ease) both;
+    gap: 34px;
+    align-items: flex-end;
+    animation: fade-up 420ms var(--ease) both;
   }
   .poster {
-    width: 210px;
+    width: 200px;
     flex: none;
-    margin-top: -150px;
     aspect-ratio: 2/3;
     border-radius: var(--r-lg);
-    border: var(--bw) solid var(--line);
     overflow: hidden;
     background: var(--surface-2);
-    box-shadow: var(--sticker-lg);
-    transform: rotate(-1.5deg);
-    transition: transform var(--t-med) var(--bounce);
-  }
-  .poster:hover {
-    transform: rotate(0deg) scale(1.02);
+    box-shadow: 0 28px 60px -16px rgba(0, 0, 0, 0.9);
+    align-self: flex-start;
   }
   .poster img {
     width: 100%;
@@ -1309,89 +1351,94 @@
   .head-info {
     flex: 1;
     min-width: 0;
-    padding-top: 22px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .title-logo {
+    max-width: min(440px, 100%);
+    max-height: 120px;
+    object-fit: contain;
+    object-position: left bottom;
+    margin: 4px 0 6px;
+    filter: drop-shadow(0 6px 22px rgba(0, 0, 0, 0.6));
+  }
+  :global([data-theme="manga"]) .title-logo {
+    filter: drop-shadow(3px 3px 0 #000) drop-shadow(-1px -1px 0 #fff);
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  h1 {
+    font-size: clamp(30px, 3vw, 42px);
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    line-height: 1.08;
+    overflow-wrap: anywhere;
+    color: #fff;
+    text-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+  }
+  .alt {
+    margin-top: 4px;
+    color: rgba(243, 243, 245, 0.66);
+    font-size: 14px;
+    overflow-wrap: anywhere;
+  }
+  .alt.jp {
+    margin: 0 0 4px;
+    color: rgba(243, 243, 245, 0.55);
+    font-size: 13.5px;
   }
   .badges {
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
+    margin-top: 14px;
   }
-  .badge-accent {
-    background: var(--coral);
-    color: var(--on-coral);
-  }
-  .banner-clearart {
-    position: absolute;
-    right: 32px;
-    bottom: 24px;
-    z-index: 2;
-    max-width: min(380px, 42vw);
-    max-height: 120px;
-    display: flex;
-    align-items: flex-end;
-    justify-content: flex-end;
-    pointer-events: none;
-    user-select: none;
-  }
-  .banner-clearart img {
-    max-width: 100%;
-    max-height: 120px;
-    width: auto;
-    height: auto;
-    object-fit: contain;
-    filter: drop-shadow(0 4px 16px rgba(0, 0, 0, 0.8)) drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
-    animation: hero-in 600ms var(--ease) both;
-  }
-  :global([data-theme="manga"]) .banner-clearart img {
-    filter: drop-shadow(3px 3px 0 #000) drop-shadow(-1px -1px 0 #fff);
-  }
-  @media (max-width: 768px) {
-    .banner-clearart {
-      right: 16px;
-      bottom: 16px;
-      max-width: 180px;
-      max-height: 60px;
-    }
-    .banner-clearart img {
-      max-height: 60px;
-    }
-  }
-  h1 {
-    margin-top: 12px;
-    font-size: 38px;
+  .badges .badge {
+    height: 26px;
+    padding: 0 10px;
+    border-radius: 7px;
+    font-size: 12px;
     font-weight: 600;
-    overflow-wrap: anywhere;
+    letter-spacing: 0;
+    text-transform: none;
+    background: var(--glass);
+    border: 1px solid var(--glass-border);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
+    color: var(--text);
   }
-  .alt {
-    margin-top: 4px;
-    color: var(--text-2);
-    font-size: 15px;
-    overflow-wrap: anywhere;
-  }
-  .alt.jp {
-    color: var(--text-3);
+  .badges .badge-ok {
+    color: var(--ok);
   }
   .stats {
     display: flex;
-    gap: 32px;
-    margin-top: 20px;
+    gap: 28px;
+    margin-top: 18px;
     flex-wrap: wrap;
   }
   .stat strong {
     display: block;
     font-family: var(--font-display);
-    font-size: 26px;
-    font-weight: 600;
+    font-size: 20px;
+    font-weight: 700;
     line-height: 1.1;
+    font-variant-numeric: tabular-nums;
   }
   .stat strong span {
     color: var(--text-3);
     font-weight: 500;
-    font-size: 17px;
+    font-size: 14px;
   }
   .stat strong.sm {
-    font-size: 17px;
-    padding-top: 6px;
+    font-size: 15px;
+    padding-top: 4px;
   }
   .stat strong.warn span {
     color: var(--amber);
@@ -1401,16 +1448,15 @@
   }
   .stat small {
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
     color: var(--text-3);
   }
   .progress {
-    margin-top: 16px;
-    height: 10px;
-    max-width: 520px;
+    margin-top: 14px;
+    height: 4px;
+    width: min(460px, 100%);
     border-radius: 99px;
-    background: var(--bg-elev);
-    border: var(--bw) solid var(--line);
+    background: rgba(255, 255, 255, 0.12);
     overflow: hidden;
   }
   .progress div {
@@ -1421,20 +1467,91 @@
   }
   .actions {
     display: flex;
+    align-items: center;
     gap: 10px;
     margin-top: 22px;
     flex-wrap: wrap;
   }
-  .actions .btn-primary {
+  .actions .btn {
     height: 44px;
-    padding: 0 22px;
+    border-radius: var(--r-md);
   }
-  .actions .btn:not(.btn-primary):not(.btn-icon) {
-    height: 44px;
+  .actions .btn-primary {
+    padding: 0 22px;
+    font-size: 14.5px;
   }
   .actions .btn-icon {
-    height: 44px;
     width: 44px;
+  }
+
+  /* More menu */
+  .more-wrap {
+    position: relative;
+  }
+  .more-btn {
+    position: relative;
+  }
+  .more-btn.open {
+    background: rgba(255, 255, 255, 0.16);
+  }
+  .more-dot {
+    position: absolute;
+    top: 9px;
+    right: 9px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--coral);
+  }
+  .more-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+  }
+  .more-menu {
+    position: absolute;
+    z-index: 31;
+    top: calc(100% + 8px);
+    left: 0;
+    min-width: 250px;
+    padding: 6px;
+    border-radius: var(--r-lg);
+    background: color-mix(in srgb, var(--surface-2) 92%, transparent);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
+    border: 1px solid var(--border-strong);
+    box-shadow: var(--sticker-lg);
+    animation: fade-up 160ms var(--ease) both;
+  }
+  .more-menu button {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 11px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text);
+    font-size: 13.5px;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+  }
+  .more-menu button :global(svg) {
+    color: var(--text-3);
+  }
+  .more-menu button:hover:not(:disabled) {
+    background: var(--glass);
+  }
+  .more-menu button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .menu-sep {
+    height: 1px;
+    margin: 5px 8px;
+    background: var(--border);
   }
 
   /* Season tabs -----------------------------------------------------------
@@ -1457,26 +1574,25 @@
     max-width: 250px;
     padding: 10px 14px 14px;
     border-radius: var(--r-md);
-    border: var(--bw) solid var(--line);
+    border: 1px solid var(--border);
     background: var(--surface);
-    box-shadow: var(--sticker);
     color: var(--text);
     scroll-snap-align: start;
     overflow: hidden;
     transition:
-      transform var(--t-fast) var(--bounce),
-      box-shadow var(--t-fast) var(--ease),
+      transform var(--t-fast) var(--ease),
+      border-color var(--t-fast) var(--ease),
       background var(--t-fast) var(--ease);
   }
   .season:hover {
-    transform: translate(-2px, -2px) rotate(-0.6deg);
-    box-shadow: 5px 5px 0 var(--line);
+    transform: translateY(-2px);
+    border-color: var(--border-strong);
+    background: var(--surface-2);
   }
   .season.active {
-    background: var(--coral);
-    color: var(--on-coral);
-    transform: translate(-2px, -2px);
-    box-shadow: 5px 5px 0 var(--line);
+    background: color-mix(in srgb, var(--coral) 16%, var(--surface));
+    border-color: color-mix(in srgb, var(--coral) 55%, transparent);
+    color: var(--text);
   }
   .s-label {
     font-family: var(--font-display);
@@ -1619,21 +1735,20 @@
   }
   .ep:hover {
     background: var(--surface);
-    border-color: var(--line);
+    border-color: var(--border);
   }
   .ep.next {
-    background: var(--surface);
-    border-color: var(--line);
-    box-shadow: 4px 4px 0 var(--coral);
+    background: rgba(255, 255, 255, 0.045);
+    border-color: var(--border-strong);
   }
   .ep-thumb {
     position: relative;
-    width: 200px;
+    width: 210px;
     flex: none;
     aspect-ratio: 16/9;
     border-radius: var(--r-md);
     overflow: hidden;
-    border: var(--bw) solid var(--line);
+    border: none;
     padding: 0;
     background: var(--surface-2);
     cursor: pointer;
@@ -1657,26 +1772,50 @@
   .ep.missing .ep-thumb img {
     filter: grayscale(1) brightness(0.45);
   }
+  .jp-sub-badge {
+    flex: none;
+    height: 20px;
+    padding: 0 7px;
+    border-radius: 5px;
+    border: 1px solid color-mix(in srgb, var(--coral) 45%, transparent);
+    background: color-mix(in srgb, var(--coral) 14%, transparent);
+    color: var(--coral-hi);
+    font-family: var(--font-jp);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    transition: background var(--t-fast) var(--ease);
+  }
+  .jp-sub-badge:hover {
+    background: color-mix(in srgb, var(--coral) 26%, transparent);
+  }
+  .jp-sub-badge.pack {
+    border-style: dashed;
+    background: transparent;
+    color: var(--text-3);
+    border-color: var(--border-strong);
+  }
   .ep-num {
     position: absolute;
-    left: 6px;
-    bottom: 6px;
-    min-width: 28px;
-    height: 26px;
+    left: 7px;
+    top: 7px;
+    min-width: 26px;
+    height: 22px;
     padding: 0 7px;
     display: grid;
     place-items: center;
-    border-radius: 8px;
-    border: 1.5px solid var(--line);
-    background: var(--bg);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.62);
+    color: #fff;
     font-family: var(--font-display);
-    font-weight: 600;
-    font-size: 15px;
+    font-weight: 700;
+    font-size: 12px;
     line-height: 1;
   }
   .ep.next .ep-num {
     background: var(--coral);
-    color: var(--on-coral);
+    color: #fff;
   }
   .play-ov {
     position: absolute;
@@ -1717,11 +1856,10 @@
   .play-ov :global(svg) {
     width: 44px;
     height: 44px;
-    padding: 11px 9px 11px 13px;
+    padding: 12px 10px 12px 14px;
     border-radius: 50%;
-    border: var(--bw) solid var(--line);
-    background: var(--coral);
-    color: var(--on-coral);
+    background: rgba(255, 255, 255, 0.94);
+    color: #08080b;
     box-shadow: var(--sticker);
     transform: scale(0.85);
     transition: transform var(--t-med) var(--bounce);
@@ -1735,16 +1873,15 @@
   }
   .seen {
     position: absolute;
-    top: 6px;
-    right: 6px;
+    top: 7px;
+    right: 7px;
     display: grid;
     place-items: center;
     width: 22px;
     height: 22px;
     border-radius: 50%;
-    border: 1.5px solid var(--line);
-    background: var(--ok);
-    color: var(--on-coral);
+    background: rgba(0, 0, 0, 0.62);
+    color: var(--ok);
   }
   .ep-prog {
     position: absolute;
@@ -1893,10 +2030,8 @@
   }
   .watch-toggle.on {
     background: var(--ok);
-    border-color: var(--line);
-    color: var(--on-coral);
-    box-shadow: 2px 2px 0 var(--line);
-    animation: pop-in 300ms var(--bounce);
+    border-color: var(--ok);
+    color: #0b0b0f;
   }
   @keyframes pop-in {
     50% {

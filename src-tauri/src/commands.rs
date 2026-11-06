@@ -1764,7 +1764,7 @@ pub async fn get_prefs(st: St<'_>) -> CmdResult<HashMap<String, String>> {
         ("discord_rpc", "1"),
         ("discord_spoilers", "0"),
         ("discord_buttons", "1"),
-        ("mpc_port", "13579"),
+        ("mpc_port", "13579"), ("minimize_to_tray", "1"),
     ];
     for (k, v) in defaults {
         rows.entry(k.to_string()).or_insert_with(|| v.to_string());
@@ -3197,7 +3197,7 @@ pub async fn remove_torrent_extension(
 }
 
 // ---------------------------------------------------------------------------
-// Built-in Memento Player & Yomitan Dictionary Commands
+// Built-in Player & Yomitan Dictionary Commands
 // ---------------------------------------------------------------------------
 
 #[tauri::command]

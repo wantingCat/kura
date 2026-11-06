@@ -2,6 +2,7 @@ pub mod anilist_sync;
 pub mod backup;
 pub mod commands;
 pub mod db;
+pub mod dht;
 pub mod dictionary;
 pub mod discord;
 pub mod embedded_player;
@@ -114,6 +115,82 @@ pub fn run() {
             // Debounced writer for the automatic safety backup.
             backup::start_auto(state.clone());
             anilist_sync::start_worker(app.handle().clone(), state.clone());
+
+            // System tray icon & context menu for background episode + Jimaku monitoring
+            #[cfg(desktop)]
+            {
+                use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+                use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+                let show_item = MenuItem::with_id(app, "show", "Open Kura", true, None::<&str>)?;
+                let check_item = MenuItem::with_id(
+                    app,
+                    "check_updates",
+                    "Check Episode & Jimaku Updates Now",
+                    true,
+                    None::<&str>,
+                )?;
+                let sep = PredefinedMenuItem::separator(app)?;
+                let quit_item = MenuItem::with_id(app, "quit", "Quit Kura", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show_item, &check_item, &sep, &quit_item])?;
+
+                let mut tray_builder = TrayIconBuilder::with_id("kura-tray")
+                    .tooltip("Kura · Anime Library & Jimaku Monitor")
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app_handle, event| match event.id.as_ref() {
+                        "show" => {
+                            if let Some(w) = app_handle.get_webview_window("main") {
+                                let _ = w.unminimize();
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                        "check_updates" => {
+                            if let Some(st) = app_handle.try_state::<Arc<service::AppState>>() {
+                                let st_clone = st.inner().clone();
+                                let app_clone = app_handle.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let _ = anilist_sync::sync_now(&app_clone, &st_clone).await;
+                                    anilist_sync::check_airing_notifications(&app_clone, &st_clone)
+                                        .await;
+                                });
+                            }
+                        }
+                        "quit" => {
+                            if let Some(st) = app_handle.try_state::<Arc<service::AppState>>() {
+                                let conn = st.db();
+                                let _ = subtitles::cleanup_watched_subtitles(&conn, &st.data_dir);
+                            }
+                            app_handle.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        }
+                        | TrayIconEvent::DoubleClick {
+                            button: MouseButton::Left,
+                            ..
+                        } = event
+                        {
+                            if let Some(w) = tray.app_handle().get_webview_window("main") {
+                                let _ = w.unminimize();
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                    });
+
+                if let Some(icon) = app.default_window_icon().cloned() {
+                    tray_builder = tray_builder.icon(icon);
+                }
+                let _ = tray_builder.build(app);
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -183,16 +260,42 @@ pub fn run() {
             commands::download_recommended_dictionaries,
             commands::remove_dictionary,
         ])
-        .on_window_event(|window, event| {
-            if matches!(
-                event,
-                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
-            ) {
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                let mut minimize_to_tray = true;
+                if let Some(st) = window.try_state::<Arc<service::AppState>>() {
+                    if embedded_player::get_state().active {
+                        let app_clone = window.app_handle().clone();
+                        let st_clone = st.inner().clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = embedded_player::dispatch_command(
+                                app_clone,
+                                st_clone,
+                                embedded_player::BuiltinCommand::Stop,
+                            )
+                            .await;
+                        });
+                    }
+                    let conn = st.db();
+                    let _ = subtitles::cleanup_watched_subtitles(&conn, &st.data_dir);
+                    if let Ok(Some(val)) = db::get_setting(&conn, "pref.minimize_to_tray") {
+                        if val == "0" || val.eq_ignore_ascii_case("false") {
+                            minimize_to_tray = false;
+                        }
+                    }
+                }
+                if minimize_to_tray && window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+            tauri::WindowEvent::Destroyed => {
                 if let Some(st) = window.try_state::<Arc<service::AppState>>() {
                     let conn = st.db();
                     let _ = subtitles::cleanup_watched_subtitles(&conn, &st.data_dir);
                 }
             }
+            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

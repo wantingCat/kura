@@ -360,6 +360,10 @@ export interface TorrentExtension {
   kind: "rss" | "subsplease-json" | "seadex-api" | string;
   url: string;
   enabled: boolean;
+  iconUrl?: string | null;
+  description?: string | null;
+  version?: string | null;
+  accuracy?: string | null;
 }
 
 export interface TorrentSessionStatus {
@@ -580,6 +584,7 @@ export interface AiringNotification {
   anilistId: number;
   title: string;
   episode: string | number;
+  kind?: "episode" | "jimaku_sub" | "episode_and_sub" | string;
   message: string;
 }
 

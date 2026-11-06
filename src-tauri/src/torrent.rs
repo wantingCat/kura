@@ -32,6 +32,14 @@ pub struct TorrentExtension {
     pub kind: String,
     pub url: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub accuracy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +70,7 @@ pub struct TorrentSessionStatus {
     pub ep_key: String,
     pub title: String,
     pub file_name: String,
-    pub mode: String, // "stream" | "hybrid" | "download"
+    pub mode: String,  // "stream" | "hybrid" | "download"
     pub state: String, // "initializing" | "buffering" | "streaming" | "downloading" | "completed" | "error"
     pub progress_pct: f64,
     pub downloaded_bytes: u64,
@@ -156,15 +164,63 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 }
 
 pub fn hex_decode_20(hex: &str) -> Option<[u8; 20]> {
-    let clean = hex.trim();
-    if clean.len() != 40 {
+    parse_btih_20(hex)
+}
+
+/// Decode a 32-character RFC 4648 Base32 `btih` string (used by SubsPlease & Anidex magnets) into 20 bytes.
+pub fn base32_decode_20(b32: &str) -> Option<[u8; 20]> {
+    let clean = b32.trim();
+    if clean.len() != 32 {
         return None;
     }
     let mut out = [0u8; 20];
-    for i in 0..20 {
-        out[i] = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16).ok()?;
+    let mut buffer: u64 = 0;
+    let mut bits_left: u32 = 0;
+    let mut out_idx = 0;
+    for ch in clean.bytes() {
+        let val: u64 = match ch {
+            b'A'..=b'Z' => (ch - b'A') as u64,
+            b'a'..=b'z' => (ch - b'a') as u64,
+            b'2'..=b'7' => (ch - b'2' + 26) as u64,
+            _ => return None,
+        };
+        buffer = (buffer << 5) | val;
+        bits_left += 5;
+        if bits_left >= 8 {
+            bits_left -= 8;
+            if out_idx >= 20 {
+                return None;
+            }
+            out[out_idx] = ((buffer >> bits_left) & 0xFF) as u8;
+            out_idx += 1;
+        }
     }
-    Some(out)
+    if out_idx == 20 {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Parse either a 40-char hex or 32-char RFC 4648 Base32 `btih` info_hash into 20 raw bytes.
+pub fn parse_btih_20(raw: &str) -> Option<[u8; 20]> {
+    let clean = raw.trim();
+    if clean.len() == 40 {
+        let mut out = [0u8; 20];
+        for i in 0..20 {
+            out[i] = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16).ok()?;
+        }
+        return Some(out);
+    }
+    if clean.len() == 32 {
+        return base32_decode_20(clean);
+    }
+    None
+}
+
+/// Normalize any 40-char hex or 32-char Base32 `btih` info_hash into a 40-char lowercase hex string.
+pub fn normalize_btih_hex(raw: &str) -> Option<String> {
+    parse_btih_20(raw).map(|b| hex_encode(&b))
 }
 
 fn url_encode_bytes(bytes: &[u8]) -> String {
@@ -207,7 +263,8 @@ impl BVal {
         }
     }
     pub fn as_str(&self) -> Option<String> {
-        self.as_bytes().map(|b| String::from_utf8_lossy(b).into_owned())
+        self.as_bytes()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
     }
     pub fn as_list(&self) -> Option<&[BVal]> {
         if let BVal::List(l) = self {
@@ -218,7 +275,10 @@ impl BVal {
     }
     pub fn dict_get(&self, key: &[u8]) -> Option<&BVal> {
         if let BVal::Dict(entries) = self {
-            entries.iter().find(|(k, ..)| k.as_slice() == key).map(|(_, v, ..)| v)
+            entries
+                .iter()
+                .find(|(k, ..)| k.as_slice() == key)
+                .map(|(_, v, ..)| v)
         } else {
             None
         }
@@ -425,7 +485,10 @@ pub fn parse_torrent_bytes(raw: &[u8], target_episode: Option<i64>) -> Result<To
     let total_length = offset.max(1);
     let is_video = |n: &str| {
         let lower = n.to_ascii_lowercase();
-        lower.ends_with(".mkv") || lower.ends_with(".mp4") || lower.ends_with(".webm") || lower.ends_with(".avi")
+        lower.ends_with(".mkv")
+            || lower.ends_with(".mp4")
+            || lower.ends_with(".webm")
+            || lower.ends_with(".avi")
     };
 
     // Pick best matching video file for `target_episode` (preferring non-extra/non-NCOP/NCED episodes)
@@ -439,12 +502,20 @@ pub fn parse_torrent_bytes(raw: &[u8], target_episode: Option<i64>) -> Result<To
                 !p.extra && p.special.is_none() && p.episode == Some(ep_u32)
             })
             .or_else(|| {
-                candidates.iter().filter(|(n, _, _)| is_video(n)).find(|(n, _, _)| {
-                    let p = crate::parser::parse_filename(n);
-                    p.episode == Some(ep_u32)
-                })
+                candidates
+                    .iter()
+                    .filter(|(n, _, _)| is_video(n))
+                    .find(|(n, _, _)| {
+                        let p = crate::parser::parse_filename(n);
+                        p.episode == Some(ep_u32)
+                    })
             })
-            .or_else(|| candidates.iter().filter(|(n, _, _)| is_video(n)).max_by_key(|(_, _, l)| *l))
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .filter(|(n, _, _)| is_video(n))
+                    .max_by_key(|(_, _, l)| *l)
+            })
             .or_else(|| candidates.iter().max_by_key(|(_, _, l)| *l))
     } else {
         candidates
@@ -497,7 +568,9 @@ pub fn parse_release_tags(title: &str) -> (Option<String>, Option<String>, bool)
 
     let group_re = GROUP_RE.get_or_init(|| Regex::new(r"^\[([^\]]+)\]").unwrap());
     let res_re = RES_RE.get_or_init(|| Regex::new(r"(?i)\b(2160p|4k|1080p|720p|480p)\b").unwrap());
-    let batch_re = BATCH_RE.get_or_init(|| Regex::new(r"(?i)\b(batch|complete|\d+\s*-\s*\d+|season\s*\d+\s*complete)\b").unwrap());
+    let batch_re = BATCH_RE.get_or_init(|| {
+        Regex::new(r"(?i)\b(batch|complete|\d+\s*-\s*\d+|season\s*\d+\s*complete)\b").unwrap()
+    });
 
     let group = group_re
         .captures(title)
@@ -540,6 +613,32 @@ pub fn score_candidate(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Seeder-health component of the candidate score.
+pub fn seeder_score(seeders: i64) -> i64 {
+    if seeders <= 0 {
+        -5000
+    } else if seeders == 1 {
+        -900
+    } else if seeders <= 3 {
+        -450 + seeders * 30
+    } else if seeders <= 7 {
+        -100 + seeders * 30
+    } else if seeders <= 20 {
+        250 + seeders * 15
+    } else if seeders <= 80 {
+        550 + seeders * 8
+    } else {
+        1190 + (seeders.min(500) - 80) * 2
+    }
+}
+
+/// Whether a candidate is relevant to the requested episode, ignoring swarm health.
+/// Indexer seeder counts are often stale (fresh uploads show 0 for minutes, old releases
+/// show 0 while DHT still has peers), so low seeders must only lower the rank, never hide a release.
+pub fn is_relevant_candidate(score: i64, seeders: i64) -> bool {
+    score - seeder_score(seeders) >= -500
+}
+
 pub fn score_candidate_with_context(
     title: &str,
     group: Option<&str>,
@@ -555,21 +654,7 @@ pub fn score_candidate_with_context(
 ) -> i64 {
     // 1. Seeder health is the #1 predictor of whether a torrent will connect & stream without stalling.
     // Torrents with only 1–3 seeders are frequently NAT-locked home peers that reject incoming TCP connections.
-    let mut score = if seeders <= 0 {
-        -5000
-    } else if seeders == 1 {
-        -900
-    } else if seeders <= 3 {
-        -450 + seeders * 30
-    } else if seeders <= 7 {
-        -100 + seeders * 30
-    } else if seeders <= 20 {
-        250 + seeders * 15
-    } else if seeders <= 80 {
-        550 + seeders * 8
-    } else {
-        1190 + (seeders.min(500) - 80) * 2
-    };
+    let mut score = seeder_score(seeders);
 
     let parsed = crate::parser::parse_filename(title);
 
@@ -627,7 +712,10 @@ pub fn score_candidate_with_context(
 
     // Penalize raw BD-Remux tags for streaming
     let lower_title = title.to_ascii_lowercase();
-    if lower_title.contains("remux") || lower_title.contains("bdmv") || lower_title.contains("bdremux") {
+    if lower_title.contains("remux")
+        || lower_title.contains("bdmv")
+        || lower_title.contains("bdremux")
+    {
         score -= 600;
     }
 
@@ -648,7 +736,12 @@ pub fn score_candidate_with_context(
 
     let has_dual_or_jp = dual_jp_re.is_match(title);
     let is_dub_group = group
-        .map(|g| matches!(g.trim().to_ascii_lowercase().as_str(), "yameii" | "anime-dub" | "dubbedanime"))
+        .map(|g| {
+            matches!(
+                g.trim().to_ascii_lowercase().as_str(),
+                "yameii" | "anime-dub" | "dubbedanime"
+            )
+        })
         .unwrap_or(false);
     if has_dual_or_jp {
         score += 100;
@@ -700,7 +793,10 @@ pub fn score_candidate_with_context(
             let kt_clean = clean_search_title(kt).to_ascii_lowercase();
             let words: Vec<&str> = kt_clean
                 .split_whitespace()
-                .filter(|w| w.len() >= 3 && !matches!(*w, "the" | "and" | "for" | "season" | "part" | "cour"))
+                .filter(|w| {
+                    w.len() >= 3
+                        && !matches!(*w, "the" | "and" | "for" | "season" | "part" | "cour")
+                })
                 .collect();
             if words.is_empty() {
                 continue;
@@ -729,8 +825,9 @@ pub fn clean_search_title(raw: &str) -> String {
     static NOISE_RE: OnceLock<Regex> = OnceLock::new();
     static POSSESSIVE_RE: OnceLock<Regex> = OnceLock::new();
     static SPACE_RE: OnceLock<Regex> = OnceLock::new();
-    let noise_re = NOISE_RE
-        .get_or_init(|| Regex::new(r"(?i)\((?:tv|ona|ova|movie|special|20\d{2}|19\d{2})\)").unwrap());
+    let noise_re = NOISE_RE.get_or_init(|| {
+        Regex::new(r"(?i)\((?:tv|ona|ova|movie|special|20\d{2}|19\d{2})\)").unwrap()
+    });
     let possessive_re = POSSESSIVE_RE.get_or_init(|| Regex::new(r"(?i)['’]s\b").unwrap());
     let space_re = SPACE_RE.get_or_init(|| Regex::new(r"\s+").unwrap());
 
@@ -754,9 +851,11 @@ fn split_season_from_title(title: &str) -> (Option<u32>, String) {
     static S_PART_RE: OnceLock<Regex> = OnceLock::new();
     static S_ROMAN_RE: OnceLock<Regex> = OnceLock::new();
 
-    let ord_re = S_ORD_RE.get_or_init(|| Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b").unwrap());
+    let ord_re =
+        S_ORD_RE.get_or_init(|| Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b").unwrap());
     let word_re = S_WORD_RE.get_or_init(|| Regex::new(r"(?i)\bseason\s*(\d{1,2})\b").unwrap());
-    let part_re = S_PART_RE.get_or_init(|| Regex::new(r"(?i)\b(?:part|cour)\s*(\d{1,2})\b").unwrap());
+    let part_re =
+        S_PART_RE.get_or_init(|| Regex::new(r"(?i)\b(?:part|cour)\s*(\d{1,2})\b").unwrap());
     let roman_re = S_ROMAN_RE.get_or_init(|| Regex::new(r"\s+(II|III|IV|V)\s*$").unwrap());
 
     let mut season: Option<u32> = None;
@@ -791,7 +890,10 @@ fn push_unique_query(list: &mut Vec<String>, q: String) {
     if trimmed.len() < 2 {
         return;
     }
-    if !list.iter().any(|existing| existing.eq_ignore_ascii_case(trimmed)) {
+    if !list
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(trimmed))
+    {
         list.push(trimmed.to_string());
     }
 }
@@ -821,10 +923,62 @@ pub fn list_torrent_extensions(conn: &rusqlite::Connection) -> Vec<TorrentExtens
         }
     }
 
+    for ext in &mut exts {
+        enrich_extension_metadata(ext);
+    }
+
     exts
 }
 
-pub fn save_torrent_extensions(conn: &rusqlite::Connection, exts: &[TorrentExtension]) -> Result<()> {
+fn enrich_extension_metadata(ext: &mut TorrentExtension) {
+    let host = ext
+        .url
+        .split("://")
+        .nth(1)
+        .unwrap_or(&ext.url)
+        .split('/')
+        .next()
+        .unwrap_or("source");
+    let lower = format!("{} {} {}", ext.name, ext.kind, host).to_ascii_lowercase();
+
+    if ext.icon_url.as_deref().unwrap_or("").is_empty() && host.contains('.') {
+        ext.icon_url = Some(format!(
+            "https://www.google.com/s2/favicons?domain={host}&sz=128"
+        ));
+    }
+    if ext.version.as_deref().unwrap_or("").is_empty() {
+        ext.version = Some("1.2.0".to_string());
+    }
+    if ext.accuracy.as_deref().unwrap_or("").is_empty() {
+        ext.accuracy = Some(
+            if ext.kind == "seadex-api" || lower.contains("seadex") {
+                "Curated · Best".to_string()
+            } else if ext.kind == "subsplease-json" || lower.contains("subsplease") {
+                "Simulcast · Fast".to_string()
+            } else {
+                "High Accuracy".to_string()
+            },
+        );
+    }
+    if ext.description.as_deref().unwrap_or("").is_empty() {
+        ext.description = Some(if ext.kind == "seadex-api" || lower.contains("seadex") {
+            "Curated best-release anime index mapped directly by AniList ID.".to_string()
+        } else if ext.kind == "subsplease-json" || lower.contains("subsplease") {
+            "Official simulcast JSON release feed for 1080p & 720p web-rips.".to_string()
+        } else if lower.contains("tosho") {
+            "High-speed anime mirror with pre-extracted subtitle attachments.".to_string()
+        } else if lower.contains("nyaa") {
+            "Primary public anime BitTorrent RSS indexer with full swarm metrics.".to_string()
+        } else {
+            format!("BitTorrent RSS release indexer ({host}).")
+        });
+    }
+}
+
+pub fn save_torrent_extensions(
+    conn: &rusqlite::Connection,
+    exts: &[TorrentExtension],
+) -> Result<()> {
     let json = serde_json::to_string(exts)?;
     db::set_setting(conn, "pref.torrent_extensions", &json)?;
     clear_torrent_search_cache();
@@ -849,8 +1003,146 @@ fn torrent_http() -> &'static reqwest::Client {
 
 type SearchCacheKey = (i64, i64, String, String);
 
-fn search_cache() -> &'static Mutex<HashMap<SearchCacheKey, (std::time::Instant, Vec<TorrentCandidate>)>> {
-    static CACHE: OnceLock<Mutex<HashMap<SearchCacheKey, (std::time::Instant, Vec<TorrentCandidate>)>>> = OnceLock::new();
+/// HTTP client for indexer searches & `.torrent` downloads. Indexers (especially Nyaa RSS) regularly take
+/// 3–8 s to answer from some regions, so this uses far more generous timeouts than the peer-wire helpers.
+fn torrent_search_http() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(6))
+            .timeout(Duration::from_secs(14))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(16)
+            .tcp_keepalive(Duration::from_secs(30))
+            .user_agent("Kura/0.6 (https://github.com/wantingCat/kura)")
+            .build()
+            .expect("torrent search http client")
+    })
+}
+
+const SCRAPE_UDP_TRACKERS: [&str; 3] = [
+    "tracker.opentrackr.org:1337",
+    "open.stealth.si:80",
+    "exodus.desync.com:6969",
+];
+const SCRAPE_HTTP_TRACKERS: [&str; 1] = ["http://nyaa.tracker.wf:7777/scrape"];
+
+/// BEP 15 UDP scrape: returns `info_hash -> (seeders, leechers)`.
+async fn scrape_udp(host_port: &str, hashes: &[[u8; 20]]) -> Result<HashMap<[u8; 20], (i64, i64)>> {
+    let sock = UdpSocket::bind("0.0.0.0:0").await?;
+    tokio::time::timeout(Duration::from_secs(3), sock.connect(host_port)).await??;
+    let tx_id: u32 = 0x4B52_5343; // "KRSC"
+    let mut req = [0u8; 16];
+    req[0..8].copy_from_slice(&0x41727101980u64.to_be_bytes());
+    req[8..12].copy_from_slice(&0u32.to_be_bytes());
+    req[12..16].copy_from_slice(&tx_id.to_be_bytes());
+    sock.send(&req).await?;
+    let mut resp = [0u8; 64];
+    let n = tokio::time::timeout(Duration::from_secs(3), sock.recv(&mut resp)).await??;
+    if n < 16 || u32::from_be_bytes(resp[0..4].try_into()?) != 0 {
+        bail!("bad UDP connect response");
+    }
+    let conn_id = u64::from_be_bytes(resp[8..16].try_into()?);
+
+    let mut out = HashMap::new();
+    for chunk in hashes.chunks(70) {
+        let mut pkt = Vec::with_capacity(16 + chunk.len() * 20);
+        pkt.extend_from_slice(&conn_id.to_be_bytes());
+        pkt.extend_from_slice(&2u32.to_be_bytes()); // action = scrape
+        pkt.extend_from_slice(&tx_id.to_be_bytes());
+        for h in chunk {
+            pkt.extend_from_slice(h);
+        }
+        sock.send(&pkt).await?;
+        let mut buf = vec![0u8; 8 + chunk.len() * 12];
+        let len = tokio::time::timeout(Duration::from_secs(3), sock.recv(&mut buf)).await??;
+        if len < 8 || u32::from_be_bytes(buf[0..4].try_into()?) != 2 {
+            bail!("bad UDP scrape response");
+        }
+        for (i, rec) in buf[8..len].chunks_exact(12).enumerate() {
+            if let Some(h) = chunk.get(i) {
+                let seeders = u32::from_be_bytes(rec[0..4].try_into()?) as i64;
+                let leechers = u32::from_be_bytes(rec[8..12].try_into()?) as i64;
+                out.insert(*h, (seeders, leechers));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// HTTP tracker scrape (`/scrape?info_hash=…`): returns `info_hash -> (seeders, leechers)`.
+async fn scrape_http(scrape_url: &str, hashes: &[[u8; 20]]) -> Result<HashMap<[u8; 20], (i64, i64)>> {
+    let mut url = String::from(scrape_url);
+    for (i, h) in hashes.iter().take(60).enumerate() {
+        url.push(if i == 0 { '?' } else { '&' });
+        url.push_str("info_hash=");
+        url.push_str(&url_encode_bytes(h));
+    }
+    let bytes = torrent_http().get(&url).send().await?.bytes().await?;
+    let (root, _) = parse_bencode(&bytes)?;
+    let mut out = HashMap::new();
+    if let Some(BVal::Dict(files)) = root.dict_get(b"files") {
+        for (k, v, ..) in files {
+            if k.len() == 20 {
+                let mut h = [0u8; 20];
+                h.copy_from_slice(k);
+                let seeders = v.dict_get(b"complete").and_then(|x| x.as_int()).unwrap_or(0);
+                let leechers = v.dict_get(b"incomplete").and_then(|x| x.as_int()).unwrap_or(0);
+                out.insert(h, (seeders, leechers));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Replace placeholder swarm stats on magnet-only candidates (SubsPlease, SeaDex) with real tracker scrape data.
+async fn refresh_swarm_health(cands: &mut [TorrentCandidate]) {
+    let targets: Vec<(usize, [u8; 20])> = cands
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.torrent_url.is_none())
+        .filter_map(|(i, c)| c.info_hash.as_deref().and_then(parse_btih_20).map(|h| (i, h)))
+        .take(60)
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let hashes: Vec<[u8; 20]> = targets.iter().map(|(_, h)| *h).collect();
+
+    let mut tasks = Vec::new();
+    for t in SCRAPE_UDP_TRACKERS {
+        let hs = hashes.clone();
+        tasks.push(tokio::spawn(async move { scrape_udp(t, &hs).await.unwrap_or_default() }));
+    }
+    for t in SCRAPE_HTTP_TRACKERS {
+        let hs = hashes.clone();
+        tasks.push(tokio::spawn(async move { scrape_http(t, &hs).await.unwrap_or_default() }));
+    }
+
+    let mut best: HashMap<[u8; 20], (i64, i64)> = HashMap::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(3500);
+    for t in tasks {
+        if let Ok(Ok(map)) = tokio::time::timeout_at(deadline, t).await {
+            for (h, (s, l)) in map {
+                let e = best.entry(h).or_insert((0, 0));
+                e.0 = e.0.max(s);
+                e.1 = e.1.max(l);
+            }
+        }
+    }
+    for (i, h) in targets {
+        if let Some(&(s, l)) = best.get(&h) {
+            cands[i].seeders = s;
+            cands[i].leechers = l;
+        }
+    }
+}
+
+fn search_cache(
+) -> &'static Mutex<HashMap<SearchCacheKey, (std::time::Instant, Vec<TorrentCandidate>)>> {
+    static CACHE: OnceLock<
+        Mutex<HashMap<SearchCacheKey, (std::time::Instant, Vec<TorrentCandidate>)>>,
+    > = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -865,7 +1157,11 @@ pub fn clear_torrent_search_cache() {
     }
 }
 
-fn build_extension_from_url(url: &str, custom_name: Option<String>, custom_kind: Option<String>) -> TorrentExtension {
+fn build_extension_from_url(
+    url: &str,
+    custom_name: Option<String>,
+    custom_kind: Option<String>,
+) -> TorrentExtension {
     let clean_url = url.trim().trim_end_matches('/').to_string();
     let lower = clean_url.to_ascii_lowercase();
     let kind = custom_kind.unwrap_or_else(|| {
@@ -893,16 +1189,26 @@ fn build_extension_from_url(url: &str, custom_name: Option<String>, custom_kind:
     });
 
     let id = hex_encode(&sha1_digest(format!("{kind}:{clean_url}").as_bytes()))[..12].to_string();
-    TorrentExtension {
+    let mut ext = TorrentExtension {
         id,
         name,
         kind,
         url: clean_url,
         enabled: true,
-    }
+        icon_url: None,
+        description: None,
+        version: None,
+        accuracy: None,
+    };
+    enrich_extension_metadata(&mut ext);
+    ext
 }
 
-pub fn toggle_torrent_extension(st: &AppState, id: &str, enabled: bool) -> Result<Vec<TorrentExtension>> {
+pub fn toggle_torrent_extension(
+    st: &AppState,
+    id: &str,
+    enabled: bool,
+) -> Result<Vec<TorrentExtension>> {
     let conn = st.db();
     let mut exts = list_torrent_extensions(&conn);
     for ext in &mut exts {
@@ -926,7 +1232,10 @@ pub fn remove_torrent_extension(st: &AppState, id: &str) -> Result<Vec<TorrentEx
 /// - A direct RSS / SubsPlease JSON / SeaDex API URL (`https://...`)
 /// - A JSON manifest URL (including Hayase `index.json` manifests or Kura JSON manifests)
 /// - Raw JSON pasted directly by the user
-pub async fn import_torrent_extension(st: &AppState, raw_input: &str) -> Result<Vec<TorrentExtension>> {
+pub async fn import_torrent_extension(
+    st: &AppState,
+    raw_input: &str,
+) -> Result<Vec<TorrentExtension>> {
     let trimmed = raw_input.trim();
     if trimmed.is_empty() {
         bail!("Extension URL or manifest cannot be empty");
@@ -959,7 +1268,9 @@ pub async fn import_torrent_extension(st: &AppState, raw_input: &str) -> Result<
             if let Ok(resp) = client.get(&candidate_url).send().await {
                 if resp.status().is_success() {
                     if let Ok(text) = resp.text().await {
-                        let items = parse_manifest_json_or_script(&client, &text, Some(&candidate_url)).await;
+                        let items =
+                            parse_manifest_json_or_script(&client, &text, Some(&candidate_url))
+                                .await;
                         if !items.is_empty() {
                             discovered.extend(items);
                             break;
@@ -1001,9 +1312,24 @@ pub async fn import_torrent_extension(st: &AppState, raw_input: &str) -> Result<
     let conn = st.db();
     let mut existing = list_torrent_extensions(&conn);
     for ext in discovered {
-        if let Some(pos) = existing.iter().position(|e| e.url.eq_ignore_ascii_case(&ext.url) && e.kind == ext.kind) {
+        if let Some(pos) = existing
+            .iter()
+            .position(|e| e.url.eq_ignore_ascii_case(&ext.url) && e.kind == ext.kind)
+        {
             existing[pos].enabled = true;
             existing[pos].name = ext.name;
+            if ext.icon_url.is_some() {
+                existing[pos].icon_url = ext.icon_url;
+            }
+            if ext.description.is_some() {
+                existing[pos].description = ext.description;
+            }
+            if ext.version.is_some() {
+                existing[pos].version = ext.version;
+            }
+            if ext.accuracy.is_some() {
+                existing[pos].accuracy = ext.accuracy;
+            }
         } else {
             existing.push(ext);
         }
@@ -1018,6 +1344,17 @@ async fn parse_manifest_json_or_script(
     base_manifest_url: Option<&str>,
 ) -> Vec<TorrentExtension> {
     let mut out = Vec::new();
+    let resolve_rel = |raw_ref: &str| -> Option<String> {
+        if raw_ref.starts_with("http://") || raw_ref.starts_with("https://") {
+            Some(raw_ref.to_string())
+        } else if let Some(base) = base_manifest_url {
+            base.rfind('/').map(|idx| {
+                format!("{}/{}", &base[..idx], raw_ref.trim_start_matches("./"))
+            })
+        } else {
+            None
+        }
+    };
 
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
         let arr_opt = val
@@ -1028,35 +1365,85 @@ async fn parse_manifest_json_or_script(
 
         if let Some(arr) = arr_opt {
             for item in arr {
-                let name = item.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let kind = item.get("kind").or_else(|| item.get("type")).and_then(|v| v.as_str()).map(|s| s.to_string());
-                if let Some(url) = item.get("url").or_else(|| item.get("api")).and_then(|v| v.as_str()) {
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let kind = item
+                    .get("kind")
+                    .or_else(|| item.get("type"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let icon_url = item
+                    .get("icon")
+                    .or_else(|| item.get("logo"))
+                    .and_then(|v| v.as_str())
+                    .and_then(&resolve_rel);
+                let description = item
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let version = item
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let accuracy = item
+                    .get("accuracy")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let apply_meta = |mut ext: TorrentExtension| -> TorrentExtension {
+                    if let Some(ref ic) = icon_url {
+                        ext.icon_url = Some(ic.clone());
+                    }
+                    if let Some(ref d) = description {
+                        ext.description = Some(d.clone());
+                    }
+                    if let Some(ref v) = version {
+                        ext.version = Some(v.clone());
+                    }
+                    if let Some(ref a) = accuracy {
+                        ext.accuracy = Some(a.clone());
+                    }
+                    enrich_extension_metadata(&mut ext);
+                    ext
+                };
+
+                if let Some(url) = item
+                    .get("url")
+                    .or_else(|| item.get("api"))
+                    .and_then(|v| v.as_str())
+                {
                     if url.starts_with("http") {
-                        out.push(build_extension_from_url(url, name.clone(), kind.clone()));
+                        out.push(apply_meta(build_extension_from_url(url, name.clone(), kind.clone())));
                         continue;
                     }
                 }
-                // Hayase-style `index.json` entry with `"code"` or `"main"` JS module URL
-                if let Some(code_ref) = item.get("code").or_else(|| item.get("main")).and_then(|v| v.as_str()) {
-                    let resolved_url = if code_ref.starts_with("http") {
-                        Some(code_ref.to_string())
-                    } else if let Some(base) = base_manifest_url {
-                        base.rfind('/').map(|idx| format!("{}/{}", &base[..idx], code_ref.trim_start_matches("./")))
-                    } else {
-                        None
-                    };
-                    if let Some(js_url) = resolved_url {
+                if let Some(code_ref) = item
+                    .get("code")
+                    .or_else(|| item.get("main"))
+                    .and_then(|v| v.as_str())
+                {
+                    if let Some(js_url) = resolve_rel(code_ref) {
                         if let Ok(resp) = client.get(&js_url).send().await {
                             if let Ok(js_code) = resp.text().await {
-                                out.extend(extract_sources_from_script(&js_code, name.as_deref()));
+                                for ext in extract_sources_from_script(&js_code, name.as_deref()) {
+                                    out.push(apply_meta(ext));
+                                }
                             }
                         }
                     }
                 }
             }
         } else if let Some(url) = val.get("url").and_then(|v| v.as_str()) {
-            let name = val.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let kind = val.get("kind").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let name = val
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let kind = val
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             out.push(build_extension_from_url(url, name, kind));
         }
     }
@@ -1070,7 +1457,8 @@ async fn parse_manifest_json_or_script(
 
 fn extract_sources_from_script(script: &str, hint_name: Option<&str>) -> Vec<TorrentExtension> {
     static URL_RE: OnceLock<Regex> = OnceLock::new();
-    let url_re = URL_RE.get_or_init(|| Regex::new(r#"https?://[a-zA-Z0-9.\-_]+(?:/[a-zA-Z0-9.\-_/]*)?"#).unwrap());
+    let url_re = URL_RE
+        .get_or_init(|| Regex::new(r#"https?://[a-zA-Z0-9.\-_]+(?:/[a-zA-Z0-9.\-_/]*)?"#).unwrap());
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
@@ -1091,13 +1479,18 @@ fn extract_sources_from_script(script: &str, hint_name: Option<&str>) -> Vec<Tor
         {
             continue;
         }
-        let ext = if lower.contains("collections/entries/records") || lower.contains("releases.moe") {
+        let ext = if lower.contains("collections/entries/records") || lower.contains("releases.moe")
+        {
             let base = if lower.contains("collections/entries/records") {
                 raw.to_string()
             } else {
                 format!("{raw}/api/collections/entries/records")
             };
-            build_extension_from_url(&base, hint_name.map(|s| s.to_string()), Some("seadex-api".into()))
+            build_extension_from_url(
+                &base,
+                hint_name.map(|s| s.to_string()),
+                Some("seadex-api".into()),
+            )
         } else if lower.contains("subsplease") {
             let host_root = raw.split("/api").next().unwrap_or(raw);
             build_extension_from_url(
@@ -1112,7 +1505,11 @@ fn extract_sources_from_script(script: &str, hint_name: Option<&str>) -> Vec<Tor
                 .and_then(|rest| rest.split('/').next())
                 .map(|h| format!("{}://{h}", raw.split("://").next().unwrap_or("https")))
                 .unwrap_or_else(|| raw.to_string());
-            build_extension_from_url(&host_root, hint_name.map(|s| s.to_string()), Some("rss".into()))
+            build_extension_from_url(
+                &host_root,
+                hint_name.map(|s| s.to_string()),
+                Some("rss".into()),
+            )
         };
         if seen.insert((ext.kind.clone(), ext.url.clone())) {
             out.push(ext);
@@ -1137,7 +1534,12 @@ pub async fn search_episode_torrents(
         )
         .unwrap_or(false)
     };
-    if !has_media && custom_query.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+    if !has_media
+        && custom_query
+            .as_ref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+    {
         let _ = crate::service::ensure_media(st, anilist_id).await;
     }
 
@@ -1157,7 +1559,10 @@ pub async fn search_episode_torrents(
             .into_iter()
             .filter(|e| {
                 let u = e.url.to_ascii_lowercase();
-                e.enabled && u.starts_with("http") && !u.contains("animetosho.org") && !u.contains("sukebei.")
+                e.enabled
+                    && u.starts_with("http")
+                    && !u.contains("animetosho.org")
+                    && !u.contains("sukebei.")
             })
             .collect();
 
@@ -1175,7 +1580,8 @@ pub async fn search_episode_torrents(
             )
             .ok();
 
-        let (ro, en, syn_raw, format_opt, total_eps) = row.unwrap_or((None, None, None, None, None));
+        let (ro, en, syn_raw, format_opt, total_eps) =
+            row.unwrap_or((None, None, None, None, None));
         let is_movie = format_opt.as_deref() == Some("MOVIE")
             || (format_opt.as_deref() == Some("SPECIAL") && total_eps == Some(1));
 
@@ -1202,7 +1608,10 @@ pub async fn search_episode_torrents(
         });
 
         let mut known_titles: Vec<String> = Vec::new();
+        // Primary titles (Romaji + English) drive the episode queries; synonyms and the prequel
+        // title are only used for broader fallbacks so they can't crowd out the main queries.
         let mut raw_titles: Vec<String> = Vec::new();
+        let mut extra_titles: Vec<String> = Vec::new();
         if let Some(r) = ro.filter(|s| !s.trim().is_empty()) {
             known_titles.push(r.clone());
             raw_titles.push(r);
@@ -1211,25 +1620,31 @@ pub async fn search_episode_torrents(
             known_titles.push(e.clone());
             raw_titles.push(e);
         }
-        if let Some((Some(pt), _)) = prequel_info {
-            if !pt.trim().is_empty() {
-                known_titles.push(pt.clone());
-                raw_titles.push(pt);
-            }
+        let prequel_title: Option<String> = prequel_info
+            .as_ref()
+            .and_then(|(t, _)| t.clone())
+            .filter(|t| !t.trim().is_empty());
+        if let Some(pt) = &prequel_title {
+            known_titles.push(pt.clone());
         }
         if let Some(sr) = syn_raw {
             if let Ok(syns) = serde_json::from_str::<Vec<String>>(&sr) {
                 for syn in syns {
                     // Only include Latin/ASCII synonyms for torrent search
                     let trimmed = syn.trim();
-                    if !trimmed.is_empty() && trimmed.chars().filter(|c| c.is_ascii_alphabetic()).count() >= 3 {
+                    if !trimmed.is_empty()
+                        && trimmed.chars().filter(|c| c.is_ascii_alphabetic()).count() >= 3
+                    {
                         known_titles.push(trimmed.to_string());
-                        if raw_titles.len() < 5 {
-                            raw_titles.push(trimmed.to_string());
+                        if extra_titles.len() < 3 {
+                            extra_titles.push(trimmed.to_string());
                         }
                     }
                 }
             }
+        }
+        if raw_titles.is_empty() {
+            raw_titles = extra_titles.drain(..).collect();
         }
 
         let mut wave1 = Vec::new();
@@ -1239,7 +1654,10 @@ pub async fn search_episode_torrents(
             let trimmed = q.trim().to_string();
             let parsed_q = crate::parser::parse_filename(&trimmed);
             if parsed_q.episode.is_none() && !is_movie && episode > 0 {
-                push_unique_query(&mut wave1, format!("{} {:02}", clean_search_title(&trimmed), episode));
+                push_unique_query(
+                    &mut wave1,
+                    format!("{} {:02}", clean_search_title(&trimmed), episode),
+                );
                 push_unique_query(&mut wave1, trimmed.clone());
             } else {
                 push_unique_query(&mut wave1, trimmed.clone());
@@ -1276,8 +1694,14 @@ pub async fn search_episode_torrents(
                 } else {
                     if let Some(s_num) = season_opt.filter(|&s| s > 1) {
                         if !base_clean.is_empty() {
-                            push_unique_query(&mut wave1, format!("{base_clean} S{s_num} {episode:02}"));
-                            push_unique_query(&mut wave1, format!("{base_clean} S{s_num:02}E{episode:02}"));
+                            push_unique_query(
+                                &mut wave1,
+                                format!("{base_clean} S{s_num} {episode:02}"),
+                            );
+                            push_unique_query(
+                                &mut wave1,
+                                format!("{base_clean} S{s_num:02}E{episode:02}"),
+                            );
                             push_unique_query(&mut wave2, format!("{base_clean} {episode:02}"));
                         }
                     }
@@ -1296,13 +1720,38 @@ pub async fn search_episode_torrents(
                     }
                 }
             }
+            // Continuous-numbered releases are usually named after the first season.
+            if let (Some(pt), Some(abs_ep)) = (&prequel_title, abs_episode.filter(|&a| a != episode)) {
+                if !is_movie {
+                    let (_, base) = split_season_from_title(pt);
+                    if !base.is_empty() {
+                        push_unique_query(&mut wave1, format!("{base} {abs_ep:02}"));
+                    }
+                }
+            }
+            for t in &extra_titles {
+                let clean = clean_search_title(t);
+                if is_movie {
+                    push_unique_query(&mut wave2, clean);
+                } else {
+                    push_unique_query(&mut wave2, format!("{clean} {episode:02}"));
+                }
+            }
         }
 
-        (wave1, wave2, known_titles, abs_episode, is_movie, pref_res, enabled_exts)
+        (
+            wave1,
+            wave2,
+            known_titles,
+            abs_episode,
+            is_movie,
+            pref_res,
+            enabled_exts,
+        )
     };
 
     if enabled_exts.is_empty() {
-        bail!("NO_TORRENT_EXTENSIONS: No torrent extensions configured. Add an extension or RSS source in Settings → Streaming & Extensions.");
+        bail!("NO_TORRENT_EXTENSIONS: No torrent extensions configured. Add an extension or RSS source in Settings → Extensions.");
     }
 
     if wave1.is_empty() && wave2.is_empty() {
@@ -1338,7 +1787,7 @@ pub async fn search_episode_torrents(
     };
 
     if let Some(notify) = existing_notify {
-        let _ = tokio::time::timeout(Duration::from_millis(3000), notify.notified()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(15), notify.notified()).await;
         if let Ok(guard) = search_cache().lock() {
             if let Some((_, cached)) = guard.get(&cache_key) {
                 if !cached.is_empty() {
@@ -1346,22 +1795,45 @@ pub async fn search_episode_torrents(
                 }
             }
         }
+        // The other search came back empty or failed — register ourselves and search again.
+        if let Ok(mut guard) = in_flight_searches().lock() {
+            guard
+                .entry(cache_key.clone())
+                .or_insert_with(|| Arc::new(Notify::new()));
+        }
     }
 
-    let client = torrent_http().clone();
+    // Always release the in-flight slot (even on early return / error) so later searches never wait on a dead entry.
+    struct InFlightGuard(SearchCacheKey);
+    impl Drop for InFlightGuard {
+        fn drop(&mut self) {
+            if let Ok(mut guard) = in_flight_searches().lock() {
+                if let Some(n) = guard.remove(&self.0) {
+                    n.notify_waiters();
+                }
+            }
+        }
+    }
+    let _in_flight = InFlightGuard(cache_key.clone());
+
+    let client = torrent_search_http().clone();
 
     let mut out: Vec<TorrentCandidate> = Vec::new();
+    let mut bases: Vec<i64> = Vec::new();
     let mut seen_hashes: HashSet<String> = HashSet::new();
+    let mut source_errors: Vec<String> = Vec::new();
 
-    // Execute SeaDex + SubsPlease + RSS queries concurrently in a single fast wave (`max 3 queries` in wave1),
-    // with a 200ms grace window once good seeded torrents have arrived so slow/dead mirrors never stall search!
+    type WaveBatch = std::result::Result<Vec<TorrentCandidate>, String>;
+
+    // Execute SeaDex + SubsPlease + RSS queries concurrently, with a short grace window once
+    // good seeded torrents have arrived so slow/dead mirrors never stall search.
     let run_wave = |queries: Vec<String>, include_seadex: bool| {
         let client = client.clone();
         let exts = enabled_exts.clone();
         let pref_res = pref_res.clone();
         let known_titles = known_titles.clone();
         async move {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<TorrentCandidate>>();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WaveBatch>();
             let mut handles = Vec::new();
 
             if include_seadex {
@@ -1371,7 +1843,7 @@ pub async fn search_episode_torrents(
                     let pr = pref_res.clone();
                     let tx_c = tx.clone();
                     handles.push(tokio::spawn(async move {
-                        let items = query_seadex_extension(
+                        let res = query_seadex_extension(
                             &c,
                             &ext_clone,
                             anilist_id,
@@ -1381,23 +1853,33 @@ pub async fn search_episode_torrents(
                             &pr,
                         )
                         .await
-                        .unwrap_or_default();
-                        let _ = tx_c.send(items);
+                        .map_err(|e| format!("{}: {}", ext_clone.name, short_err(&e)));
+                        let _ = tx_c.send(res);
                     }));
                 }
             }
 
-            for q in queries.into_iter().take(4) {
-                for ext in exts.iter().filter(|e| e.kind != "seadex-api") {
+            // SubsPlease searches by show name only — an episode number in the query returns nothing.
+            let mut subsplease_queries: Vec<String> = Vec::new();
+            for q in queries.iter().take(6) {
+                push_unique_query(&mut subsplease_queries, strip_episode_from_query(q));
+            }
+
+            for ext in exts.iter().filter(|e| e.kind != "seadex-api") {
+                let ext_queries: Vec<String> = if ext.kind == "subsplease-json" {
+                    subsplease_queries.iter().take(3).cloned().collect()
+                } else {
+                    queries.iter().take(6).cloned().collect()
+                };
+                for q in ext_queries {
                     let c = client.clone();
                     let ext_clone = ext.clone();
                     let pr = pref_res.clone();
                     let kt = known_titles.clone();
-                    let q_clone = q.clone();
                     let tx_c = tx.clone();
                     handles.push(tokio::spawn(async move {
-                        let encoded = url_encode_bytes(q_clone.as_bytes());
-                        let items = if ext_clone.kind == "subsplease-json" {
+                        let encoded = url_encode_bytes(q.as_bytes());
+                        let res: WaveBatch = if ext_clone.kind == "subsplease-json" {
                             query_subsplease_extension(
                                 &c,
                                 &ext_clone,
@@ -1410,39 +1892,40 @@ pub async fn search_episode_torrents(
                                 &kt,
                             )
                             .await
-                            .unwrap_or_default()
+                            .map_err(|e| format!("{}: {}", ext_clone.name, short_err(&e)))
                         } else {
                             let rss_url = if ext_clone.url.contains("{query}") {
                                 ext_clone.url.replace("{query}", &encoded)
                             } else {
-                                format!("{}/?page=rss&c=1_0&f=0&q={encoded}", ext_clone.url.trim_end_matches('/'))
+                                format!(
+                                    "{}/?page=rss&c=1_0&f=0&q={encoded}",
+                                    ext_clone.url.trim_end_matches('/')
+                                )
                             };
-                            let mut parsed = Vec::new();
-                            if let Ok(resp) = c.get(&rss_url).send().await {
-                                if resp.status().is_success() {
-                                    if let Ok(xml) = resp.text().await {
-                                        parsed = parse_rss_with_context(
-                                            &xml,
-                                            &ext_clone.name,
-                                            episode,
-                                            abs_episode,
-                                            is_movie,
-                                            is_custom,
-                                            &pr,
-                                            &kt,
-                                        );
-                                    }
-                                }
-                            }
-                            parsed
+                            fetch_text_with_retry(&c, &rss_url)
+                                .await
+                                .map(|xml| {
+                                    parse_rss_with_context(
+                                        &xml,
+                                        &ext_clone.name,
+                                        episode,
+                                        abs_episode,
+                                        is_movie,
+                                        is_custom,
+                                        &pr,
+                                        &kt,
+                                    )
+                                })
+                                .map_err(|e| format!("{}: {e}", ext_clone.name))
                         };
-                        let _ = tx_c.send(items);
+                        let _ = tx_c.send(res);
                     }));
                 }
             }
             drop(tx);
 
             let mut wave_items: Vec<TorrentCandidate> = Vec::new();
+            let mut wave_errors: Vec<String> = Vec::new();
             let mut direct_seeded_hits = 0usize;
 
             loop {
@@ -1458,31 +1941,65 @@ pub async fn search_episode_torrents(
                 let Some(batch) = next_batch else {
                     break;
                 };
-                // Only count candidates with a direct `.torrent` URL and real seeders toward early timeout
-                // so fast magnet-only indexers (like SeaDex) never abort in-flight Nyaa RSS responses!
-                direct_seeded_hits += batch
-                    .iter()
-                    .filter(|c| c.torrent_url.is_some() && c.seeders >= 5 && c.score > 0)
-                    .count();
-                wave_items.extend(batch);
+                match batch {
+                    Ok(items) => {
+                        // Only count candidates with a direct `.torrent` URL and real seeders toward early timeout
+                        // so fast magnet-only indexers (like SeaDex) never abort in-flight RSS responses.
+                        direct_seeded_hits += items
+                            .iter()
+                            .filter(|c| c.torrent_url.is_some() && c.seeders >= 5 && c.score > 0)
+                            .count();
+                        wave_items.extend(items);
+                    }
+                    Err(e) => wave_errors.push(e),
+                }
             }
 
             for h in handles {
                 h.abort();
             }
-            wave_items
+            (wave_items, wave_errors)
         }
     };
 
-    for item in run_wave(wave1, true).await {
-        let key = item
-            .info_hash
-            .as_ref()
-            .map(|h| h.to_ascii_lowercase())
-            .unwrap_or_else(|| item.title.to_ascii_lowercase());
-        if seen_hashes.insert(key) {
+    let merge_or_push = |item: TorrentCandidate,
+                         out: &mut Vec<TorrentCandidate>,
+                         bases: &mut Vec<i64>,
+                         seen_hashes: &mut HashSet<String>| {
+        let key_of = |c: &TorrentCandidate| {
+            c.info_hash
+                .as_deref()
+                .and_then(normalize_btih_hex)
+                .or_else(|| c.info_hash.as_ref().map(|h| h.to_ascii_lowercase()))
+                .unwrap_or_else(|| c.title.to_ascii_lowercase())
+        };
+        let key = key_of(&item);
+        if seen_hashes.insert(key.clone()) {
+            bases.push(item.score - seeder_score(item.seeders));
             out.push(item);
+        } else if let Some(existing) = out.iter_mut().find(|c| key_of(c) == key) {
+            // A real indexer entry (with a `.torrent` link) carries real swarm stats —
+            // prefer them over magnet-only placeholder counts.
+            if existing.torrent_url.is_none() && item.torrent_url.is_some() {
+                existing.torrent_url = item.torrent_url;
+                existing.seeders = item.seeders;
+                existing.leechers = item.leechers;
+            } else if item.torrent_url.is_some() && item.seeders > existing.seeders {
+                existing.seeders = item.seeders;
+            }
+            if existing.ref_subtitle_url.is_none() && item.ref_subtitle_url.is_some() {
+                existing.ref_subtitle_url = item.ref_subtitle_url;
+            }
+            if existing.size == 0 && item.size > 0 {
+                existing.size = item.size;
+            }
         }
+    };
+
+    let (w1_items, w1_errors) = run_wave(wave1, true).await;
+    source_errors.extend(w1_errors);
+    for item in w1_items {
+        merge_or_push(item, &mut out, &mut bases, &mut seen_hashes);
     }
 
     let has_seeded_match = out
@@ -1490,35 +2007,109 @@ pub async fn search_episode_torrents(
         .any(|c| c.torrent_url.is_some() && c.seeders > 0 && c.score > 0);
 
     if !has_seeded_match && !wave2.is_empty() {
-        for item in run_wave(wave2, false).await {
-            let key = item
-                .info_hash
-                .as_ref()
-                .map(|h| h.to_ascii_lowercase())
-                .unwrap_or_else(|| item.title.to_ascii_lowercase());
-            if seen_hashes.insert(key) {
-                out.push(item);
-            }
+        let (w2_items, w2_errors) = run_wave(wave2, false).await;
+        source_errors.extend(w2_errors);
+        for item in w2_items {
+            merge_or_push(item, &mut out, &mut bases, &mut seen_hashes);
         }
     }
 
-    out.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| b.seeders.cmp(&a.seeders)));
+    // Magnet-only candidates (SubsPlease, SeaDex) have no real seeder counts — ask the trackers.
+    refresh_swarm_health(&mut out).await;
 
-    if !out.is_empty() {
-        if let Ok(mut guard) = search_cache().lock() {
-            if guard.len() > 80 {
-                guard.clear();
-            }
-            guard.insert(cache_key.clone(), (std::time::Instant::now(), out.clone()));
-        }
+    // Re-apply the seeder component now that swarm stats are final.
+    for (c, base) in out.iter_mut().zip(bases.iter()) {
+        c.score = base + seeder_score(c.seeders);
     }
-    if let Ok(mut guard) = in_flight_searches().lock() {
-        if let Some(n) = guard.remove(&cache_key) {
-            n.notify_waiters();
+
+    out.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| b.seeders.cmp(&a.seeders))
+    });
+
+    if out.is_empty() {
+        source_errors.sort();
+        source_errors.dedup();
+        if !source_errors.is_empty() {
+            let shown: Vec<String> = source_errors.into_iter().take(3).collect();
+            bail!("Couldn't reach your torrent sources — {}", shown.join("; "));
         }
+        return Ok(out);
+    }
+
+    if let Ok(mut guard) = search_cache().lock() {
+        if guard.len() > 80 {
+            guard.clear();
+        }
+        guard.insert(cache_key.clone(), (std::time::Instant::now(), out.clone()));
     }
 
     Ok(out)
+}
+
+/// Remove a trailing episode / season-episode token from a search query (`"Title 05"` → `"Title"`).
+fn strip_episode_from_query(q: &str) -> String {
+    static EP_TAIL_RE: OnceLock<Regex> = OnceLock::new();
+    let re = EP_TAIL_RE.get_or_init(|| {
+        Regex::new(r"(?i)(?:\s+S\d{1,2}E\d{1,4}|\s+S\d{1,2}\s+\d{1,4}|\s+\d{1,4})\s*$").unwrap()
+    });
+    re.replace(q.trim(), "").trim().to_string()
+}
+
+fn short_err(e: &anyhow::Error) -> String {
+    describe_reqwest_error(e.downcast_ref::<reqwest::Error>()).unwrap_or_else(|| {
+        let s = e.to_string();
+        s.chars().take(80).collect()
+    })
+}
+
+fn describe_reqwest_error(e: Option<&reqwest::Error>) -> Option<String> {
+    let e = e?;
+    Some(if e.is_timeout() {
+        "timed out".to_string()
+    } else if e.is_connect() {
+        "couldn't connect".to_string()
+    } else if let Some(status) = e.status() {
+        format!("HTTP {}", status.as_u16())
+    } else if e.is_decode() {
+        "unexpected response".to_string()
+    } else {
+        "request failed".to_string()
+    })
+}
+
+/// GET a URL as text, retrying once on timeouts, connection errors, HTTP 429 and 5xx.
+async fn fetch_text_with_retry(client: &reqwest::Client, url: &str) -> std::result::Result<String, String> {
+    let mut last_err = String::from("request failed");
+    for attempt in 0..2 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+        }
+        match client.get(url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    match resp.text().await {
+                        Ok(t) => return Ok(t),
+                        Err(e) => last_err = describe_reqwest_error(Some(&e)).unwrap_or_default(),
+                    }
+                } else {
+                    last_err = format!("HTTP {}", status.as_u16());
+                    if !(status.as_u16() == 429 || status.is_server_error()) {
+                        return Err(last_err);
+                    }
+                }
+            }
+            Err(e) => {
+                last_err = describe_reqwest_error(Some(&e)).unwrap_or_default();
+                if !(e.is_timeout() || e.is_connect() || e.is_request()) {
+                    return Err(last_err);
+                }
+            }
+        }
+    }
+    Err(last_err)
 }
 
 async fn query_subsplease_extension(
@@ -1564,7 +2155,10 @@ async fn query_subsplease_extension(
             let info_hash = magnet
                 .split("urn:btih:")
                 .nth(1)
-                .map(|r| r.split('&').next().unwrap_or(r).to_ascii_lowercase());
+                .map(|r| r.split('&').next().unwrap_or(r).trim())
+                .and_then(|raw_h| {
+                    normalize_btih_hex(raw_h).or_else(|| Some(raw_h.to_ascii_lowercase()))
+                });
             let title = format!("[SubsPlease] {show} - {ep_str} ({res}).mkv");
             let score = score_candidate_with_context(
                 &title,
@@ -1579,7 +2173,7 @@ async fn query_subsplease_extension(
                 pref_res,
                 if is_custom { &[] } else { known_titles },
             );
-            if !is_custom && score < -500 {
+            if !is_custom && !is_relevant_candidate(score, 85) {
                 continue;
             }
             out.push(TorrentCandidate {
@@ -1690,7 +2284,11 @@ async fn query_seadex_extension(
             size: total_size,
             seeders: 50,
             leechers: 2,
-            torrent_url: tr.get("url").and_then(|v| v.as_str()).filter(|u| u.ends_with(".torrent")).map(|s| s.to_string()),
+            torrent_url: tr
+                .get("url")
+                .and_then(|v| v.as_str())
+                .filter(|u| u.ends_with(".torrent"))
+                .map(|s| s.to_string()),
             magnet_uri,
             info_hash: Some(info_hash.to_ascii_lowercase()),
             published_at: None,
@@ -1764,8 +2362,8 @@ fn parse_rss_with_context(
             continue;
         };
         let link = extract_xml_tag(block, "link");
-        let info_hash = extract_xml_tag(block, "nyaa:infoHash")
-            .or_else(|| extract_xml_tag(block, "infoHash"));
+        let info_hash =
+            extract_xml_tag(block, "nyaa:infoHash").or_else(|| extract_xml_tag(block, "infoHash"));
         let seeders: i64 = extract_xml_tag(block, "nyaa:seeders")
             .or_else(|| extract_xml_tag(block, "seeders"))
             .and_then(|s| s.parse().ok())
@@ -1793,7 +2391,7 @@ fn parse_rss_with_context(
             pref_res,
             if is_custom { &[] } else { known_titles },
         );
-        if !is_custom && score < -500 {
+        if !is_custom && !is_relevant_candidate(score, seeders) {
             continue;
         }
         let magnet_uri = info_hash.as_ref().map(|h| {
@@ -1838,9 +2436,13 @@ fn spawn_tracker_peer_discovery(
         let tx = peer_tx.clone();
         tokio::spawn(async move {
             let peers = if tr.starts_with("udp://") {
-                announce_udp(&tr, &info_hash, &peer_id, left).await.unwrap_or_default()
+                announce_udp(&tr, &info_hash, &peer_id, left)
+                    .await
+                    .unwrap_or_default()
             } else if tr.starts_with("http://") || tr.starts_with("https://") {
-                announce_http(&tr, &info_hash, &peer_id, left).await.unwrap_or_default()
+                announce_http(&tr, &info_hash, &peer_id, left)
+                    .await
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -2050,7 +2652,9 @@ impl SwarmSession {
 
         // 1. Unclaimed priority header/EOF pieces
         for &idx in &priority_indices {
-            if states[idx] == PieceState::Missing && peer_bitfield.get(idx).copied().unwrap_or(false) {
+            if states[idx] == PieceState::Missing
+                && peer_bitfield.get(idx).copied().unwrap_or(false)
+            {
                 states[idx] = PieceState::InFlight;
                 claimed_at[idx] = Some(now);
                 return Some(idx);
@@ -2064,7 +2668,9 @@ impl SwarmSession {
             || states.get(self.last_piece) != Some(&PieceState::Complete);
         if startup_incomplete {
             for &idx in &priority_indices {
-                if states[idx] == PieceState::InFlight && peer_bitfield.get(idx).copied().unwrap_or(false) {
+                if states[idx] == PieceState::InFlight
+                    && peer_bitfield.get(idx).copied().unwrap_or(false)
+                {
                     let elapsed = claimed_at[idx]
                         .map(|t| now.duration_since(t))
                         .unwrap_or(Duration::from_secs(10));
@@ -2078,7 +2684,9 @@ impl SwarmSession {
 
         // 3. Unclaimed sequential pieces from `read_head_piece` to `last_piece`
         for idx in head..=self.last_piece {
-            if states[idx] == PieceState::Missing && peer_bitfield.get(idx).copied().unwrap_or(false) {
+            if states[idx] == PieceState::Missing
+                && peer_bitfield.get(idx).copied().unwrap_or(false)
+            {
                 states[idx] = PieceState::InFlight;
                 claimed_at[idx] = Some(now);
                 return Some(idx);
@@ -2088,7 +2696,9 @@ impl SwarmSession {
         // 4. Preempt slow InFlight pieces near the playback head (`head..=head+3` stuck > 2.2s, or `head..=head+20` stuck > 4.0s)
         let lookahead_end = (head + 20).min(self.last_piece);
         for idx in head..=lookahead_end {
-            if states[idx] == PieceState::InFlight && peer_bitfield.get(idx).copied().unwrap_or(false) {
+            if states[idx] == PieceState::InFlight
+                && peer_bitfield.get(idx).copied().unwrap_or(false)
+            {
                 let elapsed = claimed_at[idx]
                     .map(|t| now.duration_since(t))
                     .unwrap_or(Duration::from_secs(10));
@@ -2106,7 +2716,9 @@ impl SwarmSession {
 
         // 5. Wrap around from `first_piece` to `head`
         for idx in self.first_piece..head {
-            if states[idx] == PieceState::Missing && peer_bitfield.get(idx).copied().unwrap_or(false) {
+            if states[idx] == PieceState::Missing
+                && peer_bitfield.get(idx).copied().unwrap_or(false)
+            {
                 states[idx] = PieceState::InFlight;
                 claimed_at[idx] = Some(now);
                 return Some(idx);
@@ -2115,7 +2727,9 @@ impl SwarmSession {
 
         // 6. Endgame: race any remaining InFlight piece
         for idx in head..=self.last_piece {
-            if states[idx] == PieceState::InFlight && peer_bitfield.get(idx).copied().unwrap_or(false) {
+            if states[idx] == PieceState::InFlight
+                && peer_bitfield.get(idx).copied().unwrap_or(false)
+            {
                 return Some(idx);
             }
         }
@@ -2141,7 +2755,8 @@ impl SwarmSession {
             *slot = PieceState::Complete;
         }
         drop(states);
-        self.downloaded_bytes.fetch_add(piece_len, Ordering::Relaxed);
+        self.downloaded_bytes
+            .fetch_add(piece_len, Ordering::Relaxed);
         self.piece_notify.notify_waiters();
         true
     }
@@ -2157,15 +2772,16 @@ impl SwarmSession {
     fn cache_hot_piece(&self, idx: usize, data: Arc<Vec<u8>>) {
         let head = self.read_head_piece.load(Ordering::Relaxed);
         let is_pinned = idx <= self.first_piece + 2 || idx >= self.last_piece.saturating_sub(1);
-        if !is_pinned && idx.abs_diff(head) > 12 {
+        if !is_pinned && idx.abs_diff(head) > 16 {
             return;
         }
         if let Ok(mut map) = self.hot_pieces.lock() {
-            if map.len() >= 28 && !map.contains_key(&idx) {
-                let evict_cand = map
-                    .keys()
-                    .copied()
-                    .find(|&k| k > self.first_piece + 2 && k < self.last_piece.saturating_sub(1) && k.abs_diff(head) > 6);
+            if map.len() >= 48 && !map.contains_key(&idx) {
+                let evict_cand = map.keys().copied().find(|&k| {
+                    k > self.first_piece + 2
+                        && k < self.last_piece.saturating_sub(1)
+                        && (k < head.saturating_sub(4) || k > head + 16)
+                });
                 if let Some(k) = evict_cand {
                     map.remove(&k);
                 }
@@ -2175,7 +2791,10 @@ impl SwarmSession {
     }
 
     fn get_hot_piece(&self, idx: usize) -> Option<Arc<Vec<u8>>> {
-        self.hot_pieces.lock().ok().and_then(|m| m.get(&idx).cloned())
+        self.hot_pieces
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&idx).cloned())
     }
 
     /// Write verified piece bytes into the target file (cropping to `[target_file_offset, target_file_offset + target_file_length)`).
@@ -2203,12 +2822,18 @@ impl SwarmSession {
             .open(&self.save_path)
             .await?;
         f.seek(SeekFrom::Start(dest_offset)).await?;
-        f.write_all(&data[slice_offset..slice_offset + slice_len]).await?;
+        f.write_all(&data[slice_offset..slice_offset + slice_len])
+            .await?;
         Ok(())
     }
 
     /// Read a verified block from disk to upload to a requesting peer when `allow_seeding` is enabled.
-    async fn read_verified_block(&self, idx: usize, begin: usize, len: usize) -> Result<Option<Vec<u8>>> {
+    async fn read_verified_block(
+        &self,
+        idx: usize,
+        begin: usize,
+        len: usize,
+    ) -> Result<Option<Vec<u8>>> {
         if !self.allow_seeding || len == 0 || len > 65_536 || !self.is_piece_complete(idx) {
             return Ok(None);
         }
@@ -2235,7 +2860,9 @@ impl SwarmSession {
         let pct = ((done as f64) / (total_p as f64) * 100.0).min(100.0);
         let verified_dl = self.downloaded_bytes.load(Ordering::Relaxed);
         let live_dl = if verified_dl == 0 {
-            self.wire_rx_bytes.load(Ordering::Relaxed).min(self.meta.piece_length)
+            self.wire_rx_bytes
+                .load(Ordering::Relaxed)
+                .min(self.meta.piece_length)
         } else {
             verified_dl
         };
@@ -2291,7 +2918,8 @@ async fn run_peer_worker(
     peer_id: [u8; 20],
     peer_tx: tokio::sync::mpsc::UnboundedSender<SocketAddr>,
 ) -> Result<()> {
-    let mut stream = tokio::time::timeout(Duration::from_millis(3500), TcpStream::connect(addr)).await??;
+    let mut stream =
+        tokio::time::timeout(Duration::from_millis(3500), TcpStream::connect(addr)).await??;
     let _ = stream.set_nodelay(true);
 
     // 68-byte Handshake with BEP 10 Extension Protocol bit (`hs[25] |= 0x10`)
@@ -2346,7 +2974,9 @@ async fn run_peer_worker(
                 }
                 return Ok(());
             }
-            let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_secs(12), read_peer_msg(&mut stream)).await else {
+            let Ok(Ok(msg)) =
+                tokio::time::timeout(Duration::from_secs(12), read_peer_msg(&mut stream)).await
+            else {
                 if counted_active {
                     session.active_peers.fetch_sub(1, Ordering::Relaxed);
                 }
@@ -2369,7 +2999,8 @@ async fn run_peer_worker(
                     }
                 }
                 Some((4, payload)) if payload.len() >= 4 => {
-                    let idx = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+                    let idx = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                        as usize;
                     if idx < num_pieces {
                         peer_has[idx] = true;
                     }
@@ -2392,18 +3023,31 @@ async fn run_peer_worker(
                     let _ = stream.write_all(&[0, 0, 0, 1, 1]).await;
                 }
                 Some((6, payload)) if session.allow_seeding && payload.len() >= 12 => {
-                    let req_idx = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
-                    let req_begin = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
-                    let req_len = u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]]) as usize;
-                    if let Ok(Some(block_data)) = session.read_verified_block(req_idx, req_begin, req_len).await {
+                    let req_idx =
+                        u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                            as usize;
+                    let req_begin =
+                        u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]])
+                            as usize;
+                    let req_len =
+                        u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]])
+                            as usize;
+                    if let Ok(Some(block_data)) = session
+                        .read_verified_block(req_idx, req_begin, req_len)
+                        .await
+                    {
                         let msg_len = (9 + block_data.len()) as u32;
                         let mut hdr = [0u8; 13];
                         hdr[0..4].copy_from_slice(&msg_len.to_be_bytes());
                         hdr[4] = 7; // Piece
                         hdr[5..9].copy_from_slice(&(req_idx as u32).to_be_bytes());
                         hdr[9..13].copy_from_slice(&(req_begin as u32).to_be_bytes());
-                        if stream.write_all(&hdr).await.is_ok() && stream.write_all(&block_data).await.is_ok() {
-                            session.uploaded_bytes.fetch_add(block_data.len() as u64, Ordering::Relaxed);
+                        if stream.write_all(&hdr).await.is_ok()
+                            && stream.write_all(&block_data).await.is_ok()
+                        {
+                            session
+                                .uploaded_bytes
+                                .fetch_add(block_data.len() as u64, Ordering::Relaxed);
                         }
                     }
                 }
@@ -2461,14 +3105,18 @@ async fn run_peer_worker(
 
             match tokio::time::timeout(Duration::from_secs(8), read_peer_msg(&mut stream)).await {
                 Ok(Ok(Some((7, payload)))) if payload.len() > 8 => {
-                    let idx = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
-                    let begin = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+                    let idx = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                        as usize;
+                    let begin = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]])
+                        as usize;
                     let block = &payload[8..];
                     if idx == piece_idx && begin + block.len() <= piece_len {
                         piece_buf[begin..begin + block.len()].copy_from_slice(block);
                         received += block.len();
                         in_flight = in_flight.saturating_sub(1);
-                        session.wire_rx_bytes.fetch_add(block.len() as u64, Ordering::Relaxed);
+                        session
+                            .wire_rx_bytes
+                            .fetch_add(block.len() as u64, Ordering::Relaxed);
                     }
                 }
                 Ok(Ok(Some((0, _)))) => {
@@ -2480,7 +3128,8 @@ async fn run_peer_worker(
                     break;
                 }
                 Ok(Ok(Some((4, payload)))) if payload.len() >= 4 => {
-                    let idx = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+                    let idx = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                        as usize;
                     if idx < num_pieces {
                         peer_has[idx] = true;
                     }
@@ -2492,18 +3141,31 @@ async fn run_peer_worker(
                     let _ = stream.write_all(&[0, 0, 0, 1, 1]).await;
                 }
                 Ok(Ok(Some((6, payload)))) if session.allow_seeding && payload.len() >= 12 => {
-                    let req_idx = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
-                    let req_begin = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
-                    let req_len = u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]]) as usize;
-                    if let Ok(Some(block_data)) = session.read_verified_block(req_idx, req_begin, req_len).await {
+                    let req_idx =
+                        u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                            as usize;
+                    let req_begin =
+                        u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]])
+                            as usize;
+                    let req_len =
+                        u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]])
+                            as usize;
+                    if let Ok(Some(block_data)) = session
+                        .read_verified_block(req_idx, req_begin, req_len)
+                        .await
+                    {
                         let msg_len = (9 + block_data.len()) as u32;
                         let mut hdr = [0u8; 13];
                         hdr[0..4].copy_from_slice(&msg_len.to_be_bytes());
                         hdr[4] = 7; // Piece
                         hdr[5..9].copy_from_slice(&(req_idx as u32).to_be_bytes());
                         hdr[9..13].copy_from_slice(&(req_begin as u32).to_be_bytes());
-                        if stream.write_all(&hdr).await.is_ok() && stream.write_all(&block_data).await.is_ok() {
-                            session.uploaded_bytes.fetch_add(block_data.len() as u64, Ordering::Relaxed);
+                        if stream.write_all(&hdr).await.is_ok()
+                            && stream.write_all(&block_data).await.is_ok()
+                        {
+                            session
+                                .uploaded_bytes
+                                .fetch_add(block_data.len() as u64, Ordering::Relaxed);
                         }
                     }
                 }
@@ -2536,7 +3198,11 @@ async fn run_peer_worker(
         let piece_arc = Arc::new(piece_buf);
         session.cache_hot_piece(piece_idx, piece_arc.clone());
 
-        if session.write_verified_piece(piece_idx, &piece_arc).await.is_ok() {
+        if session
+            .write_verified_piece(piece_idx, &piece_arc)
+            .await
+            .is_ok()
+        {
             session.mark_piece_complete(piece_idx, piece_len as u64);
             if session.allow_seeding {
                 let mut have_msg = [0u8; 9];
@@ -2574,7 +3240,7 @@ async fn read_peer_msg(stream: &mut TcpStream) -> Result<Option<(u8, Vec<u8>)>> 
 }
 
 // ---------------------------------------------------------------------------
-// Local HTTP Range Server for `mpv` / `Memento`
+// Local HTTP Range Server for Built-in Player & `mpv`
 // ---------------------------------------------------------------------------
 
 async fn spawn_http_range_server(session: Arc<SwarmSession>) -> Result<String> {
@@ -2614,14 +3280,32 @@ async fn spawn_http_range_server(session: Arc<SwarmSession>) -> Result<String> {
     Ok(url)
 }
 
-async fn handle_http_stream_client(mut socket: TcpStream, session: Arc<SwarmSession>) -> Result<()> {
+async fn handle_http_stream_client(
+    mut socket: TcpStream,
+    session: Arc<SwarmSession>,
+) -> Result<()> {
     let mut req_buf = [0u8; 4096];
     let n = tokio::time::timeout(Duration::from_secs(10), socket.read(&mut req_buf)).await??;
     if n == 0 {
         return Ok(());
     }
     let req_str = String::from_utf8_lossy(&req_buf[..n]);
-    let is_head = req_str.starts_with("HEAD ");
+    let first_line = req_str.lines().next().unwrap_or("");
+    let is_head = first_line.starts_with("HEAD ");
+    let req_target = first_line.split_whitespace().nth(1).unwrap_or("/");
+    let selected_aid: i64 = req_target
+        .split_once('?')
+        .and_then(|(_, q)| {
+            q.split('&').find_map(|pair| {
+                let (k, v) = pair.split_once('=')?;
+                if k == "aid" {
+                    v.parse::<i64>().ok()
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or(0);
     let total_len = session.meta.target_file_length;
 
     let mut range_start = 0u64;
@@ -2660,6 +3344,7 @@ async fn handle_http_stream_client(mut socket: TcpStream, session: Arc<SwarmSess
     let mut cur_offset = range_start;
     let mut chunk_buf = vec![0u8; 262_144];
     let mut f = tokio::fs::File::open(&session.save_path).await?;
+    let mut cached_audio_offsets: Option<Vec<usize>> = None;
 
     while cur_offset <= range_end {
         if session.cancelled.load(Ordering::Relaxed) {
@@ -2672,7 +3357,9 @@ async fn handle_http_stream_client(mut socket: TcpStream, session: Arc<SwarmSess
         // at the very end of the file (`last_piece` / `last_piece - 1`), which is already in `priority_indices`
         // and must not hijack sequential buffering at the playback head!
         if needed_piece < session.last_piece.saturating_sub(1) {
-            session.read_head_piece.store(needed_piece, Ordering::Relaxed);
+            session
+                .read_head_piece
+                .store(needed_piece, Ordering::Relaxed);
         }
 
         // Wait until `needed_piece` is verified on disk
@@ -2685,19 +3372,49 @@ async fn handle_http_stream_client(mut socket: TcpStream, session: Arc<SwarmSess
 
         // Compute how many bytes we can read within this completed piece
         let piece_start_global = (needed_piece as u64) * session.meta.piece_length;
-        let piece_end_global = ((needed_piece as u64 + 1) * session.meta.piece_length).min(session.meta.total_length);
+        let piece_end_global =
+            ((needed_piece as u64 + 1) * session.meta.piece_length).min(session.meta.total_length);
         let avail_in_piece = piece_end_global.saturating_sub(global_offset);
         let remaining_in_req = (range_end - cur_offset) + 1;
-        let to_read = avail_in_piece.min(remaining_in_req).min(chunk_buf.len() as u64) as usize;
+        let to_read = avail_in_piece
+            .min(remaining_in_req)
+            .min(chunk_buf.len() as u64) as usize;
         if to_read == 0 {
             break;
+        }
+
+        let needs_audio_mask = selected_aid > 0 && cur_offset < 65_536;
+        if needs_audio_mask && cached_audio_offsets.is_none() {
+            let hdr_len = total_len.min(65_536) as usize;
+            let mut hdr_buf = vec![0u8; hdr_len];
+            if f.seek(SeekFrom::Start(0)).await.is_ok() {
+                if let Ok(read_hdr) = f.read(&mut hdr_buf).await {
+                    cached_audio_offsets = Some(
+                        crate::subtitles::find_mkv_audio_track_type_offsets(&hdr_buf[..read_hdr]),
+                    );
+                }
+            }
         }
 
         // Fast path: serve directly from RAM `hot_pieces` cache without disk seek/read!
         if let Some(mem_piece) = session.get_hot_piece(needed_piece) {
             let in_piece_offset = (global_offset - piece_start_global) as usize;
             if in_piece_offset + to_read <= mem_piece.len() {
-                if socket
+                if needs_audio_mask {
+                    chunk_buf[..to_read]
+                        .copy_from_slice(&mem_piece[in_piece_offset..in_piece_offset + to_read]);
+                    if let Some(ref a_offs) = cached_audio_offsets {
+                        crate::subtitles::apply_mkv_audio_track_mask(
+                            &mut chunk_buf[..to_read],
+                            cur_offset,
+                            a_offs,
+                            selected_aid,
+                        );
+                    }
+                    if socket.write_all(&chunk_buf[..to_read]).await.is_err() {
+                        break;
+                    }
+                } else if socket
                     .write_all(&mem_piece[in_piece_offset..in_piece_offset + to_read])
                     .await
                     .is_err()
@@ -2711,6 +3428,16 @@ async fn handle_http_stream_client(mut socket: TcpStream, session: Arc<SwarmSess
 
         f.seek(SeekFrom::Start(cur_offset)).await?;
         f.read_exact(&mut chunk_buf[..to_read]).await?;
+        if needs_audio_mask {
+            if let Some(ref a_offs) = cached_audio_offsets {
+                crate::subtitles::apply_mkv_audio_track_mask(
+                    &mut chunk_buf[..to_read],
+                    cur_offset,
+                    a_offs,
+                    selected_aid,
+                );
+            }
+        }
 
         if socket.write_all(&chunk_buf[..to_read]).await.is_err() {
             break;
@@ -2737,9 +3464,10 @@ pub fn list_active_sessions() -> Vec<TorrentSessionStatus> {
 }
 
 pub fn save_path_for_stream_url(url: &str) -> Option<PathBuf> {
+    let base_url = url.split('?').next().unwrap_or(url);
     let map = sessions_map().lock().unwrap();
     for s in map.values() {
-        if s.stream_url.lock().unwrap().as_deref() == Some(url) {
+        if s.stream_url.lock().unwrap().as_deref() == Some(base_url) {
             return Some(s.save_path.clone());
         }
     }
@@ -2783,7 +3511,11 @@ pub fn on_player_stopped(anilist_id: i64, ep_key: &str) {
     let to_cancel: Vec<String> = {
         let map = sessions_map().lock().unwrap();
         map.values()
-            .filter(|s| s.anilist_id == anilist_id && s.ep_key == ep_key && (s.mode == "stream" || s.mode == "hybrid"))
+            .filter(|s| {
+                s.anilist_id == anilist_id
+                    && s.ep_key == ep_key
+                    && (s.mode == "stream" || s.mode == "hybrid")
+            })
             .map(|s| s.id.clone())
             .collect()
     };
@@ -2824,7 +3556,9 @@ fn extract_magnet_trackers(magnet_uri: Option<&str>) -> Vec<String> {
         for part in m.split('&') {
             if let Some(raw_tr) = part.strip_prefix("tr=") {
                 let decoded = percent_decode_str(raw_tr).trim().to_string();
-                if (decoded.starts_with("udp://") || decoded.starts_with("http://") || decoded.starts_with("https://"))
+                if (decoded.starts_with("udp://")
+                    || decoded.starts_with("http://")
+                    || decoded.starts_with("https://"))
                     && !trackers.contains(&decoded)
                 {
                     trackers.push(decoded);
@@ -2833,6 +3567,7 @@ fn extract_magnet_trackers(magnet_uri: Option<&str>) -> Vec<String> {
         }
     }
     for fallback in [
+        "http://nyaa.tracker.wf:7777/announce",
         "udp://open.stealth.si:80/announce",
         "udp://tracker.opentrackr.org:1337/announce",
         "udp://exodus.desync.com:6969/announce",
@@ -2849,15 +3584,7 @@ fn extract_magnet_trackers(magnet_uri: Option<&str>) -> Vec<String> {
 }
 
 fn parse_hex_hash_20(hex: &str) -> Option<[u8; 20]> {
-    let trimmed = hex.trim();
-    if trimmed.len() != 40 {
-        return None;
-    }
-    let mut out = [0u8; 20];
-    for i in 0..20 {
-        out[i] = u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
+    parse_btih_20(hex)
 }
 
 /// Fallback `BEP 9` (`ut_metadata`) peer-wire metadata exchange when magnet-only releases are not cached on HTTP indexers.
@@ -2890,12 +3617,14 @@ async fn fetch_metadata_via_bep9(info_hash: [u8; 20], trackers: &[String]) -> Re
             }
         });
     }
+    // Trackers often don't know magnet-only swarms (or are down) — walk the DHT in parallel.
+    crate::dht::spawn_get_peers(info_hash, peer_tx.clone(), Duration::from_secs(14), None);
     drop(peer_tx);
 
     let (win_tx, mut win_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let mut peer_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     let mut seen_peers = HashSet::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(7);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
 
     loop {
         tokio::select! {
@@ -2908,7 +3637,7 @@ async fn fetch_metadata_via_bep9(info_hash: [u8; 20], trackers: &[String]) -> Re
             maybe_addr = tokio::time::timeout_at(deadline, peer_rx.recv()) => {
                 match maybe_addr {
                     Ok(Some(addr)) => {
-                        if seen_peers.len() < 30 && seen_peers.insert(addr) {
+                        if seen_peers.len() < 80 && seen_peers.insert(addr) {
                             let wtx = win_tx.clone();
                             peer_handles.push(tokio::spawn(async move {
                                 if let Ok(bytes) = fetch_bep9_from_peer(addr, info_hash, peer_id).await {
@@ -2940,8 +3669,13 @@ async fn fetch_metadata_via_bep9(info_hash: [u8; 20], trackers: &[String]) -> Re
     bail!("Timed out fetching BEP 9 metadata from swarm")
 }
 
-async fn fetch_bep9_from_peer(addr: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]) -> Result<Vec<u8>> {
-    let mut stream = tokio::time::timeout(Duration::from_millis(2500), TcpStream::connect(addr)).await??;
+async fn fetch_bep9_from_peer(
+    addr: SocketAddr,
+    info_hash: [u8; 20],
+    peer_id: [u8; 20],
+) -> Result<Vec<u8>> {
+    let mut stream =
+        tokio::time::timeout(Duration::from_millis(2500), TcpStream::connect(addr)).await??;
     let _ = stream.set_nodelay(true);
 
     let mut hs = [0u8; 68];
@@ -3017,8 +3751,14 @@ async fn fetch_bep9_from_peer(addr: SocketAddr, info_hash: [u8; 20], peer_id: [u
         } else if ext_id == 1 && !meta_buf.is_empty() {
             let (dict, consumed) = parse_bencode(&payload[1..])?;
             let raw_chunk = payload.get(1 + consumed..).unwrap_or(&[]);
-            let msg_type = dict.dict_get(b"msg_type").and_then(|v| v.as_int()).unwrap_or(-1);
-            let piece = dict.dict_get(b"piece").and_then(|v| v.as_int()).unwrap_or(-1);
+            let msg_type = dict
+                .dict_get(b"msg_type")
+                .and_then(|v| v.as_int())
+                .unwrap_or(-1);
+            let piece = dict
+                .dict_get(b"piece")
+                .and_then(|v| v.as_int())
+                .unwrap_or(-1);
             if msg_type == 1 && piece >= 0 && (piece as usize) < num_chunks {
                 let p_idx = piece as usize;
                 let start = p_idx * 16_384;
@@ -3051,15 +3791,19 @@ async fn fetch_torrent_bytes(
     magnet_uri: Option<&str>,
     info_hash: Option<&str>,
 ) -> Result<Vec<u8>> {
-    let client = torrent_http();
+    let client = torrent_search_http();
 
     let hash_opt = info_hash
-        .map(|s| s.trim().to_ascii_lowercase())
+        .map(|s| s.trim())
+        .and_then(|s| normalize_btih_hex(s).or_else(|| Some(s.to_ascii_lowercase())))
         .or_else(|| {
             magnet_uri.and_then(|m| {
                 m.split("urn:btih:")
                     .nth(1)
-                    .map(|rest| rest.split('&').next().unwrap_or(rest).trim().to_ascii_lowercase())
+                    .map(|rest| rest.split('&').next().unwrap_or(rest).trim())
+                    .and_then(|raw_h| {
+                        normalize_btih_hex(raw_h).or_else(|| Some(raw_h.to_ascii_lowercase()))
+                    })
             })
         });
 
@@ -3093,13 +3837,15 @@ async fn fetch_torrent_bytes(
     let hash = hash_opt.context("No .torrent URL or info_hash available")?;
     let upper_hash = hash.to_ascii_uppercase();
 
-    // 2. Race public info_hash caches (`itorrents.org`, `btcache.me`), hash RSS lookup, AND title RSS lookup concurrently!
+    // 2. Race public info_hash caches (`itorrents.org`, `btcache.me`, `torrage.info`),
+    // hash RSS lookup, AND title RSS lookup concurrently!
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let mut handles = Vec::new();
 
     for cache_url in [
         format!("https://itorrents.org/torrent/{upper_hash}.torrent"),
         format!("https://btcache.me/torrent/{upper_hash}"),
+        format!("https://torrage.info/torrent.php?h={upper_hash}"),
     ] {
         let c = client.clone();
         let tx_c = tx.clone();
@@ -3119,17 +3865,22 @@ async fn fetch_torrent_bytes(
     // Clean release title for RSS title-to-infoHash lookup (strip file extension and CRC hex tags)
     let title_query = {
         static CRC_RE: OnceLock<Regex> = OnceLock::new();
-        let crc_re = CRC_RE.get_or_init(|| Regex::new(r"\[[0-9A-Fa-f]{8}\]|\.[a-zA-Z0-9]{2,4}$").unwrap());
+        let crc_re =
+            CRC_RE.get_or_init(|| Regex::new(r"\[[0-9A-Fa-f]{8}\]|\.[a-zA-Z0-9]{2,4}$").unwrap());
         let stripped = crc_re.replace_all(candidate_title, " ");
         clean_search_title(&stripped)
     };
 
-    for base in rss_bases {
+    let all_rss_bases: Vec<String> = rss_bases.to_vec();
+
+    for base in &all_rss_bases {
         let base_trimmed = base.trim_end_matches('/').to_string();
         let mut lookups = vec![format!("{base_trimmed}/?page=rss&c=1_0&f=0&q={hash}")];
         if !title_query.is_empty() {
             let encoded_title = url_encode_bytes(title_query.as_bytes());
-            lookups.push(format!("{base_trimmed}/?page=rss&c=1_0&f=0&q={encoded_title}"));
+            lookups.push(format!(
+                "{base_trimmed}/?page=rss&c=1_0&f=0&q={encoded_title}"
+            ));
         }
         for lookup in lookups {
             let c = client.clone();
@@ -3145,8 +3896,11 @@ async fn fetch_torrent_bytes(
                             let block = &raw_item[..end];
                             let item_hash = extract_xml_tag(block, "nyaa:infoHash")
                                 .or_else(|| extract_xml_tag(block, "infoHash"))
-                                .unwrap_or_default()
-                                .to_ascii_lowercase();
+                                .and_then(|raw_h| {
+                                    normalize_btih_hex(&raw_h)
+                                        .or_else(|| Some(raw_h.to_ascii_lowercase()))
+                                })
+                                .unwrap_or_default();
                             if item_hash == target_hash {
                                 if let Some(t_url) = extract_xml_tag(block, "link") {
                                     if let Ok(r2) = c.get(&t_url).send().await {
@@ -3165,30 +3919,47 @@ async fn fetch_torrent_bytes(
             }));
         }
     }
+    // 3. Race the swarm itself (BEP 9 `ut_metadata` via tracker + DHT peers) at the same time,
+    // so a dead/blocked HTTP cache never delays magnet-only releases.
+    let target_bytes = parse_hex_hash_20(&hash);
+    if let Some(hash_bytes) = target_bytes {
+        let trackers = extract_magnet_trackers(magnet_uri);
+        let tx_c = tx.clone();
+        handles.push(tokio::spawn(async move {
+            if let Ok(bytes) = fetch_metadata_via_bep9(hash_bytes, &trackers).await {
+                let _ = tx_c.send(bytes);
+            }
+        }));
+    }
     drop(tx);
 
-    if let Some(winner) = rx.recv().await {
-        for h in handles {
+    // Accept the first response whose `info` dictionary actually hashes to the requested info_hash.
+    let overall = tokio::time::Instant::now() + Duration::from_secs(25);
+    while let Ok(Some(candidate)) = tokio::time::timeout_at(overall, rx.recv()).await {
+        let valid = match target_bytes {
+            Some(expected) => parse_bencode(&candidate)
+                .ok()
+                .and_then(|(root, _)| root.dict_get_span(b"info").map(|(_, s, e)| (s, e)))
+                .map(|(s, e)| sha1_digest(&candidate[s..e]) == expected)
+                .unwrap_or(false),
+            None => true,
+        };
+        if !valid {
+            continue;
+        }
+        for h in &handles {
             h.abort();
         }
         if let Ok(mut guard) = torrent_meta_cache().lock() {
-            guard.insert(hash, winner.clone());
+            guard.insert(hash, candidate.clone());
         }
-        return Ok(winner);
+        return Ok(candidate);
+    }
+    for h in &handles {
+        h.abort();
     }
 
-    // 3. Fallback: Peer-wire BEP 9 (`ut_metadata`) exchange directly from BitTorrent swarm!
-    if let Some(hash_bytes) = parse_hex_hash_20(&hash) {
-        let trackers = extract_magnet_trackers(magnet_uri);
-        if let Ok(bep9_bytes) = fetch_metadata_via_bep9(hash_bytes, &trackers).await {
-            if let Ok(mut guard) = torrent_meta_cache().lock() {
-                guard.insert(hash, bep9_bytes.clone());
-            }
-            return Ok(bep9_bytes);
-        }
-    }
-
-    bail!("Could not retrieve .torrent metadata for info_hash {hash}")
+    bail!("Couldn't get this release's metadata — no cache, indexer or peer had it. Try another release.")
 }
 
 fn resolve_destination_path(
@@ -3222,7 +3993,11 @@ fn resolve_destination_path(
     }
 
     let first_lib_root: Option<String> = conn
-        .query_row("SELECT path FROM library_folders ORDER BY id LIMIT 1", [], |r| r.get(0))
+        .query_row(
+            "SELECT path FROM library_folders ORDER BY id LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
         .ok();
     let show_title: String = conn
         .query_row(
@@ -3239,7 +4014,10 @@ fn resolve_destination_path(
     }
 
     // Fallback if user has no library folders configured yet: create `Downloads` in data_dir
-    let dl_dir = st.data_dir.join("downloads").join(sanitize_filename(&show_title));
+    let dl_dir = st
+        .data_dir
+        .join("downloads")
+        .join(sanitize_filename(&show_title));
     std::fs::create_dir_all(&dl_dir)?;
     Ok(dl_dir.join(file_name))
 }
@@ -3306,7 +4084,8 @@ pub async fn start_torrent_session(
 
     let first_piece = (meta.target_file_offset / meta.piece_length) as usize;
     let last_byte = (meta.target_file_offset + meta.target_file_length).saturating_sub(1);
-    let last_piece = ((last_byte / meta.piece_length) as usize).min(meta.pieces.len().saturating_sub(1));
+    let last_piece =
+        ((last_byte / meta.piece_length) as usize).min(meta.pieces.len().saturating_sub(1));
 
     let num_pieces = meta.pieces.len();
     let session_id = format!("{:x}-{anilist_id}-{ep_key}", db::now());
@@ -3386,10 +4165,12 @@ async fn run_swarm_orchestrator(
     // begin connecting to seeders within ~100ms instead of waiting for slow trackers.
     let (peer_tx, mut peer_rx) = tokio::sync::mpsc::unbounded_channel::<SocketAddr>();
     spawn_tracker_peer_discovery(&session.meta, &peer_id, peer_tx.clone());
+    // DHT runs alongside trackers; it stops by itself once this orchestrator drops `peer_rx`.
+    crate::dht::spawn_get_peers(session.meta.info_hash, peer_tx.clone(), Duration::from_secs(30), None);
+    let mut last_discovery_t = std::time::Instant::now();
 
     let mut seen_peers: HashSet<SocketAddr> = HashSet::new();
     let mut peer_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    let mut ticks = 0u64;
 
     // Also auto-fetch Japanese subtitles from Jimaku if enabled, key is configured,
     // and this episode does not already have a saved subtitle in `linked_subtitles`.
@@ -3405,7 +4186,8 @@ async fn run_swarm_orchestrator(
             .flatten()
             .map(|k| !k.trim().is_empty())
             .unwrap_or(false);
-        let already_saved = crate::subtitles::has_saved_subtitle(&conn, session.anilist_id, &session.ep_key);
+        let already_saved =
+            crate::subtitles::has_saved_subtitle(&conn, session.anilist_id, &session.ep_key);
         enabled && has_key && !already_saved
     };
 
@@ -3414,15 +4196,16 @@ async fn run_swarm_orchestrator(
         let anilist_id = session.anilist_id;
         let ep_key = session.ep_key.clone();
         tokio::spawn(async move {
-            if let Ok(res) = crate::subtitles::jimaku_search_files(&st_sub, anilist_id, episode_num).await {
-                if let Some(best) = res.files.into_iter().find(|f| !f.is_rar && f.match_score >= 50) {
+            if let Ok(res) =
+                crate::subtitles::jimaku_search_files(&st_sub, anilist_id, episode_num).await
+            {
+                if let Some(best) = res
+                    .files
+                    .into_iter()
+                    .find(|f| !f.is_rar && f.match_score >= 50)
+                {
                     let _ = crate::subtitles::jimaku_download_and_process(
-                        &st_sub,
-                        anilist_id,
-                        &ep_key,
-                        &best.name,
-                        &best.url,
-                        true,
+                        &st_sub, anilist_id, &ep_key, &best.name, &best.url, true,
                     )
                     .await;
                 }
@@ -3463,21 +4246,22 @@ async fn run_swarm_orchestrator(
             }
         }
 
-        if start_t.elapsed() >= Duration::from_secs(6) && seen_peers.is_empty() {
+        if start_t.elapsed() >= Duration::from_secs(15) && seen_peers.is_empty() {
             for h in &peer_handles {
                 h.abort();
             }
             *session.state_str.lock().unwrap() = "error".into();
-            *session.error_str.lock().unwrap() = Some("No active peers returned by trackers".into());
+            *session.error_str.lock().unwrap() =
+                Some("No peers found for this release (trackers and DHT) — trying next source…".into());
             sessions_map().lock().unwrap().remove(&session.id);
             let _ = app.emit("torrent-progress", session.status());
             return;
         }
 
-        // Fast dead-swarm failover: if trackers returned stale/NAT-locked peers that haven't
-        // transferred any bytes after 8.5 seconds, fail fast so the UI can auto-try the next candidate!
+        // Fast dead-swarm failover: if no peer has transferred a single byte after 13 seconds
+        // (enough time for DHT peers to arrive), fail so the UI can auto-try the next candidate.
         if !launched_player
-            && start_t.elapsed() >= Duration::from_millis(8500)
+            && start_t.elapsed() >= Duration::from_secs(13)
             && session.wire_rx_bytes.load(Ordering::Relaxed) == 0
             && session.downloaded_bytes.load(Ordering::Relaxed) == 0
         {
@@ -3522,16 +4306,28 @@ async fn run_swarm_orchestrator(
             last_speed_t = std::time::Instant::now();
             session.speed_bps.store(speed, Ordering::Relaxed);
             session.upload_speed_bps.store(up_speed, Ordering::Relaxed);
-            ticks += 1;
-            // Re-announce if active unchoked peer count drops low
-            if ticks % 30 == 0 && session.active_peers.load(Ordering::Relaxed) < 12 {
+            // Keep the peer supply topped up: re-announce to trackers and walk the DHT again
+            // whenever the number of working peers drops low (at most every 20 s).
+            if session.active_peers.load(Ordering::Relaxed) < 12
+                && last_discovery_t.elapsed() >= Duration::from_secs(20)
+            {
+                last_discovery_t = std::time::Instant::now();
                 seen_peers.clear();
                 spawn_tracker_peer_discovery(&session.meta, &peer_id, peer_tx.clone());
+                crate::dht::spawn_get_peers(
+                    session.meta.info_hash,
+                    peer_tx.clone(),
+                    Duration::from_secs(20),
+                    None,
+                );
             }
         }
 
         // Launch player as soon as initial pieces are buffered in "stream" or "hybrid" mode
-        if !launched_player && (session.mode == "stream" || session.mode == "hybrid") && session.is_ready_to_stream() {
+        if !launched_player
+            && (session.mode == "stream" || session.mode == "hybrid")
+            && session.is_ready_to_stream()
+        {
             launched_player = true;
             *session.state_str.lock().unwrap() = "streaming".into();
             let _ = app.emit("torrent-progress", session.status());
@@ -3563,7 +4359,9 @@ async fn run_swarm_orchestrator(
             // If mode is "hybrid" or "download", trigger a rescan so the downloaded file is linked in library
             if session.mode == "hybrid" || session.mode == "download" {
                 // Attempt auto-retime on any linked Japanese subtitles now that the full .mkv is on disk
-                if let Ok(subs) = crate::subtitles::list_linked_subtitles(&st.db(), session.anilist_id) {
+                if let Ok(subs) =
+                    crate::subtitles::list_linked_subtitles(&st.db(), session.anilist_id)
+                {
                     for sub in subs.into_iter().filter(|s| s.ep_key == session.ep_key) {
                         let sub_path = Path::new(&sub.path);
                         let _ = crate::subtitles::retime_subtitle_file(
@@ -3607,6 +4405,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn search_helpers_keep_relevant_low_seeder_releases() {
+        // SubsPlease searches by show name — episode tokens must be stripped.
+        assert_eq!(strip_episode_from_query("Sousou no Frieren 05"), "Sousou no Frieren");
+        assert_eq!(strip_episode_from_query("Kusuriya no Hitorigoto S2 05"), "Kusuriya no Hitorigoto");
+        assert_eq!(strip_episode_from_query("Dandadan S01E05"), "Dandadan");
+        assert_eq!(strip_episode_from_query("Frieren"), "Frieren");
+
+        // A correct-episode release with stale "0 seeders" must stay visible (just ranked low)...
+        let known = vec!["Sousou no Frieren".to_string()];
+        let title = "[SubsPlease] Sousou no Frieren - 05 (1080p) [ABCD1234].mkv";
+        let s0 = score_candidate_with_context(
+            title, Some("SubsPlease"), Some("1080p"), 0, 1_400 * 1024 * 1024, false, 5, None, false, "1080p", &known,
+        );
+        assert!(is_relevant_candidate(s0, 0));
+        // ...while the wrong episode is still filtered out.
+        let wrong = score_candidate_with_context(
+            title, Some("SubsPlease"), Some("1080p"), 200, 1_400 * 1024 * 1024, false, 9, None, false, "1080p", &known,
+        );
+        assert!(!is_relevant_candidate(wrong, 200));
+    }
+
+    #[test]
     fn sha1_matches_rfc3174_vectors() {
         assert_eq!(
             hex_encode(&sha1_digest(b"abc")),
@@ -3628,7 +4448,10 @@ mod tests {
         assert_eq!(meta.total_length, 1_048_576);
         assert_eq!(meta.piece_length, 262_144);
         assert_eq!(meta.pieces.len(), 1);
-        assert!(meta.trackers.iter().any(|t| t == "http://tracker.example/ann"));
+        assert!(meta
+            .trackers
+            .iter()
+            .any(|t| t == "http://tracker.example/ann"));
     }
 
     #[test]
@@ -3639,13 +4462,32 @@ mod tests {
         assert_eq!(res.as_deref(), Some("1080p"));
         assert!(!batch);
 
-        let s_match = score_candidate(title, group.as_deref(), res.as_deref(), 150, batch, 25, "1080p");
-        let s_wrong_ep = score_candidate(title, group.as_deref(), res.as_deref(), 150, batch, 12, "1080p");
+        let s_match = score_candidate(
+            title,
+            group.as_deref(),
+            res.as_deref(),
+            150,
+            batch,
+            25,
+            "1080p",
+        );
+        let s_wrong_ep = score_candidate(
+            title,
+            group.as_deref(),
+            res.as_deref(),
+            150,
+            batch,
+            12,
+            "1080p",
+        );
         assert!(s_match > 1500);
         assert!(s_wrong_ep < 0);
 
         // Season 2 episode 1 matching continuous episode 25 via `abs_episode`
-        let known = vec!["Kusuriya no Hitorigoto 2nd Season".to_string(), "The Apothecary Diaries Season 2".to_string()];
+        let known = vec![
+            "Kusuriya no Hitorigoto 2nd Season".to_string(),
+            "The Apothecary Diaries Season 2".to_string(),
+        ];
         let s_abs = score_candidate_with_context(
             title,
             group.as_deref(),
@@ -3732,13 +4574,27 @@ mod tests {
         let trs = extract_magnet_trackers(Some(
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=http%3A%2F%2Ftracker.example%3A7777%2Fannounce",
         ));
-        assert!(trs.iter().any(|t| t == "http://tracker.example:7777/announce"));
+        assert!(trs
+            .iter()
+            .any(|t| t == "http://tracker.example:7777/announce"));
         assert!(parse_hex_hash_20("0123456789abcdef0123456789abcdef01234567").is_some());
+        // SubsPlease 32-char RFC 4648 Base32 btih magnet info_hash decoding
+        let sp_hex =
+            normalize_btih_hex("omo5w7qs3cczv23xxa76jrl6hnspnmlb").expect("valid base32 btih");
+        assert_eq!(sp_hex.len(), 40);
+        assert_eq!(
+            parse_hex_hash_20("omo5w7qs3cczv23xxa76jrl6hnspnmlb"),
+            parse_hex_hash_20(&sp_hex)
+        );
 
         // Modular extension URL classification & BEP 11 PEX compact peer parsing
         let ext_rss = build_extension_from_url("https://example-rss.org", None, None);
         assert_eq!(ext_rss.kind, "rss");
-        let ext_sd = build_extension_from_url("https://releases.moe/api/collections/entries/records", None, None);
+        let ext_sd = build_extension_from_url(
+            "https://releases.moe/api/collections/entries/records",
+            None,
+            None,
+        );
         assert_eq!(ext_sd.kind, "seadex-api");
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

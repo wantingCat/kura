@@ -1,129 +1,139 @@
-/* Kura design system ------------------------------------------------------
- * Derived from the logo: plum-brown ink (#453033), coral (#F76D4D), cream,
- * and the cat's pink. Flat surfaces, chunky radii and solid "sticker"
- * offset shadows — no gradients, glass or glows.
+/* Kura Design System ------------------------------------------------------
+ * Cinematic dark: near-black canvas, blurred key-art backdrops, white primary
+ * actions, and a single warm orange accent for progress, badges & focus.
  * ------------------------------------------------------------------------ */
 
 :root {
-  /* Brand */
-  --coral: #f76d4d;
-  --coral-hi: #ff8466;
-  --coral-lo: #d9553a;
-  --plum: #453033; /* exact kanji ink */
-  --pink: #f8b9ba; /* cat ear / paw */
-  --cream: #f7ede2;
+  /* Brand accent */
+  --coral: #f97316;
+  --coral-hi: #fb8a3c;
+  --coral-lo: #ea580c;
+  --plum: #121218;
+  --pink: #fb923c;
+  --cream: #f3f3f5;
 
-  /* Surfaces (plum family, darkest → lightest) */
-  --line: #140c0d; /* sticker outlines + offset shadows */
-  --bg: #1d1415;
-  --bg-elev: #241819;
-  --surface: #2c1f21;
-  --surface-2: #362628;
-  --surface-3: #453033;
-  --border: #3d2b2e;
-  --border-strong: #5a4145;
+  /* Surfaces (darkest → lightest) */
+  --line: rgba(255, 255, 255, 0.07);
+  --ink: rgba(255, 255, 255, 0.12);
+  --shadow-color: rgba(0, 0, 0, 0.6);
+  --bg: #08080b;
+  --bg-elev: #0d0d12;
+  --bg-2: #101016;
+  --surface: #121218;
+  --surface-2: #1a1a22;
+  --surface-3: #24242e;
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.14);
 
   /* Text */
-  --text: var(--cream);
-  --text-2: #cdbab0;
-  --text-3: #93807b;
-  --on-coral: #2a1719;
-
-  /* Status */
-  --ok: #8fcf9a;
-  --amber: #f5b84d;
-  --danger: #ff6b6b;
-
-  /* Legacy aliases (kept so older component styles map onto the brand) */
-  --sakura: var(--coral);
-  --violet: var(--coral);
-  --sky: var(--pink);
-  --mint: var(--ok);
-  --accent: var(--coral);
-  --grad: var(--coral);
-  --grad-soft: color-mix(in srgb, var(--coral) 14%, transparent);
-  --glass: var(--surface);
-  --blur: none;
-
-  /* Shape & depth */
-  --r-sm: 10px;
-  --r-md: 14px;
-  --r-lg: 20px;
-  --r-xl: 28px;
-  --bw: 2px;
-  --sticker: 3px 3px 0 var(--line);
-  --sticker-lg: 5px 5px 0 var(--line);
-  --shadow-sm: var(--sticker);
-  --shadow-md: var(--sticker);
-  --shadow-lg: var(--sticker-lg);
-
-  /* Type */
-  --font: "Nunito Variable", "Segoe UI", system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", "Noto Sans CJK JP", sans-serif;
-  --font-display: "Fredoka Variable", var(--font);
-  --font-jp: "Hiragino Sans", "Yu Gothic UI", "Meiryo", "Noto Sans CJK JP", "Noto Sans JP", var(--font);
-
-  /* Motion */
-  --ease: cubic-bezier(0.22, 1, 0.36, 1);
-  --bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --t-fast: 140ms;
-  --t-med: 260ms;
-
-  --sidebar-w: 240px;
-  color-scheme: dark;
-}
-
-/* Manga Mode (Light Theme — Authentic Printed Manga / Tankōbon) ------------
- * Warm off-white newsprint/manga paper (#f5f2eb), deep sumi ink linework (#12100e),
- * screentone paper shades (#ece8df, #ded8cb), and a vibrant Japanese vermilion
- * red stamp seal (#e53935) accent.
- * ------------------------------------------------------------------------ */
-:root[data-theme="manga"],
-[data-theme="manga"] {
-  /* Brand */
-  --coral: #e53935; /* Japanese vermilion / cinnabar seal stamp */
-  --coral-hi: #ef5350;
-  --coral-lo: #c62828;
-  --plum: #2c2523;
-  --pink: #f48fb1;
-  --cream: #141210;
-
-  /* Surfaces (authentic manga paper / newsprint / screentone) */
-  --line: #12100e; /* deep sumi ink line art + crisp offset sticker shadows */
-  --bg: #f5f2eb; /* warm manga newsprint paper */
-  --bg-elev: #ffffff; /* pure page white */
-  --surface: #ffffff;
-  --surface-2: #ece8df; /* light screentone shading */
-  --surface-3: #ded8cb; /* darker tone shading / chip fills */
-  --border: #dcd6c9; /* soft panel divider line */
-  --border-strong: #12100e;
-
-  /* Text (sumi ink & pencil wash) */
-  --text: #141210; /* deep sumi black */
-  --text-2: #4a453f; /* pencil tone */
-  --text-3: #7c766d; /* screentone grey */
+  --text: #f3f3f5;
+  --text-2: #a3a3ae;
+  --text-3: #6b6b78;
   --on-coral: #ffffff;
 
+  /* Primary action (white, like a player's main button) */
+  --primary: #f3f3f5;
+  --primary-hi: #ffffff;
+  --on-primary: #08080b;
+
   /* Status */
-  --ok: #2e7d32;
-  --amber: #d84315;
-  --danger: #c62828;
+  --ok: #34d399;
+  --amber: #fbbf24;
+  --danger: #f87171;
 
   /* Legacy aliases */
   --sakura: var(--coral);
   --violet: var(--coral);
-  --sky: #1976d2;
+  --sky: #38bdf8;
   --mint: var(--ok);
   --accent: var(--coral);
-  --grad: var(--coral);
-  --grad-soft: color-mix(in srgb, var(--coral) 12%, transparent);
-  --glass: var(--surface);
-  --blur: none;
+  --grad: linear-gradient(135deg, #f97316 0%, #fb923c 100%);
+  --grad-soft: color-mix(in srgb, var(--coral) 14%, transparent);
+  --coral-soft: color-mix(in srgb, var(--coral) 14%, transparent);
+  --glass: rgba(255, 255, 255, 0.08);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --blur: blur(14px);
 
-  color-scheme: light;
+  /* Shape & depth */
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 18px;
+  --bw: 1px;
+  --sticker: 0 10px 28px -10px rgba(0, 0, 0, 0.7);
+  --sticker-lg: 0 24px 56px -16px rgba(0, 0, 0, 0.85);
+  --shadow-sm: 0 4px 14px -4px rgba(0, 0, 0, 0.5);
+  --shadow-md: var(--sticker);
+  --shadow-lg: var(--sticker-lg);
+
+  /* Typography */
+  --font: "Inter Variable", "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", "Noto Sans CJK JP", sans-serif;
+  --font-display: "Inter Variable", "Inter", "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-jp: "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif CJK JP", "Hiragino Sans", "Yu Gothic UI", "Meiryo", serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, SFMono-Regular, Consolas, monospace;
+
+  /* Motion */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --bounce: cubic-bezier(0.22, 1, 0.36, 1);
+  --t-fast: 140ms;
+  --t-med: 240ms;
+
+  --sidebar-w: 64px;
+  --page-x: 48px;
+  color-scheme: dark;
 }
 
-[data-theme="manga"] .input {
-  box-shadow: inset 1.5px 1.5px 0 hsl(0 0% 0% / 0.08);
+/* Manga Editorial Mode (Light Theme — Printed Tankōbon & Sumi Hairlines) -- */
+:root[data-theme="manga"],
+[data-theme="manga"] {
+  --coral: #d93829;
+  --coral-hi: #e54839;
+  --coral-lo: #b82b1e;
+  --plum: #24201d;
+  --pink: #e57373;
+  --cream: #141210;
+
+  --line: rgba(20, 18, 16, 0.12);
+  --ink: rgba(20, 18, 16, 0.22);
+  --shadow-color: rgba(20, 18, 16, 0.08);
+  --bg: #f6f4ef;
+  --bg-elev: #ffffff;
+  --bg-2: #efece4;
+  --surface: #ffffff;
+  --surface-2: #f0ede5;
+  --surface-3: #e4e0d5;
+  --border: rgba(20, 18, 16, 0.11);
+  --border-strong: rgba(20, 18, 16, 0.24);
+
+  --text: #141210;
+  --text-2: #4c4741;
+  --text-3: #7d766d;
+  --on-coral: #ffffff;
+  --primary: #141210;
+  --primary-hi: #2a2622;
+  --on-primary: #ffffff;
+  --glass-border: rgba(20, 18, 16, 0.12);
+  --coral-soft: color-mix(in srgb, var(--coral) 11%, transparent);
+
+  --ok: #15803d;
+  --amber: #d97706;
+  --danger: #dc2626;
+
+  --sakura: var(--coral);
+  --violet: var(--coral);
+  --sky: #0284c7;
+  --mint: var(--ok);
+  --accent: var(--coral);
+  --grad: linear-gradient(135deg, #d93829 0%, #ef5350 100%);
+  --grad-soft: color-mix(in srgb, var(--coral) 11%, transparent);
+  --glass: rgba(255, 255, 255, 0.85);
+  --blur: blur(16px);
+
+  --sticker: 0 6px 20px -6px rgba(20, 18, 16, 0.09);
+  --sticker-lg: 0 16px 38px -10px rgba(20, 18, 16, 0.14);
+
+  color-scheme: light;
 }
 
 [data-theme="manga"] ::-webkit-scrollbar-thumb {
@@ -148,7 +158,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
-  font-size: 14.5px;
+  font-size: 14px;
   font-weight: 500;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -161,9 +171,9 @@ h2,
 h3,
 h4 {
   font-family: var(--font-display);
-  font-weight: 600;
+  font-weight: 700;
   margin: 0;
-  letter-spacing: 0;
+  letter-spacing: -0.02em;
   line-height: 1.15;
 }
 
@@ -193,6 +203,13 @@ img {
   font-family: var(--font-jp);
 }
 
+.tategaki {
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+  font-family: var(--font-jp);
+  letter-spacing: 0.14em;
+}
+
 ::selection {
   background: var(--coral);
   color: var(--on-coral);
@@ -205,13 +222,13 @@ img {
 
 /* Scrollbars */
 ::-webkit-scrollbar {
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--surface-3);
   border-radius: 99px;
-  border: 3px solid transparent;
+  border: 2px solid transparent;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
@@ -221,57 +238,85 @@ img {
   background: transparent;
 }
 
-/* Buttons -----------------------------------------------------------------
- * Sticker buttons: solid fill, dark outline, offset shadow that "presses". */
+/* Buttons ----------------------------------------------------------------- */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  height: 40px;
+  height: 38px;
   padding: 0 16px;
-  border-radius: var(--r-md);
-  border: var(--bw) solid var(--line);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
   background: var(--surface-2);
   color: var(--text);
   font-family: var(--font-display);
   font-weight: 600;
-  font-size: 14.5px;
+  font-size: 13.5px;
+  letter-spacing: -0.01em;
   cursor: pointer;
   white-space: nowrap;
-  box-shadow: var(--sticker);
   transition:
     background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease),
     transform var(--t-fast) var(--ease),
     box-shadow var(--t-fast) var(--ease),
     color var(--t-fast) var(--ease);
 }
 .btn:hover {
   background: var(--surface-3);
-  transform: translate(-1px, -1px);
-  box-shadow: 4px 4px 0 var(--line);
+  border-color: rgba(255, 255, 255, 0.24);
+  transform: translateY(-1px);
 }
 .btn:active {
-  transform: translate(2px, 2px);
-  box-shadow: 1px 1px 0 var(--line);
+  transform: translateY(0);
 }
 .btn:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
   transform: none;
-  box-shadow: var(--sticker);
 }
 .btn svg {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   flex: none;
 }
 .btn-primary {
-  background: var(--coral);
-  color: var(--on-coral);
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--on-primary);
+  box-shadow: none;
 }
 .btn-primary:hover {
+  background: var(--primary-hi);
+  border-color: var(--primary-hi);
+  box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.6);
+}
+.btn-accent {
+  background: var(--coral);
+  border-color: var(--coral);
+  color: var(--on-coral);
+}
+.btn-accent:hover {
   background: var(--coral-hi);
+  border-color: var(--coral-hi);
+}
+.btn-glass {
+  background: var(--glass);
+  border-color: var(--glass-border);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  color: var(--text);
+}
+.btn-glass:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+.btn-lg {
+  height: 44px;
+  padding: 0 22px;
+  font-size: 14.5px;
+  border-radius: var(--r-md);
 }
 .btn-ghost {
   background: transparent;
@@ -281,26 +326,28 @@ img {
 }
 .btn-ghost:hover {
   background: var(--surface-2);
+  border-color: var(--border);
   color: var(--text);
   box-shadow: none;
   transform: none;
 }
 .btn-ghost:active {
   box-shadow: none;
-  transform: translateY(1px);
+  transform: none;
 }
 .btn-danger:hover {
   background: var(--danger);
-  color: var(--on-coral);
+  border-color: var(--danger);
+  color: #fff;
 }
 .btn-sm {
   height: 32px;
   padding: 0 12px;
-  font-size: 13px;
-  border-radius: var(--r-sm);
+  font-size: 12.5px;
+  border-radius: 7px;
 }
 .btn-icon {
-  width: 40px;
+  width: 38px;
   padding: 0;
 }
 .btn-sm.btn-icon {
@@ -309,15 +356,15 @@ img {
 
 /* Inputs ------------------------------------------------------------------ */
 .input {
-  height: 40px;
-  padding: 0 14px;
-  border-radius: var(--r-md);
-  border: var(--bw) solid var(--line);
+  height: 38px;
+  padding: 0 13px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
   background: var(--bg-elev);
   outline: none;
-  box-shadow: inset 2px 2px 0 hsl(0 0% 0% / 0.25);
   transition:
     border-color var(--t-fast) var(--ease),
+    box-shadow var(--t-fast) var(--ease),
     background var(--t-fast) var(--ease);
 }
 .input::placeholder {
@@ -326,6 +373,7 @@ img {
 .input:focus {
   border-color: var(--coral);
   background: var(--surface);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--coral) 18%, transparent);
 }
 
 /* Chips & badges ---------------------------------------------------------- */
@@ -333,40 +381,40 @@ img {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 32px;
-  padding: 0 14px;
+  height: 30px;
+  padding: 0 13px;
   border-radius: 99px;
-  border: var(--bw) solid var(--border);
+  border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-2);
   font-family: var(--font-display);
-  font-size: 13.5px;
-  font-weight: 500;
+  font-size: 12.5px;
+  font-weight: 600;
   cursor: pointer;
   transition: all var(--t-fast) var(--ease);
 }
 .chip:hover {
   color: var(--text);
+  background: var(--surface-2);
   border-color: var(--border-strong);
 }
 .chip.active {
-  background: var(--coral);
-  border-color: var(--line);
-  color: var(--on-coral);
-  box-shadow: 2px 2px 0 var(--line);
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--on-primary);
 }
 .chip.active .chip-count {
-  color: color-mix(in srgb, var(--on-coral) 70%, transparent);
+  color: color-mix(in srgb, var(--on-primary) 60%, transparent);
 }
 .badge {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  height: 22px;
+  height: 21px;
   padding: 0 8px;
-  border-radius: 7px;
-  font-size: 11px;
-  font-weight: 800;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   background: var(--surface-3);
@@ -378,30 +426,32 @@ img {
 }
 .badge-warn {
   background: var(--amber);
-  color: var(--on-coral);
+  color: #141210;
 }
 .badge-ok {
-  background: var(--ok);
-  color: var(--on-coral);
+  background: color-mix(in srgb, var(--ok) 20%, var(--surface-2));
+  color: var(--ok);
+  border: 1px solid color-mix(in srgb, var(--ok) 38%, transparent);
 }
 
 /* Layout helpers ---------------------------------------------------------- */
 .page {
-  padding: 28px 36px 64px;
-  max-width: 1680px;
+  padding: 32px var(--page-x) 64px;
+  max-width: 1800px;
   margin: 0 auto;
 }
 .section-title {
   display: flex;
   align-items: baseline;
   gap: 10px;
-  margin: 0 0 14px;
-  font-size: 21px;
-  font-weight: 600;
+  margin: 0 0 12px;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
 .section-title .count {
-  font-family: var(--font);
-  font-size: 13px;
+  font-family: var(--font-mono);
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-3);
 }
@@ -413,7 +463,7 @@ img {
 }
 .card {
   background: var(--surface);
-  border: var(--bw) solid var(--line);
+  border: 1px solid var(--border);
   border-radius: var(--r-lg);
   box-shadow: var(--sticker);
 }
@@ -430,7 +480,7 @@ img {
 @keyframes fade-up {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
@@ -484,7 +534,7 @@ img {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  border: 2.5px solid var(--surface-3);
+  border: 2px solid var(--surface-3);
   border-top-color: var(--coral);
   animation: spin 0.8s linear infinite;
   flex: none;
@@ -500,8 +550,8 @@ img {
   border-width: 1.5px;
 }
 .btn-primary .spinner {
-  border-color: rgba(255, 255, 255, 0.35);
-  border-top-color: #ffffff;
+  border-color: color-mix(in srgb, var(--on-primary) 30%, transparent);
+  border-top-color: var(--on-primary);
 }
 .btn-primary.launching {
   opacity: 0.85;

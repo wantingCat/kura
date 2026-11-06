@@ -234,9 +234,9 @@ pub fn cleanup_watched_subtitles(conn: &Connection, data_dir: &Path) -> usize {
         let Ok(mut stmt) = conn.prepare(
             "SELECT ls.id, ls.anilist_id, ls.ep_key, ls.path, ls.source
              FROM linked_subtitles ls
-             INNER JOIN episodes e
-               ON e.anilist_id = ls.anilist_id AND e.ep_key = ls.ep_key
-             WHERE e.watched_at IS NOT NULL",
+             INNER JOIN watch_state ws
+               ON ws.anilist_id = ls.anilist_id AND ws.ep_key = ls.ep_key
+             WHERE ws.watched_at IS NOT NULL",
         ) else {
             return 0;
         };
@@ -1271,6 +1271,16 @@ impl AlignmentModel {
 fn span_overlap_score(sp: Span, offset_ms: i64, ref_spans: &[Span]) -> i64 {
     let s = sp.start_ms + offset_ms;
     let e = sp.end_ms + offset_ms;
+    if e < 0 {
+        // Penalize offsets that push leading dialogue lines into negative timestamps (< 0:00.000)
+        return -400;
+    }
+    if let Some(first_ref) = ref_spans.first() {
+        if e < first_ref.start_ms - 1_000 {
+            // Penalize offsets that strand leading dialogue lines inside a silent pre-dialogue intro bumper
+            return -300;
+        }
+    }
     // Binary search for first reference span whose end_ms > s - 500
     let idx = ref_spans.partition_point(|r| r.end_ms < s - 500);
     let mut best = 0;
@@ -1402,10 +1412,13 @@ pub fn align_subtitle_spans(target: &[Span], reference: &[Span]) -> Option<Align
         dp[0][j] = span_overlap_score(target[0], candidates[j], reference);
     }
 
+    let allow_splits = reference.len() >= 15 && target.len() >= 20;
     for i in 1..n {
         // Larger gap between target cues (e.g. >= 5s commercial break / OP) reduces split penalty slightly
         let gap_ms = (target[i].start_ms - target[i - 1].end_ms).max(0);
-        let penalty = if gap_ms >= 5_000 {
+        let penalty = if !allow_splits {
+            i64::MAX / 8
+        } else if gap_ms >= 5_000 {
             split_penalty * 2 / 3
         } else {
             split_penalty
@@ -1415,14 +1428,16 @@ pub fn align_subtitle_spans(target: &[Span], reference: &[Span]) -> Option<Align
             let cue_sc = span_overlap_score(target[i], candidates[j], reference);
             let mut best_prev = dp[i - 1][j];
             let mut best_idx = j;
-            for p in 0..k {
-                if p == j {
-                    continue;
-                }
-                let cand_val = dp[i - 1][p] - penalty;
-                if cand_val > best_prev {
-                    best_prev = cand_val;
-                    best_idx = p;
+            if allow_splits {
+                for p in 0..k {
+                    if p == j {
+                        continue;
+                    }
+                    let cand_val = dp[i - 1][p] - penalty;
+                    if cand_val > best_prev {
+                        best_prev = cand_val;
+                        best_idx = p;
+                    }
                 }
             }
             dp[i][j] = best_prev + cue_sc;
@@ -1430,8 +1445,10 @@ pub fn align_subtitle_spans(target: &[Span], reference: &[Span]) -> Option<Align
         }
     }
 
-    // Backtrack
-    let mut cur_j = (0..k).max_by_key(|&j| dp[n - 1][j]).unwrap_or(0);
+    // Backtrack (break exact score ties in favor of smaller absolute offset)
+    let mut cur_j = (0..k)
+        .max_by_key(|&j| (dp[n - 1][j], -candidates[j].abs()))
+        .unwrap_or(0);
     let mut path = vec![0usize; n];
     path[n - 1] = cur_j;
     for i in (1..n).rev() {
@@ -1458,7 +1475,7 @@ pub fn align_subtitle_spans(target: &[Span], reference: &[Span]) -> Option<Align
 
     let primary_offset_ms = off_counts
         .into_iter()
-        .max_by_key(|&(_, count)| count)
+        .max_by_key(|&(off, count)| (count, -off.abs()))
         .map(|(off, _)| off)
         .unwrap_or(0);
 
@@ -2110,7 +2127,7 @@ pub async fn jimaku_search_files(
             .optional()
             .ok()
             .flatten()
-            .filter(|(_, ts)| now() - *ts < 1800)
+            .filter(|(_, ts)| now() - *ts < 600)
             .and_then(|(p, _)| serde_json::from_str(&p).ok())
         };
         match cached {
@@ -2464,8 +2481,43 @@ pub async fn jimaku_download_and_process(
     })
 }
 
+/// Check if Japanese subtitles for `(anilist_id, episode)` are available on Jimaku,
+/// and if so, prefetch & link them into `linked_subtitles` so they are ready immediately.
+pub async fn check_and_prefetch_jimaku_episode(
+    st: &AppState,
+    anilist_id: i64,
+    episode: i64,
+) -> bool {
+    let ep_key = episode.to_string();
+    if has_saved_subtitle(&st.db(), anilist_id, &ep_key) {
+        return true;
+    }
+    let has_key = {
+        let conn = st.db();
+        let _ = conn.execute_batch(db::SCHEMA_V6);
+        get_jimaku_api_key(&conn).is_some()
+    };
+    if !has_key {
+        return false;
+    }
+
+    let Ok(resp) = jimaku_search_files(st, anilist_id, Some(episode)).await else {
+        return false;
+    };
+    let Some(best) = resp
+        .files
+        .iter()
+        .find(|f| !f.is_rar && f.detected_episode == Some(episode) && f.match_score >= 100)
+    else {
+        return false;
+    };
+
+    let _ = jimaku_download_and_process(st, anilist_id, &ep_key, &best.name, &best.url, false).await;
+    true
+}
+
 // ---------------------------------------------------------------------------
-// 4. Subtitle Cue Text Parser for Built-in Memento Player
+// 4. Subtitle Cue Text Parser for Built-in Player
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3178,6 +3230,131 @@ pub fn extract_mkv_embedded_data(mkv_path: &Path) -> Result<MkvEmbeddedData> {
     })
 }
 
+/// Locate the exact byte offsets of each audio `TrackEntry`'s 1-byte `TrackType` (`0x02`) value
+/// inside the initial Matroska header bytes (`<= 64 KiB`), in 1-based `aid` order (`aid=1` -> index `0`).
+pub fn find_mkv_audio_track_type_offsets(header_bytes: &[u8]) -> Vec<usize> {
+    let mut cur = std::io::Cursor::new(header_bytes);
+    let total_len = header_bytes.len() as u64;
+
+    let Ok((ebml_id, _)) = read_ebml_vint(&mut cur, true) else {
+        return Vec::new();
+    };
+    if ebml_id != 0x1A45DFA3 {
+        return Vec::new();
+    }
+    let Ok((ebml_size, _)) = read_ebml_vint(&mut cur, false) else {
+        return Vec::new();
+    };
+    if cur.seek(SeekFrom::Current(ebml_size as i64)).is_err() {
+        return Vec::new();
+    }
+    let Ok((seg_id, _)) = read_ebml_vint(&mut cur, true) else {
+        return Vec::new();
+    };
+    if seg_id != 0x18538067 {
+        return Vec::new();
+    }
+    if read_ebml_vint(&mut cur, false).is_err() {
+        return Vec::new();
+    }
+
+    let mut audio_offsets = Vec::new();
+    while cur.position() < total_len {
+        let Ok((id, _)) = read_ebml_vint(&mut cur, true) else {
+            break;
+        };
+        let Ok((size, _)) = read_ebml_vint(&mut cur, false) else {
+            break;
+        };
+        let data_start = cur.position();
+        let is_unknown_size = size == 0x00FF_FFFF_FFFF_FFFF || size == 0x7FFF_FFFF_FFFF_FFFF;
+        let elem_end = if is_unknown_size {
+            total_len
+        } else {
+            (data_start + size).min(total_len)
+        };
+
+        if id == 0x1654AE6B {
+            // Tracks element
+            while cur.position() < elem_end {
+                let Ok((entry_id, _)) = read_ebml_vint(&mut cur, true) else {
+                    break;
+                };
+                let Ok((entry_sz, _)) = read_ebml_vint(&mut cur, false) else {
+                    break;
+                };
+                let entry_start = cur.position();
+                let entry_end = (entry_start + entry_sz).min(elem_end);
+                if entry_id == 0xAE {
+                    let mut audio_type_pos: Option<usize> = None;
+                    while cur.position() < entry_end {
+                        let Ok((tid, _)) = read_ebml_vint(&mut cur, true) else {
+                            break;
+                        };
+                        let Ok((tsz, _)) = read_ebml_vint(&mut cur, false) else {
+                            break;
+                        };
+                        let tstart = cur.position();
+                        if tid == 0x83 && tsz == 1 {
+                            if let Ok(ttype) = read_ebml_uint(&mut cur, 1) {
+                                if ttype == 2 {
+                                    audio_type_pos = Some(tstart as usize);
+                                }
+                            }
+                        }
+                        let _ = cur.seek(SeekFrom::Start((tstart + tsz).min(entry_end)));
+                    }
+                    if let Some(pos) = audio_type_pos {
+                        audio_offsets.push(pos);
+                    }
+                }
+                let _ = cur.seek(SeekFrom::Start(entry_end));
+            }
+            break;
+        } else if id == 0x1F43B675 {
+            // Reached Cluster without seeing Tracks
+            break;
+        } else {
+            if elem_end <= data_start {
+                break;
+            }
+            let _ = cur.seek(SeekFrom::Start(elem_end));
+        }
+    }
+
+    audio_offsets
+}
+
+/// Mask unselected audio tracks in-place (`TrackType 0x02 -> 0xFE`) within an HTTP 206 byte-range chunk
+/// so Chromium/WebView2's native `<video>` demuxer plays ONLY `selected_aid` (`1`-based) without transcoding.
+pub fn apply_mkv_audio_track_mask(
+    chunk: &mut [u8],
+    chunk_file_offset: u64,
+    audio_type_offsets: &[usize],
+    selected_aid: i64,
+) {
+    if selected_aid <= 0 || audio_type_offsets.len() <= 1 || chunk.is_empty() {
+        return;
+    }
+    let keep_idx = (selected_aid - 1) as usize;
+    if keep_idx >= audio_type_offsets.len() {
+        return;
+    }
+    let chunk_end = chunk_file_offset + (chunk.len() as u64);
+    for (idx, &file_off) in audio_type_offsets.iter().enumerate() {
+        if idx == keep_idx {
+            continue;
+        }
+        let off_u64 = file_off as u64;
+        if off_u64 >= chunk_file_offset && off_u64 < chunk_end {
+            let rel = (off_u64 - chunk_file_offset) as usize;
+            if chunk[rel] == 0x02 {
+                chunk[rel] = 0xFE;
+            }
+        }
+    }
+}
+
 fn is_distributor_bumper_cue(start_ms: i64, text: &str) -> bool {
     if start_ms > 20_000 {
         return false;
@@ -3608,7 +3785,7 @@ mod tests {
         std::fs::write(&sub_file, "1\n00:00:01,000 --> 00:00:03,000\nフリーレン\n").unwrap();
 
         conn.execute(
-            "INSERT INTO media (anilist_id, title_romaji, updated_at) VALUES (154587, 'Sousou no Frieren', 1)",
+            "INSERT INTO media (anilist_id, title_romaji, fetched_at) VALUES (154587, 'Sousou no Frieren', 1)",
             [],
         )
         .unwrap();
@@ -3644,7 +3821,7 @@ mod tests {
 
         // Mark episode as watched -> `cleanup_watched_subtitles` deletes the file and DB row
         conn.execute(
-            "UPDATE episodes SET watched_at = 1700000000 WHERE anilist_id = 154587 AND ep_key = '1'",
+            "INSERT INTO watch_state (anilist_id, ep_key, watched_at) VALUES (154587, '1', 1700000000)",
             [],
         )
         .unwrap();
@@ -3653,5 +3830,33 @@ mod tests {
         assert!(!has_saved_subtitle(&conn, 154587, "1"));
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn masks_unselected_mkv_audio_tracks_for_zero_transcode_switching() {
+        // Minimal valid Matroska EBML header + Segment + Tracks element with 1 video track (0x01)
+        // and 2 audio tracks (0x02 at aid=1 and 0x02 at aid=2)
+        let mkv_header: Vec<u8> = vec![
+            0x1A, 0x45, 0xDF, 0xA3, 0x84, 0x42, 0x86, 0x81, 0x01, // EBML header (4 bytes payload)
+            0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Segment (unknown size)
+            0x16, 0x54, 0xAE, 0x6B, 0x9A, // Tracks (26 bytes payload)
+            // TrackEntry 1: Video (TrackNumber=1, TrackType=0x01, 8 bytes payload)
+            0xAE, 0x88, 0xD7, 0x81, 0x01, 0x83, 0x81, 0x01, 0xEC, 0x80,
+            // TrackEntry 2: Audio #1 English (TrackNumber=2, TrackType=0x02, 6 bytes payload)
+            0xAE, 0x86, 0xD7, 0x81, 0x02, 0x83, 0x81, 0x02,
+            // TrackEntry 3: Audio #2 Japanese (TrackNumber=3, TrackType=0x02, 6 bytes payload)
+            0xAE, 0x86, 0xD7, 0x81, 0x03, 0x83, 0x81, 0x02,
+        ];
+
+        let offsets = find_mkv_audio_track_type_offsets(&mkv_header);
+        assert_eq!(offsets.len(), 2, "Should find both audio TrackType byte offsets");
+        assert_eq!(mkv_header[offsets[0]], 0x02);
+        assert_eq!(mkv_header[offsets[1]], 0x02);
+
+        // Selecting aid=2 (Japanese) masks aid=1 (`0x02 -> 0xFE`) while keeping aid=2 (`0x02`) intact
+        let mut chunk = mkv_header.clone();
+        apply_mkv_audio_track_mask(&mut chunk, 0, &offsets, 2);
+        assert_eq!(chunk[offsets[0]], 0xFE);
+        assert_eq!(chunk[offsets[1]], 0x02);
     }
 }

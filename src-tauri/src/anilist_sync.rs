@@ -440,9 +440,16 @@ if (h.includes("access_token=")) {
 }
 
 /// Compute local regular watched episode progress for `anilist_id`.
+/// Uses the greater of the total count of watched regular episodes and the highest watched regular episode number
+/// so watching Episode N immediately advances AniList progress to N.
 pub fn local_watched_progress(conn: &Connection, anilist_id: i64) -> i64 {
     conn.query_row(
-        "SELECT COUNT(*) FROM watch_state WHERE anilist_id = ?1 AND ep_key NOT LIKE 'S%' AND ep_key NOT LIKE 'extra:%'",
+        "SELECT MAX(
+            COUNT(*),
+            COALESCE(MAX(CASE WHEN ep_key GLOB '[0-9]*' THEN CAST(ep_key AS INTEGER) ELSE 0 END), 0)
+         )
+         FROM watch_state
+         WHERE anilist_id = ?1 AND ep_key NOT LIKE 'S%' AND ep_key NOT LIKE 'extra:%'",
         [anilist_id],
         |r| r.get(0),
     )
@@ -567,7 +574,7 @@ pub fn reconcile_cached_entries(conn: &Connection) {
     }
 }
 
-/// Enqueue a scrobble when an episode is marked watched locally, and trigger an async flush.
+/// Enqueue a scrobble when an episode is marked watched locally, and trigger an immediate async flush to AniList.
 pub fn on_episode_watched(app: &AppHandle, st: &Arc<AppState>, anilist_id: i64) {
     let should_flush = {
         let conn = st.db();
@@ -593,9 +600,10 @@ pub fn on_episode_watched(app: &AppHandle, st: &Arc<AppState>, anilist_id: i64) 
             remote.as_ref().map(|r| r.status.as_str()),
             true,
         );
-        if !push {
+        if !push && remote.as_ref().map(|r| r.progress) == Some(merged_prog) {
             return;
         }
+        let _ = apply_remote_progress_to_local(&conn, anilist_id, merged_prog);
         let effective_status = status
             .clone()
             .or_else(|| remote.as_ref().map(|r| r.status.clone()))
@@ -622,8 +630,10 @@ pub fn on_episode_watched(app: &AppHandle, st: &Arc<AppState>, anilist_id: i64) 
                progress = MAX(anilist_scrobble_queue.progress, excluded.progress),
                status = COALESCE(excluded.status, anilist_scrobble_queue.status),
                queued_at = excluded.queued_at",
-            params![anilist_id, merged_prog, status, now()],
+            params![anilist_id, merged_prog, Some(effective_status), now()],
         );
+        let updated_acct = get_account(&conn);
+        let _ = app.emit("anilist-changed", &updated_acct);
         true
     };
     if should_flush {
@@ -834,7 +844,8 @@ pub async fn update_entry(
     }))
 }
 
-/// Flush pending scrobbles in `anilist_scrobble_queue` to AniList. Keeps failed items in the queue for when back online.
+/// Flush pending scrobbles in `anilist_scrobble_queue` to AniList immediately.
+/// Keeps failed items in the queue for retry when back online.
 pub async fn flush_queue(app: &AppHandle, st: &Arc<AppState>) -> Result<usize> {
     if FLUSHING.swap(true, Ordering::SeqCst) {
         return Ok(0);
@@ -847,77 +858,83 @@ pub async fn flush_queue(app: &AppHandle, st: &Arc<AppState>) -> Result<usize> {
     }
     let _g = Guard;
 
-    let (token, items): (String, Vec<(i64, i64, Option<String>)>) = {
-        let conn = st.db();
-        let Some(token) = db::get_setting(&conn, "anilist.token")?.filter(|s| !s.is_empty()) else {
-            return Ok(0);
-        };
-        let mut stmt = conn.prepare(
-            "SELECT anilist_id, progress, status FROM anilist_scrobble_queue ORDER BY queued_at ASC",
-        )?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-            .flatten()
-            .collect();
-        (token, rows)
-    };
-
-    if items.is_empty() {
-        return Ok(0);
-    }
-
     let mut flushed = 0usize;
-    for (anilist_id, progress, status) in items {
-        // Never regress if remote entry was updated to a higher progress in the meantime.
-        let remote_prog = get_remote_entry(&st.db(), anilist_id).map(|r| r.progress).unwrap_or(0);
-        if progress <= remote_prog {
-            let _ = st.db().execute("DELETE FROM anilist_scrobble_queue WHERE anilist_id = ?1", [anilist_id]);
-            continue;
+    loop {
+        let (token, items): (String, Vec<(i64, i64, Option<String>)>) = {
+            let conn = st.db();
+            let Some(token) = db::get_setting(&conn, "anilist.token")?.filter(|s| !s.is_empty()) else {
+                break;
+            };
+            let mut stmt = conn.prepare(
+                "SELECT anilist_id, progress, status FROM anilist_scrobble_queue ORDER BY queued_at ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .flatten()
+                .collect();
+            (token, rows)
+        };
+
+        if items.is_empty() {
+            break;
         }
-        match st
-            .providers
-            .anilist_save_entry(&token, anilist_id, progress, status.as_deref())
-            .await
-        {
-            Ok(saved) => {
-                let conn = st.db();
-                let _ = conn.execute(
-                    "INSERT INTO anilist_entries (anilist_id, entry_id, status, progress, score, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT(anilist_id) DO UPDATE SET
-                       entry_id = excluded.entry_id,
-                       status = excluded.status,
-                       progress = excluded.progress,
-                       score = COALESCE(excluded.score, anilist_entries.score),
-                       updated_at = excluded.updated_at",
-                    params![
-                        saved.media_id,
-                        saved.id,
-                        saved.status,
-                        saved.progress,
-                        saved.score,
-                        saved.updated_at.unwrap_or_else(now)
-                    ],
-                );
-                let _ = conn.execute("DELETE FROM anilist_scrobble_queue WHERE anilist_id = ?1", [anilist_id]);
-                crate::klog!("[kura] scrobbled AniList #{anilist_id} → ep {progress}");
-                flushed += 1;
+
+        let mut errored = false;
+        for (anilist_id, progress, status) in items {
+            match st
+                .providers
+                .anilist_save_entry(&token, anilist_id, progress, status.as_deref())
+                .await
+            {
+                Ok(saved) => {
+                    let conn = st.db();
+                    let _ = conn.execute(
+                        "INSERT INTO anilist_entries (anilist_id, entry_id, status, progress, score, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT(anilist_id) DO UPDATE SET
+                           entry_id = excluded.entry_id,
+                           status = excluded.status,
+                           progress = MAX(anilist_entries.progress, excluded.progress),
+                           score = COALESCE(excluded.score, anilist_entries.score),
+                           updated_at = excluded.updated_at",
+                        params![
+                            saved.media_id,
+                            saved.id,
+                            saved.status,
+                            saved.progress,
+                            saved.score,
+                            saved.updated_at.unwrap_or_else(now)
+                        ],
+                    );
+                    let _ = conn.execute(
+                        "DELETE FROM anilist_scrobble_queue WHERE anilist_id = ?1 AND progress <= ?2",
+                        params![anilist_id, progress],
+                    );
+                    crate::klog!("[kura] scrobbled AniList #{anilist_id} → ep {progress}");
+                    flushed += 1;
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let _ = st.db().execute(
+                        "UPDATE anilist_scrobble_queue SET last_error = ?2 WHERE anilist_id = ?1",
+                        params![anilist_id, msg],
+                    );
+                    crate::klog!("[kura] AniList scrobble queued for retry (#{anilist_id}): {msg}");
+                    errored = true;
+                    break; // likely offline or rate-limited; retry later
+                }
             }
-            Err(e) => {
-                let msg = e.to_string();
-                let _ = st.db().execute(
-                    "UPDATE anilist_scrobble_queue SET last_error = ?2 WHERE anilist_id = ?1",
-                    params![anilist_id, msg],
-                );
-                crate::klog!("[kura] AniList scrobble queued for retry (#{anilist_id}): {msg}");
-                break; // likely offline or rate-limited; retry later
-            }
+        }
+
+        if errored {
+            break;
         }
     }
 
     if flushed > 0 {
         let acct = get_account(&st.db());
         let _ = app.emit("anilist-changed", &acct);
+        let _ = app.emit("library-changed", ());
     }
     Ok(flushed)
 }
@@ -1137,6 +1154,9 @@ pub fn start_worker(app: AppHandle, st: Arc<AppState>) {
         if has_token {
             let _ = sync_now(&app, &st).await;
         }
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        check_airing_notifications(&app, &st).await;
+
         let mut ticks: u64 = 0;
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -1155,63 +1175,154 @@ pub fn start_worker(app: AppHandle, st: Arc<AppState>) {
                     let _ = sync_now(&app, &st).await;
                 }
             }
-            check_airing_notifications(&app, &st);
+            check_airing_notifications(&app, &st).await;
         }
     });
 }
 
-fn check_airing_notifications(app: &AppHandle, st: &Arc<AppState>) {
-    let conn = st.db();
-    let enabled = db::get_setting(&conn, "pref.airing_notifications")
-        .ok()
-        .flatten()
-        .map(|v| v != "0" && v != "false")
-        .unwrap_or(true);
-    if !enabled {
-        return;
-    }
+pub async fn check_airing_notifications(app: &AppHandle, st: &Arc<AppState>) {
     let ts = now();
-    // Shows in the user's library (or AniListWatching) whose next episode aired within the last 30 minutes.
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT m.anilist_id, COALESCE(m.title_english, m.title_romaji), m.next_airing_episode, m.next_airing_at
-         FROM media m
-         WHERE m.next_airing_episode IS NOT NULL
-           AND m.next_airing_at IS NOT NULL
-           AND m.next_airing_at <= ?1
-           AND m.next_airing_at >= ?2
-           AND (
-             EXISTS(SELECT 1 FROM local_files f WHERE f.anilist_id = m.anilist_id)
-             OR EXISTS(SELECT 1 FROM anilist_entries a WHERE a.anilist_id = m.anilist_id AND a.status IN ('CURRENT', 'PLANNING'))
-           )",
-    ) else {
-        return;
-    };
-    let rows: Vec<(i64, Option<String>, i64, i64)> = stmt
-        .query_map(params![ts, ts - 1800], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .collect();
+    let candidates: Vec<(i64, String, i64, i64)> = {
+        let conn = st.db();
+        let enabled = db::get_setting(&conn, "pref.airing_notifications")
+            .ok()
+            .flatten()
+            .map(|v| v != "0" && v != "false")
+            .unwrap_or(true);
+        if !enabled {
+            return;
+        }
+        let _ = conn.execute_batch(db::SCHEMA_V5);
+        let _ = conn.execute_batch(db::SCHEMA_V7);
 
-    for (id, title, ep, _) in rows {
-        let key = format!("airing.notified.{id}.{ep}");
-        if db::get_setting(&conn, &key).ok().flatten().is_some() {
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT m.anilist_id,
+                    COALESCE(m.title_english, m.title_romaji, m.title_native),
+                    m.next_airing_episode,
+                    m.next_airing_at,
+                    COALESCE((SELECT ae.progress FROM anilist_entries ae WHERE ae.anilist_id = m.anilist_id), 0)
+             FROM media m
+             WHERE (m.status = 'RELEASING' OR m.next_airing_episode IS NOT NULL)
+               AND (
+                 EXISTS(SELECT 1 FROM anilist_entries a WHERE a.anilist_id = m.anilist_id AND a.status = 'CURRENT')
+                 OR EXISTS(SELECT 1 FROM stream_library sl WHERE sl.anilist_id = m.anilist_id)
+                 OR EXISTS(SELECT 1 FROM local_files f WHERE f.anilist_id = m.anilist_id)
+               )",
+        ) else {
+            return;
+        };
+
+        let rows: Vec<(i64, Option<String>, Option<i64>, Option<i64>, i64)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                ))
+            })
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect();
+
+        let mut out = Vec::new();
+        for (id, title, next_ep_opt, next_at_opt, rem_prog) in rows {
+            let watched_prog = local_watched_progress(&conn, id).max(rem_prog);
+            let latest_aired_ep = match next_ep_opt {
+                Some(next_ep) if next_at_opt.map(|t| t <= ts).unwrap_or(false) => next_ep,
+                Some(next_ep) if next_ep > 1 => next_ep - 1,
+                _ => 0,
+            };
+            if latest_aired_ep <= 0 || latest_aired_ep <= watched_prog {
+                continue;
+            }
+            let target_ep = if watched_prog > 0 {
+                watched_prog + 1
+            } else {
+                latest_aired_ep
+            };
+            let name = title.unwrap_or_else(|| format!("Anime #{id}"));
+            out.push((id, name, target_ep, latest_aired_ep));
+        }
+        out
+    };
+
+    for (id, name, ep, _latest_aired) in candidates {
+        let airing_key = format!("airing.notified.{id}.{ep}");
+        let jimaku_key = format!("jimaku.notified.{id}.{ep}");
+
+        let (aired_notified, mut jimaku_notified) = {
+            let conn = st.db();
+            let a = db::get_setting(&conn, &airing_key).ok().flatten().is_some();
+            let j = db::get_setting(&conn, &jimaku_key).ok().flatten().is_some();
+            let has_local_sub = crate::subtitles::has_saved_subtitle(&conn, id, &ep.to_string());
+            if has_local_sub && !j && a {
+                // Already had a local subtitle saved earlier
+                let _ = db::set_setting(&conn, &jimaku_key, &ts.to_string());
+                (a, true)
+            } else {
+                (a, j)
+            }
+        };
+
+        if aired_notified && jimaku_notified {
             continue;
         }
-        let _ = db::set_setting(&conn, &key, &ts.to_string());
-        let name = title.unwrap_or_else(|| format!("Anime #{id}"));
-        let _ = app.emit(
-            "airing-notification",
-            serde_json::json!({
-                "anilistId": id,
-                "title": name,
-                "episode": ep,
-                "message": format!("Episode {ep} of {name} just aired!")
-            }),
-        );
+
+        let jp_sub_ready = crate::subtitles::check_and_prefetch_jimaku_episode(st, id, ep).await;
+
+        if !aired_notified && jp_sub_ready {
+            {
+                let conn = st.db();
+                let _ = db::set_setting(&conn, &airing_key, &ts.to_string());
+                let _ = db::set_setting(&conn, &jimaku_key, &ts.to_string());
+            }
+            let _ = app.emit(
+                "airing-notification",
+                serde_json::json!({
+                    "anilistId": id,
+                    "title": name,
+                    "episode": ep,
+                    "kind": "episode_and_sub",
+                    "message": format!("Episode {ep} of {name} is out — JP subtitles are ready on Jimaku!")
+                }),
+            );
+        } else if !aired_notified && !jp_sub_ready {
+            {
+                let conn = st.db();
+                let _ = db::set_setting(&conn, &airing_key, &ts.to_string());
+            }
+            let _ = app.emit(
+                "airing-notification",
+                serde_json::json!({
+                    "anilistId": id,
+                    "title": name,
+                    "episode": ep,
+                    "kind": "episode",
+                    "message": format!("Episode {ep} of {name} is out! Monitoring Jimaku for JP subtitles…")
+                }),
+            );
+        } else if aired_notified && !jimaku_notified && jp_sub_ready {
+            jimaku_notified = true;
+            let _ = jimaku_notified;
+            {
+                let conn = st.db();
+                let _ = db::set_setting(&conn, &jimaku_key, &ts.to_string());
+            }
+            let _ = app.emit(
+                "airing-notification",
+                serde_json::json!({
+                    "anilistId": id,
+                    "title": name,
+                    "episode": ep,
+                    "kind": "jimaku_sub",
+                    "message": format!("JP subtitles for {name} · Episode {ep} are now available on Jimaku!")
+                }),
+            );
+        }
     }
 }
 

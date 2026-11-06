@@ -47,10 +47,12 @@
     return (c.infoHash || c.torrentUrl || c.magnetUri || c.title).toLowerCase();
   }
 
+  // Prefer untried releases with reported seeders; indexer counts are often stale though
+  // (DHT can still find peers), so fall back to any untried release as a last resort.
   const nextUntriedCandidate = $derived<TorrentCandidate | null>(
-    candidates.find(
-      (c) => c.seeders > 0 && !triedKeys.includes(candidateKey(c)),
-    ) ?? null,
+    candidates.find((c) => c.seeders > 0 && !triedKeys.includes(candidateKey(c))) ??
+      candidates.find((c) => !triedKeys.includes(candidateKey(c))) ??
+      null,
   );
 
   const liveSession = $derived<TorrentSessionStatus | null>(
@@ -73,7 +75,7 @@
     if (
       liveSession &&
       liveSession.state === "error" &&
-      failoverCount < 3 &&
+      failoverCount < 4 &&
       nextUntriedCandidate
     ) {
       failoverCount += 1;
@@ -99,7 +101,8 @@
         const best =
           candidates.find((c) => c.seeders >= 3 && c.score > 400) ??
           candidates.find((c) => c.seeders > 0 && c.score > 400) ??
-          candidates.find((c) => c.seeders > 0);
+          candidates.find((c) => c.seeders > 0) ??
+          candidates[0];
         if (best) {
           await startCandidate(best);
         }
@@ -197,7 +200,7 @@
     } catch (e) {
       error = String(e);
       starting = false;
-      if (failoverCount < 3 && nextUntriedCandidate) {
+      if (failoverCount < 4 && nextUntriedCandidate) {
         failoverCount += 1;
         await startCandidate(nextUntriedCandidate);
         return;

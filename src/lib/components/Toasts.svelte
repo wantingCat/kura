@@ -1,14 +1,32 @@
 <script lang="ts">
+  import { goto } from "$app/navigation";
   import { app } from "$lib/app.svelte";
   import Icon from "./Icon.svelte";
 </script>
 
 <div class="toasts" aria-live="polite">
   {#each app.toasts as t (t.id)}
-    <div class="toast {t.kind}">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div
+      class="toast {t.kind}"
+      class:clickable={!!t.anilistId}
+      onclick={() => {
+        if (t.anilistId) {
+          goto(`/anime/${t.anilistId}`);
+          app.dismissToast(t.id);
+        }
+      }}
+    >
       <Icon name={t.kind === "info" ? "check" : "alert"} size={16} stroke={2.5} />
       <p>{t.text}</p>
-      <button onclick={() => app.dismissToast(t.id)} aria-label="Dismiss"><Icon name="x" size={14} stroke={2.5} /></button>
+      <button
+        onclick={(e) => {
+          e.stopPropagation();
+          app.dismissToast(t.id);
+        }}
+        aria-label="Dismiss"
+      ><Icon name="x" size={14} stroke={2.5} /></button>
     </div>
   {/each}
 </div>
@@ -37,6 +55,14 @@
     box-shadow: var(--sticker);
     pointer-events: auto;
     animation: fade-up var(--t-med) var(--ease) both;
+  }
+  .toast.clickable {
+    cursor: pointer;
+    transition: transform 120ms ease, border-color 120ms ease;
+  }
+  .toast.clickable:hover {
+    transform: translateY(-2px);
+    border-color: var(--coral);
   }
   .toast :global(svg) {
     flex: none;

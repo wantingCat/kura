@@ -1,4 +1,4 @@
-//! Built-in Memento-style video player engine.
+//! Built-in Kura video player engine.
 //!
 //! Renders video directly inside Kura's window using a local HTTP byte-range media server
 //! (with automatic live `mpv` H.264/AAC stream transcoding fallback for 10-bit HEVC / AC3),
@@ -265,6 +265,18 @@ async fn spawn_local_media_server(
     };
 
     let active_transcode_id = Arc::new(AtomicU64::new(0));
+    let audio_type_offsets: Arc<Vec<usize>> = if !is_remote {
+        let mut hdr = vec![0u8; 65_536];
+        let offsets = if let Ok(mut f) = std::fs::File::open(&source_path) {
+            let n = f.read(&mut hdr).unwrap_or(0);
+            subtitles::find_mkv_audio_track_type_offsets(&hdr[..n])
+        } else {
+            Vec::new()
+        };
+        Arc::new(offsets)
+    } else {
+        Arc::new(Vec::new())
+    };
 
     tokio::spawn(async move {
         loop {
@@ -280,8 +292,9 @@ async fn spawn_local_media_server(
             }
             let src = source_path.clone();
             let tc_counter = active_transcode_id.clone();
+            let a_offsets = audio_type_offsets.clone();
             tokio::spawn(async move {
-                let _ = handle_media_http_client(socket, src, session_id, tc_counter).await;
+                let _ = handle_media_http_client(socket, src, session_id, tc_counter, a_offsets).await;
             });
         }
     });
@@ -315,6 +328,7 @@ async fn handle_media_http_client(
     source_path: String,
     session_id: u64,
     active_transcode_id: Arc<AtomicU64>,
+    audio_type_offsets: Arc<Vec<usize>>,
 ) -> Result<()> {
     let mut req_buf = [0u8; 4096];
     let n = tokio::time::timeout(Duration::from_secs(10), socket.read(&mut req_buf)).await??;
@@ -356,6 +370,10 @@ async fn handle_media_http_client(
         )
         .await;
     }
+
+    let selected_aid = parse_query_param(query, "aid")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
 
     // Serve local file with HTTP 206 Partial Content byte-range support
     let file_meta = tokio::fs::metadata(&source_path).await?;
@@ -401,6 +419,7 @@ async fn handle_media_http_client(
     let mut f = tokio::fs::File::open(&source_path).await?;
     f.seek(SeekFrom::Start(range_start)).await?;
 
+    let mut cur_file_offset = range_start;
     let mut remaining = content_len;
     let mut buf = vec![0u8; 65_536];
     while remaining > 0 {
@@ -412,9 +431,18 @@ async fn handle_media_http_client(
         if read_n == 0 {
             break;
         }
+        if selected_aid > 0 && cur_file_offset < 65_536 && !audio_type_offsets.is_empty() {
+            subtitles::apply_mkv_audio_track_mask(
+                &mut buf[..read_n],
+                cur_file_offset,
+                &audio_type_offsets,
+                selected_aid,
+            );
+        }
         if socket.write_all(&buf[..read_n]).await.is_err() {
             break;
         }
+        cur_file_offset += read_n as u64;
         remaining -= read_n as u64;
     }
 
@@ -442,6 +470,8 @@ async fn handle_transcode_stream(
     let mut cmd = std::process::Command::new(&mpv_exe);
     cmd.arg("--no-config")
         .arg("--no-terminal")
+        .arg("--cache=no")
+        .arg("--demuxer-lavf-o=fflags=+nobuffer")
         .arg("--sub=no")
         .arg("--vid=1");
 

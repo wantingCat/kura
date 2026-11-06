@@ -45,6 +45,18 @@ export interface Toast {
   id: number;
   kind: "info" | "warn" | "error";
   text: string;
+  anilistId?: number;
+}
+
+export interface AppAlert {
+  id: string;
+  anilistId: number;
+  title: string;
+  episode: string | number;
+  kind: "episode" | "jimaku_sub" | "episode_and_sub" | string;
+  message: string;
+  at: number;
+  read: boolean;
 }
 
 class AppStore {
@@ -76,12 +88,13 @@ class AppStore {
   });
   autoUpdate = $state(true);
   airingNotifications = $state(true);
+  minimizeToTray = $state(true);
   anilist = $state<AnilistAccount | null>(null);
   folderWatcher = $state(true);
   fanartApiKey = $state("");
   jimakuApiKey = $state("");
   jimakuAutoRetime = $state(true);
-  /** "local" = Offline Library Mode, "streaming" = Hayase-style Streaming + Hybrid Mode. */
+  /** "local" = Offline Library Mode, "streaming" = Streaming + Hybrid Mode. */
   appMode = $state<"local" | "streaming">("local");
   /** "stream" = Stream Only (Temp Cache), "hybrid" = Stream & Save to Library, "download" = Download to Library First. */
   torrentAction = $state<"stream" | "hybrid" | "download">("stream");
@@ -100,9 +113,10 @@ class AppStore {
   launching = $state<LaunchingEpisode | null>(null);
   /** Latest playback event while a player is being tracked. */
   nowPlaying = $state<PlaybackEvent | null>(null);
-  /** Built-in Memento player state when active. */
+  /** Built-in player state when active. */
   builtinPlayer = $state<BuiltinPlayerState | null>(null);
   toasts = $state<Toast[]>([]);
+  alerts = $state<AppAlert[]>([]);
 
   #refreshTimer: ReturnType<typeof setTimeout> | null = null;
   #launchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -118,6 +132,12 @@ class AppStore {
         this.theme = localTheme;
         this.applyTheme(this.theme);
       }
+      try {
+        const savedAlerts = localStorage.getItem("kura-alerts");
+        if (savedAlerts) {
+          this.alerts = JSON.parse(savedAlerts);
+        }
+      } catch {}
     }
     await events.onLibraryChanged(() => this.scheduleRefresh());
     await events.onScanProgress((p) => {
@@ -132,7 +152,25 @@ class AppStore {
       this.scheduleRefresh();
     });
     await events.onScanError((msg) => (this.lastError = msg));
-    await events.onAiringNotification((n) => this.toast(n.message, "info", 8000));
+    await events.onAiringNotification((n) => {
+      this.recordAlert(n);
+      this.toast(n.message, "info", 10000, n.anilistId);
+      if (typeof window !== "undefined" && "Notification" in window) {
+        if (Notification.permission === "granted") {
+          try {
+            new Notification(n.title, { body: n.message });
+          } catch {}
+        } else if (Notification.permission === "default") {
+          Notification.requestPermission().then((perm) => {
+            if (perm === "granted") {
+              try {
+                new Notification(n.title, { body: n.message });
+              } catch {}
+            }
+          }).catch(() => {});
+        }
+      }
+    });
     await events.onTorrentProgress((s) => {
       if (s.state === "cancelled") {
         this.torrentSessions = this.torrentSessions.filter((x) => x.sessionId !== s.sessionId);
@@ -219,6 +257,7 @@ class AppStore {
       this.autoUpdate = prefs.auto_update !== "0";
       this.folderWatcher = prefs.folder_watcher !== "0";
       this.airingNotifications = prefs.airing_notifications !== "0";
+      this.minimizeToTray = prefs.minimize_to_tray !== "0";
       this.fanartApiKey = prefs.fanart_api_key ?? "";
       this.jimakuApiKey = prefs.jimaku_api_key ?? "";
       this.jimakuAutoRetime = prefs.jimaku_auto_retime !== "0";
@@ -324,6 +363,11 @@ class AppStore {
   async setAiringNotifications(on: boolean) {
     this.airingNotifications = on;
     await api.setPref("airing_notifications", on ? "1" : "0");
+  }
+
+  async setMinimizeToTray(on: boolean) {
+    this.minimizeToTray = on;
+    await api.setPref("minimize_to_tray", on ? "1" : "0");
   }
 
   async setFolderWatcher(on: boolean) {
@@ -457,14 +501,52 @@ class AppStore {
     return true;
   }
 
-  toast(text: string, kind: Toast["kind"] = "info", ms = 5000) {
+  toast(text: string, kind: Toast["kind"] = "info", ms = 5000, anilistId?: number) {
     const id = ++this.#toastId;
-    this.toasts = [...this.toasts, { id, kind, text }];
+    this.toasts = [...this.toasts, { id, kind, text, anilistId }];
     setTimeout(() => this.dismissToast(id), ms);
   }
 
   dismissToast(id: number) {
     this.toasts = this.toasts.filter((t) => t.id !== id);
+  }
+
+  recordAlert(n: { anilistId: number; title: string; episode: string | number; kind?: string; message: string }) {
+    const id = `${n.anilistId}-${n.episode}-${n.kind ?? "episode"}-${Date.now()}`;
+    const next: AppAlert = {
+      id,
+      anilistId: n.anilistId,
+      title: n.title,
+      episode: n.episode,
+      kind: n.kind ?? "episode",
+      message: n.message,
+      at: Date.now(),
+      read: false,
+    };
+    this.alerts = [next, ...this.alerts].slice(0, 40);
+    this.#saveAlerts();
+  }
+
+  markAllAlertsRead() {
+    this.alerts = this.alerts.map((a) => ({ ...a, read: true }));
+    this.#saveAlerts();
+  }
+
+  clearAlerts() {
+    this.alerts = [];
+    this.#saveAlerts();
+  }
+
+  #saveAlerts() {
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem("kura-alerts", JSON.stringify(this.alerts));
+      } catch {}
+    }
+  }
+
+  get unreadAlertCount() {
+    return this.alerts.filter((a) => !a.read).length;
   }
 
   get reviewCount() {

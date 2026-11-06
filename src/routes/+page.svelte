@@ -8,6 +8,7 @@
   import LibraryFilterPanel from "$lib/components/LibraryFilterPanel.svelte";
   import NewLibraryForm from "$lib/components/NewLibraryForm.svelte";
   import PosterCard from "$lib/components/PosterCard.svelte";
+  import Rail from "$lib/components/Rail.svelte";
   import {
     AIRING,
     filters,
@@ -145,8 +146,8 @@
         </div>
         <div class="card stream-mode-promo" style="margin-top: 14px; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
           <div style="text-align: left;">
-            <strong>Want to stream or browse all of AniList (Hayase-style)?</strong>
-            <p class="faint" style="font-size: 12.5px; margin-top: 2px;">Switch to Streaming & Hybrid Mode to browse every show, filter by voice actors, and stream or download episodes in mpv/Memento.</p>
+            <strong>Want to stream or browse the full AniList catalog?</strong>
+            <p class="faint" style="font-size: 12.5px; margin-top: 2px;">Switch to Streaming &amp; Hybrid Mode to browse every show, filter by voice actors, and stream or download episodes in Kura's Built-In Player or mpv.</p>
           </div>
           <button class="btn btn-primary btn-sm" onclick={() => app.setAppMode("streaming")}>
             Enable Streaming Mode
@@ -156,7 +157,18 @@
     </div>
   </section>
 {:else}
-  <div class="page">
+  {#if browsing}
+    <HomePanels {scoped} />
+    {#if recentlyAdded.length > 0 && all.length > 8}
+      <div class="recent">
+        <Rail title="Recently Added">
+          {#each recentlyAdded as m, i (m.anilistId)}<div class="rail-poster"><PosterCard {m} index={i} /></div>{/each}
+        </Rail>
+      </div>
+    {/if}
+  {/if}
+
+  <div class="page" class:after-hero={browsing}>
     <h1 class="sr-only">{library?.name ?? "Your anime library"}</h1>
 
     {#if app.libraries.length > 1}
@@ -170,10 +182,6 @@
       </nav>
     {/if}
 
-    {#if browsing}
-      <HomePanels {scoped} />
-    {/if}
-
     {#if app.unmatched.length > 0 && browsing}
       <a class="review-banner" href="/review" id="review-banner">
         <Icon name="alert" size={18} />
@@ -183,15 +191,6 @@
         </span>
         <span class="link">Review <Icon name="chevron-right" size={14} /></span>
       </a>
-    {/if}
-
-    {#if browsing && recentlyAdded.length > 0 && all.length > 8}
-      <section class="row">
-        <h2 class="section-title">Recently added</h2>
-        <div class="rail">
-          {#each recentlyAdded as m, i (m.anilistId)}<PosterCard {m} index={i} />{/each}
-        </div>
-      </section>
     {/if}
 
     <section class="row">
@@ -374,63 +373,43 @@
   .status-tabs {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 4px;
     margin-bottom: 18px;
-    padding-bottom: 14px;
-    border-bottom: var(--bw) solid var(--border);
   }
   .status-tab {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    height: 38px;
-    padding: 0 16px;
-    border-radius: var(--r-sm);
-    border: var(--bw) solid var(--border);
-    background: var(--surface);
+    gap: 7px;
+    height: 34px;
+    padding: 0 14px;
+    border-radius: 99px;
+    border: none;
+    background: transparent;
     color: var(--text-2);
     font-family: var(--font-display);
     font-size: 13.5px;
-    font-weight: 800;
-    letter-spacing: 0.01em;
+    font-weight: 600;
     cursor: pointer;
-    box-shadow: 2px 2px 0 var(--shadow-color);
     transition:
-      transform 0.14s var(--ease-spring),
-      box-shadow 0.14s var(--ease-spring),
       background 0.14s ease,
-      color 0.14s ease,
-      border-color 0.14s ease;
+      color 0.14s ease;
   }
   .status-tab:hover {
-    transform: translate(-1px, -1px);
-    box-shadow: 3px 3px 0 var(--shadow-color);
     color: var(--text);
-    background: var(--surface-2);
+    background: var(--glass);
   }
   .status-tab.active {
-    background: var(--coral);
-    color: var(--on-coral);
-    border-color: var(--ink);
-    box-shadow: 3px 3px 0 var(--ink);
+    background: var(--primary);
+    color: var(--on-primary);
   }
   .tab-badge {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 22px;
-    height: 20px;
-    padding: 0 6px;
-    border-radius: 999px;
-    background: var(--bg-2);
+    font-size: 12px;
+    font-weight: 600;
     color: var(--text-3);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    font-weight: 700;
+    font-variant-numeric: tabular-nums;
   }
   .status-tab.active .tab-badge {
-    background: rgba(20, 12, 13, 0.24);
-    color: var(--on-coral);
+    color: color-mix(in srgb, var(--on-primary) 55%, transparent);
   }
 
   /* Library toolbar -------------------------------------------------------- */
@@ -561,20 +540,20 @@
     align-items: center;
     gap: 12px;
     padding: 12px 16px;
-    margin-bottom: 30px;
+    margin-bottom: 28px;
     border-radius: var(--r-md);
     background: var(--surface);
-    border: var(--bw) solid var(--line);
-    border-left: 8px solid var(--amber);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--amber);
     box-shadow: var(--sticker);
     color: var(--amber);
     transition:
-      transform var(--t-fast) var(--ease),
-      box-shadow var(--t-fast) var(--ease);
+      background var(--t-fast) var(--ease),
+      border-color var(--t-fast) var(--ease);
   }
   .review-banner:hover {
-    transform: translate(-1px, -1px);
-    box-shadow: 4px 4px 0 var(--line);
+    background: var(--surface-2);
+    border-color: var(--border-strong);
   }
   .review-banner span {
     color: var(--text-2);
@@ -595,23 +574,20 @@
   .row {
     margin-bottom: 36px;
   }
-  .rail {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: 140px;
-    gap: 16px;
-    overflow-x: auto;
-    padding: 8px 4px 14px;
-    margin: -8px -4px 0;
-    scroll-snap-type: x proximity;
+  .recent {
+    margin-top: 34px;
   }
-  .rail > :global(*) {
-    scroll-snap-align: start;
+  .rail-poster {
+    width: 158px;
+    flex: none;
+  }
+  .page.after-hero {
+    padding-top: 40px;
   }
   .grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
-    gap: 26px 20px;
+    gap: 28px 18px;
   }
 
   .empty {

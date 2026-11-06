@@ -16,16 +16,73 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
-    version: "0.6.1",
-    title: "Built-In Memento Player (Bundled MPV + GPU HEVC Main10), Hover Yomitan Dictionary & Modular Torrent Extensions",
+    version: "0.7.0",
+    title: "New Look, Reliable Torrent Streaming & Episode / Japanese Subtitle Alerts",
     date: "November 2026",
     badge: "Latest",
     summary:
-      "Kura v0.6.1 introduces the built-in Memento-style video player with bundled portable MPV, native WebView2 GPU 10-bit HEVC (Main10) hardware decoding, and pause-to-hover Yomitan Japanese dictionary lookup, transitions torrent streaming to a 100% modular bring-your-own-extension architecture (compatible with Hayase index.json manifests, RSS feeds, SubsPlease, and SeaDex), upgrades the BitTorrent engine with DHT/PEX/WebSeeds and a live player HUD, and adds live subtitle auto-sync for streaming episodes with distributor intro bumpers.",
+      "Kura 0.7 brings a completely redesigned interface, a much more reliable torrent engine that finds releases and peers far more often, global search across your library and AniList, and notifications when new episodes air or Japanese subtitles land on Jimaku — even while Kura sits in the system tray.",
     items: [
       {
         type: "new",
-        text: "Kura Built-In (Memento) Video Player with Bundled MPV & GPU 10-bit HEVC Decode: watch episodes directly inside Kura out-of-the-box with bundled portable mpv, native GPU D3D11/DXVA2 10-bit HEVC (Main10) hardware decoding, zero-copy multi-audio/AC3/TrueHD remuxing, embedded MKV subtitle & chapter extraction, AniSkip OP/ED skip, and a live top-bar torrent stats HUD.",
+        text: "Redesigned interface: a cinematic home screen with a rotating featured banner, Continue Watching / New Episodes / Recently Added rows, cleaner poster cards, a slim icon sidebar, and a new show page with a blurred backdrop header and a tidy ⋯ actions menu.",
+      },
+      {
+        type: "new",
+        text: "Episode & Japanese subtitle alerts: get notified when an episode in your Watching list airs and when Japanese subtitles for it appear on Jimaku (Kura keeps checking for days and pre-downloads the subtitle). Recent alerts live behind the new bell icon.",
+      },
+      {
+        type: "new",
+        text: "System tray: closing the window keeps Kura running quietly in the tray so alerts keep working. Turn it off in Settings → Integrations.",
+      },
+      {
+        type: "new",
+        text: "Global search (Ctrl+K): searches your library first, then all of AniList.",
+      },
+      {
+        type: "new",
+        text: "Episodes now show a 日本語 tag when Japanese subtitles are available on Jimaku — click it to download.",
+      },
+      {
+        type: "new",
+        text: "Extensions got their own Settings page with a cleaner list of torrent sources.",
+      },
+      {
+        type: "improvement",
+        text: "Torrent search finds releases far more reliably: slow indexers are no longer cut off, SubsPlease searches work again, freshly uploaded releases with stale \"0 seeders\" stats are no longer hidden, and Kura tells you when a source couldn't be reached.",
+      },
+      {
+        type: "improvement",
+        text: "Smoother low-seeder streaming: DHT peer discovery, real seeder counts for SubsPlease & SeaDex, metadata fetched from the swarm and caches in parallel, continuous peer top-ups, and automatic fallback to the next release if one stalls.",
+      },
+      {
+        type: "improvement",
+        text: "AniList progress now updates instantly when you mark an episode watched.",
+      },
+      {
+        type: "improvement",
+        text: "Cleaner player top bar (back arrow + torrent stats) and instant audio-track switching without re-encoding.",
+      },
+      {
+        type: "fix",
+        text: "Fixed \"Could not retrieve .torrent metadata\" errors on SubsPlease releases.",
+      },
+      {
+        type: "fix",
+        text: "Fixed the player controls staying visible after hovering a Japanese word and resuming playback.",
+      },
+    ],
+  },
+  {
+    version: "0.6.1",
+    title: "Kura Built-In Player (Bundled MPV + GPU HEVC Main10), Hover Yomitan Dictionary & Modular Torrent Extensions",
+    date: "November 2026",
+    summary:
+      "Kura v0.6.1 introduces the built-in video player with bundled portable MPV, native WebView2 GPU 10-bit HEVC (Main10) hardware decoding, and pause-to-hover Yomitan Japanese dictionary lookup, transitions torrent streaming to a 100% modular bring-your-own-extension architecture (compatible with index.json manifests, RSS feeds, SubsPlease, and SeaDex), upgrades the BitTorrent engine with DHT/PEX/WebSeeds and a live player HUD, and adds live subtitle auto-sync for streaming episodes with distributor intro bumpers.",
+    items: [
+      {
+        type: "new",
+        text: "Kura Built-In Video Player with Bundled MPV & GPU 10-bit HEVC Decode: watch episodes directly inside Kura out-of-the-box with bundled portable mpv, native GPU D3D11/DXVA2 10-bit HEVC (Main10) hardware decoding, zero-copy multi-audio/AC3/TrueHD remuxing, embedded MKV subtitle & chapter extraction, AniSkip OP/ED skip, and a live top-bar torrent stats HUD.",
       },
       {
         type: "new",
@@ -33,7 +90,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       },
       {
         type: "new",
-        text: "Modular Torrent Extensions (Zero Built-In Piracy): add Hayase-compatible extension manifests (index.json), Kura JSON manifests, or custom RSS / SubsPlease / SeaDex endpoints in Settings → Playback while keeping Kura completely clean of hardcoded piracy domains.",
+        text: "Modular Torrent Extensions (Zero Built-In Piracy): add extension manifests (index.json), Kura JSON manifests, or custom RSS / SubsPlease / SeaDex endpoints in Settings → Playback while keeping Kura completely clean of hardcoded piracy domains.",
       },
       {
         type: "improvement",
@@ -50,7 +107,7 @@ export const CHANGELOG: ChangelogRelease[] = [
     title: "2-Mode Streaming & Hybrid Architecture, Jimaku Subtitles & Auto-Retiming",
     date: "November 2026",
     summary:
-      "A massive leap forward for Kura: switch between classic Offline Library Mode and Hayase-style Streaming & Hybrid Mode with built-in Nyaa BitTorrent sequential streaming into mpv & Memento, browse the full AniList catalog and Voice Actors (Seiyuu) with infinite scroll, plus the complete Japanese Immersion Suite — Jimaku.cc subtitle fetching, Smart Subtitle Matcher, and automatic Alass-style subtitle retiming.",
+      "A massive leap forward for Kura: switch between Offline Library Mode and Streaming & Hybrid Mode with built-in BitTorrent sequential streaming into the Built-In Player & mpv, browse the full AniList catalog and Voice Actors (Seiyuu) with infinite scroll, plus the complete Japanese Immersion Suite — Jimaku.cc subtitle fetching, Smart Subtitle Matcher, and automatic Alass-style subtitle retiming.",
     items: [
       {
         type: "new",
@@ -58,7 +115,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       },
       {
         type: "new",
-        text: "Built-in Nyaa BitTorrent Sequential Streaming: stream any episode directly into mpv or Memento over a local HTTP 206 Range server with smart piece prioritization (MKV header + Cues seek index first), custom Nyaa mirror support, and immediate peer cleanup on playback stop.",
+        text: "Built-in BitTorrent Sequential Streaming: stream any episode directly into the Built-In Player or mpv over a local HTTP 206 Range server with smart piece prioritization (MKV header + Cues seek index first) and immediate peer cleanup on playback stop.",
       },
       {
         type: "new",
@@ -66,7 +123,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       },
       {
         type: "new",
-        text: "Jimaku.cc Japanese Subtitle Fetcher & Automatic Subtitle Retiming: fetch Japanese subtitles (.srt/.ass/.zip packs) directly from Jimaku.cc and automatically synchronize subtitle timing against your video's reference subtitle cues or MKV tracks — hot-loading straight into mpv or Memento.",
+        text: "Jimaku.cc Japanese Subtitle Fetcher & Automatic Subtitle Retiming: fetch Japanese subtitles (.srt/.ass/.zip packs) directly from Jimaku.cc and automatically synchronize subtitle timing against your video's reference subtitle cues or MKV tracks — hot-loading straight into your player.",
       },
       {
         type: "new",

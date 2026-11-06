@@ -44,10 +44,38 @@
   let jimakuKeyInput = $state(app.jimakuApiKey);
   let jimakuSaved = $state(false);
 
-  // Modular Torrent Extensions (Hayase-style bring-your-own indexer)
+  // Modular Torrent Extensions (bring-your-own indexer)
   let torrentExtensions = $state<TorrentExtension[]>([]);
   let extUrlInput = $state("");
   let extImporting = $state(false);
+  let extFailedIcons = $state<Record<string, boolean>>({});
+  let extHelpOpen = $state(false);
+
+  const torrentSources = $derived(torrentExtensions.filter((e) => e.kind !== "http-stream"));
+  const streamSources = $derived(torrentExtensions.filter((e) => e.kind === "http-stream"));
+
+  function extHost(ext: TorrentExtension) {
+    return (ext.url.split("://")[1] ?? ext.url).split("/")[0] || ext.url;
+  }
+
+  function extTitle(ext: TorrentExtension) {
+    const host = extHost(ext);
+    const t = ext.name.replace(/\s*\(.*?\)\s*/g, "").trim();
+    return t && t !== host ? t : host.replace(/^www\./, "").split(".")[0].replace(/^\w/, (c) => c.toUpperCase());
+  }
+
+  function extKindLabel(ext: TorrentExtension) {
+    switch (ext.kind) {
+      case "seadex-api":
+        return "Curated releases";
+      case "subsplease-json":
+        return "Simulcast feed";
+      case "http-stream":
+        return "Direct stream";
+      default:
+        return "RSS indexer";
+    }
+  }
 
   async function refreshTorrentExtensions() {
     try {
@@ -89,7 +117,7 @@
   }
 
   $effect(() => {
-    if (active === "playback") {
+    if (active === "playback" || active === "extensions") {
       void refreshTorrentExtensions();
     }
   });
@@ -150,11 +178,10 @@
 
   // Playback ----------------------------------------------------------------
   const PLAYERS: { kind: PlayerKind; name: string; blurb: string }[] = [
-    { kind: "builtin", name: "Kura Built-In (Memento)", blurb: "In-app player · Pause-to-hover Yomitan + OP/ED skip" },
+    { kind: "builtin", name: "Kura Built-In Player", blurb: "In-app player · Pause-to-hover Yomitan + OP/ED skip" },
     { kind: "mpv", name: "mpv", blurb: "External window · Full tracking + autoplay" },
     { kind: "vlc", name: "VLC", blurb: "External window · Full tracking + autoplay" },
     { kind: "mpc", name: "MPC-HC / BE", blurb: "Needs its web interface on" },
-    { kind: "memento", name: "Memento", blurb: "External window · Full tracking + autoplay" },
     { kind: "system", name: "System default", blurb: "Opens normally, no tracking" },
   ];
   let detected = $state<DetectedPlayer[]>([]);
@@ -219,7 +246,7 @@
       const list = await api.downloadRecommendedDictionaries();
       dictionaries = await api.listDictionaries();
       app.toast(`Installed ${list.length} Yomitan dictionaries!`);
-      dictStatusMsg = "Full JMdict + KANJIDIC ready for Memento hover lookup!";
+      dictStatusMsg = "Full JMdict + KANJIDIC ready for Yomitan hover lookup!";
     } catch (e) {
       app.toast(String(e), "error", 8000);
       dictStatusMsg = `Error: ${e}`;
@@ -451,6 +478,7 @@
     | "libraries"
     | "appearance"
     | "playback"
+    | "extensions"
     | "tracks"
     | "artwork"
     | "integrations"
@@ -462,6 +490,7 @@
     { id: "libraries", label: "Libraries", icon: "library" },
     { id: "appearance", label: "Appearance", icon: "palette" },
     { id: "playback", label: "Playback", icon: "play" },
+    { id: "extensions", label: "Extensions", icon: "grid" },
     { id: "tracks", label: "Audio & Subtitles", icon: "subtitles" },
     { id: "artwork", label: "Artwork & Metadata", icon: "image" },
     { id: "integrations", label: "Integrations", icon: "discord" },
@@ -665,11 +694,12 @@
     { cat: "libraries", label: "New library", hint: "Create an anime library from your folders", target: "settings-new-library", kw: "add create" },
     { cat: "libraries", label: "Library folders", hint: "Add, remove or rescan folders", target: "set-libraries", kw: "folder path rescan rename remove delete drive" },
     { cat: "libraries", label: "Live folder watcher", hint: "Auto-rescan when files change", target: "pref-folder-watcher", kw: "auto rescan watch sync new episodes" },
-    { cat: "appearance", label: "Theme", hint: "Comicbook (dark) or Manga (light)", target: "set-theme", kw: "comic manga dark light color colour look" },
+    { cat: "appearance", label: "Theme", hint: "Kura Noir (dark) or Manga Editorial (light)", target: "set-theme", kw: "noir manga dark light color colour look" },
     { cat: "appearance", label: "Multi-season shows", hint: "Group seasons into one card or keep them separate", target: "set-seasons", kw: "group grouped separate season movie ova tabs" },
-    { cat: "playback", label: "App Mode (Offline vs. Streaming)", hint: "Switch between Offline Library Mode and Hayase-style Streaming & Hybrid Mode", target: "set-app-mode", kw: "mode streaming torrent hayase offline local hybrid discover" },
+    { cat: "playback", label: "App Mode (Offline vs. Streaming)", hint: "Switch between Offline Library Mode and Streaming & Hybrid Mode", target: "set-app-mode", kw: "mode streaming torrent offline local hybrid discover" },
     { cat: "playback", label: "Torrent Streaming & Download Action", hint: "Stream Only (Temp Cache), Stream & Save to Library, or Download First", target: "set-torrent-action", fallback: "set-app-mode", kw: "torrent stream download hybrid nyaa animetosho cache" },
-    { cat: "playback", label: "Player", hint: "mpv, VLC, MPC, Memento or system default", target: "set-player", kw: "mpv vlc mpc memento system default video install" },
+    { cat: "extensions", label: "Extensions", hint: "Add, enable or remove torrent and streaming sources", target: "set-torrent-extensions", kw: "extension source indexer repository rss subsplease seadex nyaa stream manifest" },
+    { cat: "playback", label: "Player", hint: "Kura Built-In, mpv, VLC, MPC or system default", target: "set-player", kw: "builtin mpv vlc mpc system default video install" },
     { cat: "playback", label: "Program location", hint: "Point Kura at your player's executable", target: "player-path", fallback: "set-player", kw: "path exe browse custom" },
     { cat: "playback", label: "MPC web interface port", hint: "Port MPC-HC / BE listens on", target: "mpc-port", fallback: "set-player", kw: "mpc port web interface" },
     { cat: "playback", label: "Mark as watched at", hint: "How much of an episode counts as watched", target: "pref-threshold", kw: "threshold percent watched complete" },
@@ -688,7 +718,8 @@
     { cat: "integrations", label: "Auto-scrobble to AniList", hint: "Automatically update AniList when episodes are watched", target: "pref-anilist-scrobble", fallback: "set-anilist", kw: "anilist scrobble auto watched offline queue" },
     { cat: "integrations", label: "Jimaku Japanese Subtitles", hint: "Jimaku.cc API key for downloading Japanese subtitles", target: "set-jimaku", kw: "jimaku japanese subtitle srt ass sdh cc download immersion" },
     { cat: "integrations", label: "Automatic Subtitle Retiming", hint: "Auto-synchronize downloaded or matched subtitles to your video", target: "pref-jimaku-retime", fallback: "set-jimaku", kw: "subtitle retime sync offset alass timing delay shift" },
-    { cat: "integrations", label: "Airing notifications", hint: "Desktop & in-app alerts when tracked episodes air", target: "pref-airing-notify", kw: "airing calendar countdown notification toast new episode" },
+    { cat: "integrations", label: "Airing & Jimaku notifications", hint: "Desktop & in-app alerts when tracked episodes or Jimaku JP subs drop", target: "pref-airing-notify", kw: "airing calendar countdown notification toast new episode jimaku sub" },
+    { cat: "integrations", label: "Keep Kura running in the System Tray", hint: "Minimize to tray on close to monitor episodes and Jimaku subtitles", target: "pref-minimize-to-tray", kw: "system tray background minimize close notification monitor" },
     { cat: "integrations", label: "Discord profile buttons", hint: "AniList and GitHub buttons", target: "pref-discord-buttons", fallback: "pref-discord-rpc", kw: "discord buttons anilist github" },
     { cat: "backup", label: "Export a backup", hint: "Save settings, libraries and watch history to a file", target: "set-export", kw: "backup export save transfer move computer" },
     { cat: "backup", label: "Restore from a backup", hint: "Import a Kura backup file", target: "set-import", kw: "backup import restore load transfer" },
@@ -698,7 +729,7 @@
     { cat: "updates", label: "What's New", hint: "Read the changelog", target: "view-changelog", kw: "changelog release notes whats new" },
     { cat: "about", label: "About Kura", hint: "Version, credits and links", target: "set-about", kw: "about version github credits" },
     { cat: "about", label: "Diagnostics", hint: "Copy a report for bug reports", target: "set-diagnostics", kw: "diagnostics debug bug report issue copy log problem help" },
-    { cat: "about", label: "Detected players", hint: "Where Kura found mpv, VLC, MPC and Memento", target: "set-players-detected", kw: "detect redetect player mpv vlc mpc memento path found" },
+    { cat: "about", label: "Detected players", hint: "Where Kura found mpv, VLC, and MPC", target: "set-players-detected", kw: "detect redetect player mpv vlc mpc path found" },
     { cat: "about", label: "Log file", hint: "Open Kura's log folder", target: "set-diagnostics", kw: "log logs file folder kura.log" },
   ];
 
@@ -934,7 +965,7 @@
     <div class="card display">
       <div class="opt-head" id="set-theme">
         <h3>Theme</h3>
-        <p class="faint">Choose between the classic dark comicbook look and the printed manga ink & paper aesthetic.</p>
+        <p class="faint">Choose between Kura Noir editorial dark cinema and printed Manga ink &amp; paper.</p>
       </div>
       <div class="choices" role="radiogroup" aria-label="Theme">
         <button
@@ -953,8 +984,8 @@
             </span>
           </span>
           <span class="choice-text">
-            <strong>Comicbook <span class="rec">Dark</span></strong>
-            <small>Deep plum-brown ink, warm coral accents, and chunky sticker shadows.</small>
+            <strong>Kura Noir <span class="rec">Dark</span></strong>
+            <small>Obsidian ink canvas, vermilion hanko accents, and borderless cinema artwork.</small>
           </span>
         </button>
         <button
@@ -973,8 +1004,8 @@
             </span>
           </span>
           <span class="choice-text">
-            <strong>Manga <span class="rec manga-rec">Light</span></strong>
-            <small>Authentic printed tankōbon — warm newsprint paper, sumi ink linework, and vermilion stamp seals.</small>
+            <strong>Manga Editorial <span class="rec manga-rec">Light</span></strong>
+            <small>Warm ivory paper, crisp sumi hairlines, and vermilion stamp seals.</small>
           </span>
         </button>
       </div>
@@ -1158,7 +1189,7 @@
       <div class="opt-head">
         <h3>Kura Operating Mode</h3>
         <p class="faint">
-          Choose between classic offline folder management or Hayase-style streaming &amp; catalog discovery powered by Kura's built-in BitTorrent range server.
+          Choose between offline local folder management or instant torrent streaming &amp; catalog discovery powered by Kura's built-in BitTorrent range server.
         </p>
       </div>
       <div class="choices" role="radiogroup" aria-label="App Mode">
@@ -1171,7 +1202,7 @@
           id="pref-mode-local"
         >
           <span class="choice-text">
-            <strong>1 · Offline Library Mode <span class="rec">Original</span></strong>
+            <strong>1 · Offline Library Mode <span class="rec">Local</span></strong>
             <small>Manage and watch anime stored in your local folders with zero torrent traffic.</small>
           </span>
         </button>
@@ -1184,8 +1215,8 @@
           id="pref-mode-streaming"
         >
           <span class="choice-text">
-            <strong>2 · Streaming &amp; Hybrid Mode <span class="rec">Hayase-style</span></strong>
-            <small>Browse the full AniList catalog &amp; voice actors, combine local + stream libraries, and click any episode to stream or download into mpv / Memento with auto-retimed Japanese subtitles.</small>
+            <strong>2 · Streaming &amp; Hybrid Mode <span class="rec">Full Catalog</span></strong>
+            <small>Browse the full AniList catalog &amp; voice actors, combine local + stream libraries, and click any episode to stream or download into Kura's Built-In Player or mpv with auto-retimed Japanese subtitles.</small>
           </span>
         </button>
       </div>
@@ -1207,7 +1238,7 @@
           >
             <span class="choice-text">
               <strong>Stream Only (Temp Cache)</strong>
-              <small>Streams sequentially into mpv / Memento and deletes the temp video when you close the player.</small>
+              <small>Streams sequentially into your player and deletes the temp video when you close the player.</small>
             </span>
           </button>
           <button
@@ -1254,58 +1285,16 @@
             </select>
           </div>
 
-          <div class="field" id="set-torrent-extensions">
-            <label for="pref-ext-url">Torrent Extensions &amp; Indexer Repositories</label>
-            <div class="fanart-key-row">
-              <input
-                id="pref-ext-url"
-                class="input fanart-key-input"
-                placeholder="Paste extension manifest URL (Hayase index.json) or RSS / API URL…"
-                bind:value={extUrlInput}
-                onkeydown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    void importExtension();
-                  }
-                }}
-              />
-              <button class="btn btn-primary btn-sm" disabled={extImporting || !extUrlInput.trim()} onclick={importExtension}>
-                {extImporting ? "Importing…" : "+ Add Extension"}
-              </button>
-            </div>
-            <small class="faint">
-              Kura ships with zero built-in piracy domains so the app stays safe on GitHub. Paste a Hayase-compatible extension manifest URL (<code>index.json</code>), a Kura JSON manifest, or a direct RSS / SubsPlease JSON / SeaDex API URL.
-            </small>
-
-            {#if torrentExtensions.length > 0}
-              <div class="rows" style="margin-top: 10px;">
-                {#each torrentExtensions as ext (ext.id)}
-                  <div class="row">
-                    <div class="row-text">
-                      <strong>{ext.name} <span class="badge">{ext.kind}</span></strong>
-                      <small><code>{ext.url}</code></small>
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                      <button
-                        class="switch"
-                        class:on={ext.enabled}
-                        role="switch"
-                        aria-checked={ext.enabled}
-                        aria-label={`Toggle ${ext.name}`}
-                        onclick={() => void toggleExtension(ext)}
-                      ><span></span></button>
-                      <button
-                        class="btn btn-ghost btn-sm"
-                        onclick={() => void removeExtension(ext.id)}
-                        title="Remove extension"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            {/if}
+          <div class="field">
+            <span class="field-label">Sources</span>
+            <button class="ext-jump" onclick={() => go("extensions")}>
+              <Icon name="grid" size={15} />
+              <span>
+                <strong>{torrentExtensions.filter((e) => e.enabled).length} of {torrentExtensions.length} extensions active</strong>
+                <small>Manage torrent and streaming sources</small>
+              </span>
+              <Icon name="chevron-right" size={15} />
+            </button>
           </div>
         </div>
 
@@ -1313,7 +1302,7 @@
           <div class="row">
             <div class="row-text">
               <strong>Auto-fetch &amp; auto-retime Japanese subtitles on stream</strong>
-              <small>When streaming an episode, automatically download matching Japanese subtitles from Jimaku.cc, synchronize their timing, and pass them to mpv / Memento.</small>
+              <small>When streaming an episode, automatically download matching Japanese subtitles from Jimaku.cc, synchronize their timing, and pass them to your player.</small>
             </div>
             <button
               class="switch"
@@ -1488,13 +1477,125 @@
   </section>
   {/if}
 
+  {#if active === "extensions"}
+  <section class="block" id="set-extensions">
+    <div class="block-head">
+      <h2 class="section-title">Extensions</h2>
+      <span class="ext-count">{torrentExtensions.filter((e) => e.enabled).length} active · {torrentExtensions.length} installed</span>
+    </div>
+
+    <div class="ext-install" id="set-torrent-extensions">
+      <Icon name="link" size={16} />
+      <input
+        id="pref-ext-url"
+        placeholder="Add a repository or source URL"
+        bind:value={extUrlInput}
+        autocomplete="off"
+        spellcheck="false"
+        onkeydown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void importExtension();
+          }
+        }}
+      />
+      <button class="btn btn-primary btn-sm" disabled={extImporting || !extUrlInput.trim()} onclick={importExtension}>
+        {#if extImporting}<span class="spinner"></span>{/if}
+        {extImporting ? "Adding…" : "Add"}
+      </button>
+    </div>
+    <button class="ext-help-toggle" onclick={() => (extHelpOpen = !extHelpOpen)}>
+      {extHelpOpen ? "Hide" : "What can I paste here?"}
+    </button>
+    {#if extHelpOpen}
+      <div class="ext-help faint">
+        <p>Kura doesn't ship with any sources. You can add:</p>
+        <ul>
+          <li>A GitHub repository — <code>gh:owner/repo</code></li>
+          <li>An extension manifest — <code>https://…/index.json</code></li>
+          <li>A direct RSS, SubsPlease or SeaDex API URL</li>
+        </ul>
+      </div>
+    {/if}
+
+    {#snippet extList(list: TorrentExtension[])}
+      <div class="ext-list">
+        {#each list as ext (ext.id)}
+          {@const title = extTitle(ext)}
+          <div class="ext-item" class:off={!ext.enabled}>
+            <div class="ext-icon">
+              {#if ext.iconUrl && !extFailedIcons[ext.id]}
+                <img
+                  src={ext.iconUrl}
+                  alt=""
+                  loading="lazy"
+                  onerror={() => (extFailedIcons = { ...extFailedIcons, [ext.id]: true })}
+                />
+              {:else}
+                <span>{title.slice(0, 1).toUpperCase()}</span>
+              {/if}
+            </div>
+            <div class="ext-text">
+              <div class="ext-name-row">
+                <strong>{title}</strong>
+                <span class="ext-kind">{extKindLabel(ext)}</span>
+              </div>
+              <small title={ext.url}>{extHost(ext)}</small>
+            </div>
+            <button
+              class="ext-remove"
+              onclick={() => void removeExtension(ext.id)}
+              title="Remove"
+              aria-label={`Remove ${title}`}
+            >
+              <Icon name="trash" size={14} />
+            </button>
+            <button
+              class="switch"
+              class:on={ext.enabled}
+              role="switch"
+              aria-checked={ext.enabled}
+              aria-label={`Toggle ${title}`}
+              onclick={() => void toggleExtension(ext)}
+            ><span></span></button>
+          </div>
+        {/each}
+      </div>
+    {/snippet}
+
+    {#if torrentExtensions.length === 0}
+      <div class="card ext-empty">
+        <div class="ext-empty-icon"><Icon name="grid" size={22} /></div>
+        <strong>No extensions yet</strong>
+        <p class="faint">Add a source above to start streaming episodes you don't have locally.</p>
+      </div>
+    {:else}
+      <div class="ext-group">
+        <h3 class="ext-group-title">Torrent sources</h3>
+        {#if torrentSources.length}
+          {@render extList(torrentSources)}
+        {:else}
+          <p class="faint ext-group-empty">None installed.</p>
+        {/if}
+      </div>
+
+      {#if streamSources.length}
+        <div class="ext-group">
+          <h3 class="ext-group-title">Streaming sources</h3>
+          {@render extList(streamSources)}
+        </div>
+      {/if}
+    {/if}
+  </section>
+  {/if}
+
   {#if active === "tracks"}
   <section class="block" id="set-tracks-section">
     <h2 class="section-title">Audio & Subtitles</h2>
     <div class="card playback">
       <div class="opt-head" id="set-tracks">
         <h3>Default track preferences</h3>
-        <p class="faint">Kura tells mpv, Memento, and VLC your language priorities when launching episodes. You can also override this for individual shows.</p>
+        <p class="faint">Kura applies your language priorities when launching episodes in the Built-In Player, mpv, or VLC. You can also override this for individual shows.</p>
       </div>
 
       <div class="choices presets-grid" role="radiogroup" aria-label="Audio and subtitle presets">
@@ -1583,12 +1684,12 @@
       </div>
     </div>
 
-    <h2 class="section-title" style="margin-top: 22px;">Japanese Dictionary (Memento / Yomitan Engine)</h2>
+    <h2 class="section-title" style="margin-top: 22px;">Japanese Dictionary (Yomitan Engine)</h2>
     <div class="card playback" id="set-yomitan">
       <div class="opt-head">
         <h3>Pause-to-Hover Yomitan Dictionary</h3>
         <p class="faint">
-          When watching in <strong>Kura Built-In (Memento)</strong> mode, pause the video and hover over any Japanese subtitle character to deinflect conjugated verbs/adjectives and view definitions, furigana, pitch accent, and Kanji breakdowns.
+          When watching in <strong>Kura Built-In Player</strong> mode, pause the video and hover over any Japanese subtitle character to deinflect conjugated verbs/adjectives and view definitions, furigana, pitch accent, and Kanji breakdowns.
         </p>
       </div>
 
@@ -1812,17 +1913,33 @@
         <div class="rows">
           <div class="row">
             <div class="row-text">
-              <strong>Airing & new-episode notifications</strong>
-              <small>Show an in-app notification when a tracked seasonal episode airs or when the live folder watcher detects a newly downloaded episode in your library.</small>
+              <strong>Airing &amp; Jimaku JP subtitle notifications</strong>
+              <small>Notify you when an episode in your Watching list airs and when Japanese subtitles become available on Jimaku (plus auto-prefetch the subtitle into your local cache).</small>
             </div>
             <button
               class="switch"
               class:on={app.airingNotifications}
               role="switch"
               aria-checked={app.airingNotifications}
-              aria-label="Airing and new-episode notifications"
+              aria-label="Airing and Jimaku JP subtitle notifications"
               onclick={() => app.setAiringNotifications(!app.airingNotifications)}
               id="pref-airing-notify"
+            ><span></span></button>
+          </div>
+
+          <div class="row">
+            <div class="row-text">
+              <strong>Keep Kura running in the System Tray</strong>
+              <small>Minimize Kura to the Windows system tray when closing the window so it can continue monitoring your Watching list for new episodes and delayed Jimaku Japanese subtitles in the background.</small>
+            </div>
+            <button
+              class="switch"
+              class:on={app.minimizeToTray}
+              role="switch"
+              aria-checked={app.minimizeToTray}
+              aria-label="Keep Kura running in the System Tray"
+              onclick={() => app.setMinimizeToTray(!app.minimizeToTray)}
+              id="pref-minimize-to-tray"
             ><span></span></button>
           </div>
         </div>
@@ -2103,7 +2220,7 @@
         </div>
         <div class="about-item">
           <strong>Player Integrations</strong>
-          <small>mpv · Memento · VLC · MPC-HC / MPC-BE</small>
+          <small>Kura Built-In Player · mpv · VLC · MPC-HC / MPC-BE</small>
         </div>
       </div>
 
@@ -3477,5 +3594,251 @@
   }
   .anilist-connect {
     margin-top: 14px;
+  }
+
+  /* Extensions --------------------------------------------------------------- */
+  .ext-jump {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border-radius: var(--r-md);
+    border: var(--bw) solid var(--line);
+    background: var(--surface);
+    color: var(--text-2);
+    text-align: left;
+    cursor: pointer;
+    transition: border-color var(--t-fast) var(--ease);
+  }
+  .ext-jump:hover {
+    border-color: var(--coral);
+  }
+  .ext-jump span {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .ext-jump strong {
+    color: var(--text);
+    font-size: 13.5px;
+  }
+  .ext-jump small {
+    color: var(--text-3);
+    font-size: 12px;
+  }
+  .field-label {
+    display: block;
+    font-size: 12.5px;
+    font-weight: 700;
+    color: var(--text-2);
+    margin-bottom: 6px;
+  }
+
+  .ext-count {
+    font-size: 12.5px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ext-install {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 6px 6px 14px;
+    border-radius: var(--r-md);
+    border: var(--bw) solid var(--line);
+    background: var(--surface);
+    color: var(--text-3);
+    transition: border-color var(--t-fast) var(--ease);
+  }
+  .ext-install:focus-within {
+    border-color: var(--coral);
+  }
+  .ext-install input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 13.5px;
+    padding: 6px 0;
+  }
+  .ext-install input::placeholder {
+    color: var(--text-3);
+  }
+
+  .ext-help-toggle {
+    align-self: flex-start;
+    margin-top: 8px;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--text-3);
+    font-size: 12px;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  .ext-help-toggle:hover {
+    color: var(--text);
+  }
+  .ext-help {
+    margin-top: 8px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .ext-help p {
+    margin: 0 0 4px;
+  }
+  .ext-help ul {
+    margin: 0;
+    padding-left: 18px;
+  }
+
+  .ext-group {
+    margin-top: 26px;
+  }
+  .ext-group-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    margin: 0 0 8px 2px;
+  }
+  .ext-group-empty {
+    font-size: 12.5px;
+    margin: 0 0 0 2px;
+  }
+
+  .ext-list {
+    display: flex;
+    flex-direction: column;
+    border-radius: var(--r-md);
+    border: var(--bw) solid var(--line);
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .ext-item {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 14px;
+    transition: background var(--t-fast) var(--ease);
+  }
+  .ext-item + .ext-item {
+    border-top: var(--bw) solid var(--line);
+  }
+  .ext-item:hover {
+    background: var(--surface-2);
+  }
+  .ext-item.off .ext-icon,
+  .ext-item.off .ext-text {
+    opacity: 0.5;
+  }
+
+  .ext-icon {
+    width: 38px;
+    height: 38px;
+    flex: none;
+    border-radius: 10px;
+    background: var(--surface-3);
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+  }
+  .ext-icon img {
+    width: 22px;
+    height: 22px;
+    object-fit: contain;
+  }
+  .ext-icon span {
+    font-family: var(--font-display);
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-2);
+  }
+
+  .ext-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .ext-name-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+  }
+  .ext-name-row strong {
+    font-size: 14px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ext-kind {
+    flex: none;
+    font-size: 11.5px;
+    color: var(--text-3);
+  }
+  .ext-text small {
+    font-size: 12px;
+    color: var(--text-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .ext-remove {
+    width: 30px;
+    height: 30px;
+    flex: none;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-3);
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity var(--t-fast) var(--ease), background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+  }
+  .ext-item:hover .ext-remove,
+  .ext-remove:focus-visible {
+    opacity: 1;
+  }
+  .ext-remove:hover {
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+    color: var(--danger);
+  }
+
+  .ext-empty {
+    margin-top: 22px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 6px;
+    padding: 32px 20px;
+  }
+  .ext-empty-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    background: var(--surface-3);
+    color: var(--text-2);
+    display: grid;
+    place-items: center;
+    margin-bottom: 4px;
+  }
+  .ext-empty p {
+    margin: 0;
+    font-size: 12.5px;
   }
 </style>
