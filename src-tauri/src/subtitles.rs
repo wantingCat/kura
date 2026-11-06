@@ -141,25 +141,29 @@ pub struct JimakuDownloadResult {
 // ---------------------------------------------------------------------------
 
 pub fn list_linked_subtitles(conn: &Connection, anilist_id: i64) -> Result<Vec<LinkedSubtitle>> {
-    let _ = conn.execute_batch(db::SCHEMA_V6);
-    let _ = conn.execute("ALTER TABLE linked_subtitles ADD COLUMN content TEXT", []);
     let mut stmt = conn.prepare(
-        "SELECT id, anilist_id, ep_key, path, lang, cc, source, retimed, offset_ms, content
+        "SELECT id, anilist_id, ep_key, path, lang, cc, source, retimed, offset_ms
          FROM linked_subtitles
          WHERE anilist_id = ?1
          ORDER BY CAST(ep_key AS INTEGER), id",
     )?;
     let rows = stmt
         .query_map([anilist_id], |r| {
+            let id: i64 = r.get(0)?;
             let path: String = r.get(3)?;
-            let content: Option<String> = r.get(9)?;
             let p = Path::new(&path);
             if !p.is_file() {
-                if let Some(ref text) = content.as_ref().filter(|s| !s.is_empty()) {
-                    if let Some(parent) = p.parent() {
-                        let _ = std::fs::create_dir_all(parent);
+                if let Ok(Some(text)) = conn.query_row(
+                    "SELECT content FROM linked_subtitles WHERE id = ?1",
+                    [id],
+                    |cr| cr.get::<_, Option<String>>(0),
+                ) {
+                    if !text.is_empty() {
+                        if let Some(parent) = p.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(p, text.as_bytes());
                     }
-                    let _ = std::fs::write(p, text.as_bytes());
                 }
             }
             let file_name = p
@@ -168,7 +172,7 @@ pub fn list_linked_subtitles(conn: &Connection, anilist_id: i64) -> Result<Vec<L
                 .unwrap_or_else(|| path.clone());
             let exists = p.is_file();
             Ok(LinkedSubtitle {
-                id: r.get(0)?,
+                id,
                 anilist_id: r.get(1)?,
                 ep_key: r.get(2)?,
                 path,
@@ -186,10 +190,22 @@ pub fn list_linked_subtitles(conn: &Connection, anilist_id: i64) -> Result<Vec<L
 }
 
 pub fn episode_subtitle_paths(conn: &Connection, anilist_id: i64, ep_key: &str) -> Vec<String> {
-    let _ = conn.execute_batch(db::SCHEMA_V6);
-    let _ = conn.execute("ALTER TABLE linked_subtitles ADD COLUMN content TEXT", []);
+    episode_subtitle_paths_for_pref(conn, anilist_id, ep_key, None)
+}
+
+pub fn episode_subtitle_paths_for_pref(
+    conn: &Connection,
+    anilist_id: i64,
+    ep_key: &str,
+    sub_pref: Option<&str>,
+) -> Vec<String> {
+    if let Some(pref) = sub_pref.map(|s| s.trim().to_ascii_lowercase()) {
+        if pref == "off" || pref == "none" {
+            return Vec::new();
+        }
+    }
     let mut stmt = match conn.prepare(
-        "SELECT path, content FROM linked_subtitles
+        "SELECT id, path, lang FROM linked_subtitles
          WHERE anilist_id = ?1 AND ep_key = ?2
          ORDER BY retimed DESC, id DESC",
     ) {
@@ -197,20 +213,40 @@ pub fn episode_subtitle_paths(conn: &Connection, anilist_id: i64, ep_key: &str) 
         Err(_) => return Vec::new(),
     };
     let rows = match stmt.query_map(params![anilist_id, ep_key], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
     }) {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
     let mut out = Vec::new();
-    for (path, content) in rows.flatten() {
+    for (id, path, lang) in rows.flatten() {
+        if let Some(pref) = sub_pref {
+            let p_trim = pref.trim();
+            if !p_trim.is_empty()
+                && !p_trim.eq_ignore_ascii_case("any")
+                && !p_trim.eq_ignore_ascii_case("default")
+                && !crate::player::lang_matches_code(&lang, Some(&path), p_trim)
+            {
+                continue;
+            }
+        }
         let p = Path::new(&path);
         if !p.is_file() {
-            if let Some(text) = content.filter(|s| !s.is_empty()) {
-                if let Some(parent) = p.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+            if let Ok(Some(text)) = conn.query_row(
+                "SELECT content FROM linked_subtitles WHERE id = ?1",
+                [id],
+                |cr| cr.get::<_, Option<String>>(0),
+            ) {
+                if !text.is_empty() {
+                    if let Some(parent) = p.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(p, text.as_bytes());
                 }
-                let _ = std::fs::write(p, text.as_bytes());
             }
         }
         if p.is_file() {
@@ -2053,9 +2089,9 @@ pub async fn jimaku_search_files(
         });
     };
 
-    // 1. Resolve Jimaku entry for `anilist_id` (cached for 6 hours)
+    // 1. Resolve Jimaku entry for `anilist_id` (cached for 6 hours; negative lookup cached for 1 hour)
     let entry_cache_key = format!("entry:{anilist_id}");
-    let cached_entry: Option<JimakuEntry> = {
+    let cached_lookup: Option<Option<JimakuEntry>> = {
         let conn = st.db();
         conn.query_row(
             "SELECT payload, fetched_at FROM jimaku_cache WHERE cache_key = ?1",
@@ -2065,12 +2101,26 @@ pub async fn jimaku_search_files(
         .optional()
         .ok()
         .flatten()
-        .filter(|(_, ts)| now() - *ts < 6 * 3600)
-        .and_then(|(payload, _)| serde_json::from_str(&payload).ok())
+        .and_then(|(payload, ts)| {
+            let age = now() - ts;
+            if payload == "null" {
+                if age < 3600 {
+                    Some(None)
+                } else {
+                    None
+                }
+            } else if age < 6 * 3600 {
+                serde_json::from_str::<JimakuEntry>(&payload)
+                    .ok()
+                    .map(Some)
+            } else {
+                None
+            }
+        })
     };
 
-    let entry = match cached_entry {
-        Some(e) => Some(e),
+    let entry = match cached_lookup {
+        Some(opt) => opt,
         None => {
             let url = format!("https://jimaku.cc/api/entries/search?anilist_id={anilist_id}");
             let resp = st
@@ -2094,14 +2144,14 @@ pub async fn jimaku_search_files(
             }
             let entries: Vec<JimakuEntry> = resp.json().await.unwrap_or_default();
             let first = entries.into_iter().next();
-            if let Some(ref e) = first {
-                if let Ok(json_str) = serde_json::to_string(e) {
-                    let _ = st.db().execute(
-                        "INSERT OR REPLACE INTO jimaku_cache (cache_key, payload, fetched_at) VALUES (?1, ?2, ?3)",
-                        params![entry_cache_key, json_str, now()],
-                    );
-                }
-            }
+            let payload_str = match first {
+                Some(ref e) => serde_json::to_string(e).unwrap_or_else(|_| "null".to_string()),
+                None => "null".to_string(),
+            };
+            let _ = st.db().execute(
+                "INSERT OR REPLACE INTO jimaku_cache (cache_key, payload, fetched_at) VALUES (?1, ?2, ?3)",
+                params![entry_cache_key, payload_str, now()],
+            );
             first
         }
     };
@@ -2494,7 +2544,6 @@ pub async fn check_and_prefetch_jimaku_episode(
     }
     let has_key = {
         let conn = st.db();
-        let _ = conn.execute_batch(db::SCHEMA_V6);
         get_jimaku_api_key(&conn).is_some()
     };
     if !has_key {
@@ -2512,8 +2561,10 @@ pub async fn check_and_prefetch_jimaku_episode(
         return false;
     };
 
-    let _ = jimaku_download_and_process(st, anilist_id, &ep_key, &best.name, &best.url, false).await;
-    true
+    jimaku_download_and_process(st, anilist_id, &ep_key, &best.name, &best.url, false)
+        .await
+        .map(|r| r.linked_count > 0 || !r.saved_paths.is_empty())
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------

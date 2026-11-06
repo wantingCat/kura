@@ -488,7 +488,9 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
             Err(e) => crate::klog!("[kura] resolving file {} failed: {e:#}", f.id),
         }
     }
-    let _ = app.emit("library-changed", ());
+    if !files.is_empty() || !groups.is_empty() {
+        let _ = app.emit("library-changed", ());
+    }
 
     // 5. Episodes + fresh metadata for every owned entry
     let owned: Vec<i64> = {
@@ -507,52 +509,84 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
     }
 
     // 6. Scan candidate directories for local artwork (Priority 1: Local Folder Assets)
-    for id in &owned {
-        let dirs: Vec<PathBuf> = {
-            let conn = st.db();
-            let mut set: HashSet<PathBuf> = HashSet::new();
-            if let Ok(mut stmt) = conn.prepare("SELECT path FROM local_files WHERE anilist_id = ?1") {
-                if let Ok(paths) = stmt.query_map([id], |r| r.get::<_, String>(0)) {
-                    for p in paths.flatten() {
-                        let p = PathBuf::from(p);
-                        if let Some(parent) = p.parent() {
-                            let p_str = parent.to_string_lossy().to_ascii_lowercase();
-                            if p_str.contains("season") || p_str.contains("specials") || p_str.contains("extras") {
-                                if let Some(grandparent) = parent.parent() {
-                                    set.insert(grandparent.to_path_buf());
+    // Run off the async runtime thread so directory walks never stall UI commands.
+    if changed > 0 || !files.is_empty() || !groups.is_empty() {
+        let st_art = st.clone();
+        let owned_art = owned.clone();
+        let updated_art = tauri::async_runtime::spawn_blocking(move || -> bool {
+            let mut any_updated = false;
+            for id in &owned_art {
+                let dirs: Vec<PathBuf> = {
+                    let conn = st_art.db();
+                    let mut set: HashSet<PathBuf> = HashSet::new();
+                    if let Ok(mut stmt) =
+                        conn.prepare("SELECT path FROM local_files WHERE anilist_id = ?1")
+                    {
+                        if let Ok(paths) = stmt.query_map([id], |r| r.get::<_, String>(0)) {
+                            for p in paths.flatten() {
+                                let p = PathBuf::from(p);
+                                if let Some(parent) = p.parent() {
+                                    let p_str = parent.to_string_lossy().to_ascii_lowercase();
+                                    if p_str.contains("season")
+                                        || p_str.contains("specials")
+                                        || p_str.contains("extras")
+                                    {
+                                        if let Some(grandparent) = parent.parent() {
+                                            set.insert(grandparent.to_path_buf());
+                                        }
+                                    }
+                                    set.insert(parent.to_path_buf());
                                 }
                             }
-                            set.insert(parent.to_path_buf());
                         }
                     }
-                }
-            }
-            if let Ok(mut stmt_g) = conn.prepare("SELECT folder_path FROM match_groups WHERE anilist_id = ?1 AND folder_path IS NOT NULL") {
-                if let Ok(g_paths) = stmt_g.query_map([id], |r| r.get::<_, String>(0)) {
-                    for g in g_paths.flatten() {
-                        set.insert(PathBuf::from(g));
+                    if let Ok(mut stmt_g) = conn.prepare(
+                        "SELECT folder_path FROM match_groups WHERE anilist_id = ?1 AND folder_path IS NOT NULL",
+                    ) {
+                        if let Ok(g_paths) = stmt_g.query_map([id], |r| r.get::<_, String>(0)) {
+                            for g in g_paths.flatten() {
+                                set.insert(PathBuf::from(g));
+                            }
+                        }
                     }
+                    set.into_iter().collect()
+                };
+
+                let local = scan_folder_assets(&dirs);
+                let conn = st_art.db();
+                if let Some(poster) = local.poster {
+                    let s = poster.to_string_lossy().to_string();
+                    let _ = conn.execute(
+                        "UPDATE media SET cover_path = ?2 WHERE anilist_id = ?1",
+                        params![id, s],
+                    );
+                    any_updated = true;
+                }
+                if let Some(backdrop) = local.backdrop {
+                    let s = backdrop.to_string_lossy().to_string();
+                    let _ = conn.execute(
+                        "UPDATE media SET banner_path = ?2 WHERE anilist_id = ?1",
+                        params![id, s],
+                    );
+                    any_updated = true;
+                }
+                if let Some(logo) = local.logo {
+                    let s = logo.to_string_lossy().to_string();
+                    let _ = conn.execute(
+                        "UPDATE media SET logo_path = ?2 WHERE anilist_id = ?1",
+                        params![id, s],
+                    );
+                    any_updated = true;
                 }
             }
-            set.into_iter().collect()
-        };
-
-        let local = scan_folder_assets(&dirs);
-        let conn = st.db();
-        if let Some(poster) = local.poster {
-            let s = poster.to_string_lossy().to_string();
-            let _ = conn.execute("UPDATE media SET cover_path = ?2 WHERE anilist_id = ?1", params![id, s]);
-        }
-        if let Some(backdrop) = local.backdrop {
-            let s = backdrop.to_string_lossy().to_string();
-            let _ = conn.execute("UPDATE media SET banner_path = ?2 WHERE anilist_id = ?1", params![id, s]);
-        }
-        if let Some(logo) = local.logo {
-            let s = logo.to_string_lossy().to_string();
-            let _ = conn.execute("UPDATE media SET logo_path = ?2 WHERE anilist_id = ?1", params![id, s]);
+            any_updated
+        })
+        .await
+        .unwrap_or(false);
+        if updated_art {
+            let _ = app.emit("library-changed", ());
         }
     }
-    let _ = app.emit("library-changed", ());
 
     // 7. Artwork (download remote covers, banners, logos and thumbs if missing locally)
     download_artwork(app, st, &owned).await?;

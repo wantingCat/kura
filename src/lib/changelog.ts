@@ -16,10 +16,35 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.7.1",
+    title: "System Performance, Single-Instance Tray Resume & Subtitle Language Fixes",
+    date: "November 2026",
+    badge: "Latest",
+    summary:
+      "Kura 0.7.1 fixes duplicate background processes when reopening from the system tray, eliminates GPU compositing and SQLite write bottlenecks, and ensures English subtitle preferences are strictly respected without forcing retimed Japanese subtitles.",
+    items: [
+      {
+        type: "fix",
+        text: "Single-instance tray resume: opening Kura while it is already running or minimized to the system tray now wakes and focuses the existing window instead of spawning duplicate background processes.",
+      },
+      {
+        type: "fix",
+        text: "Subtitle language priority: the Built-In Player, external players (mpv, VLC, MPC), and torrent streaming now strictly respect your primary subtitle language (e.g. English) without auto-selecting or hijacking playback with retimed Japanese subtitles.",
+      },
+      {
+        type: "improvement",
+        text: "Switching subtitle tracks inside the Built-In Player's Tracks menu now remembers your language choice for future episodes.",
+      },
+      {
+        type: "improvement",
+        text: "Performance & GPU smoothness: removed WebView2 GPU blocklist overrides, eliminated per-card backdrop-filter blurs across the library grid, paused background animations when hidden in the tray, and optimized SQLite sync queries.",
+      },
+    ],
+  },
+  {
     version: "0.7.0",
     title: "New Look, Reliable Torrent Streaming & Episode / Japanese Subtitle Alerts",
     date: "November 2026",
-    badge: "Latest",
     summary:
       "Kura 0.7 brings a completely redesigned interface, a much more reliable torrent engine that finds releases and peers far more often, global search across your library and AniList, and notifications when new episodes air or Japanese subtitles land on Jimaku — even while Kura sits in the system tray.",
     items: [

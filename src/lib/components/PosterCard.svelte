@@ -91,8 +91,8 @@
     flex-direction: column;
     gap: 8px;
     min-width: 0;
-    animation: fade-up 360ms var(--ease) both;
-    animation-delay: calc(var(--i) * 14ms);
+    content-visibility: auto;
+    contain-intrinsic-size: 160px 280px;
     outline: none;
   }
 
@@ -179,16 +179,15 @@
     padding: 0 7px;
     font-size: 10px;
     border-radius: 6px;
-    backdrop-filter: blur(10px);
   }
 
   .seasons {
-    background: rgba(0, 0, 0, 0.62);
+    background: rgba(10, 10, 14, 0.84);
     color: #fff;
   }
 
   .tag {
-    background: rgba(0, 0, 0, 0.62);
+    background: rgba(10, 10, 14, 0.84);
     color: #f3f3f5;
   }
 
@@ -196,7 +195,7 @@
     width: 20px;
     padding: 0 !important;
     justify-content: center;
-    background: rgba(0, 0, 0, 0.62);
+    background: rgba(10, 10, 14, 0.84);
     margin-left: auto;
   }
 

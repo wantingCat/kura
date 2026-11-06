@@ -121,11 +121,20 @@ class AppStore {
   #refreshTimer: ReturnType<typeof setTimeout> | null = null;
   #launchTimer: ReturnType<typeof setTimeout> | null = null;
   #initialised = false;
+  #needsRefreshOnWake = false;
   #toastId = 0;
 
   async init() {
     if (this.#initialised) return;
     this.#initialised = true;
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden && this.#needsRefreshOnWake) {
+          this.#needsRefreshOnWake = false;
+          this.scheduleRefresh();
+        }
+      });
+    }
     if (typeof localStorage !== "undefined") {
       const localTheme = localStorage.getItem("kura-theme") as AppTheme | null;
       if (localTheme === "manga" || localTheme === "comic") {
@@ -297,8 +306,12 @@ class AppStore {
   }
 
   scheduleRefresh() {
+    if (typeof document !== "undefined" && document.hidden && this.loaded) {
+      this.#needsRefreshOnWake = true;
+      return;
+    }
     if (this.#refreshTimer) clearTimeout(this.#refreshTimer);
-    this.#refreshTimer = setTimeout(() => this.refresh(), 250);
+    this.#refreshTimer = setTimeout(() => this.refresh(), 300);
   }
 
   async refresh() {

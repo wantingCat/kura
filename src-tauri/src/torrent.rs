@@ -4173,7 +4173,8 @@ async fn run_swarm_orchestrator(
     let mut peer_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     // Also auto-fetch Japanese subtitles from Jimaku if enabled, key is configured,
-    // and this episode does not already have a saved subtitle in `linked_subtitles`.
+    // preferred subtitle language is Japanese, and this episode does not already have
+    // a saved subtitle in `linked_subtitles`.
     let auto_subs = {
         let conn = st.db();
         let enabled = db::get_setting(&conn, "pref.torrent_auto_subs")
@@ -4186,9 +4187,13 @@ async fn run_swarm_orchestrator(
             .flatten()
             .map(|k| !k.trim().is_empty())
             .unwrap_or(false);
+        let wants_jp = crate::player::wants_japanese_subs(&crate::player::effective_track_prefs(
+            &conn,
+            session.anilist_id,
+        ));
         let already_saved =
             crate::subtitles::has_saved_subtitle(&conn, session.anilist_id, &session.ep_key);
-        enabled && has_key && !already_saved
+        enabled && has_key && wants_jp && !already_saved
     };
 
     if auto_subs {

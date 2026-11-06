@@ -154,6 +154,8 @@ struct RuntimeSession {
     ext_auto_offset_sec: Option<f64>,
     ext_matched_cues: usize,
     user_adjusted_offset: bool,
+    user_selected_sub_track: bool,
+    track_prefs: player::EffectiveTrackPrefs,
 }
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -173,6 +175,8 @@ fn runtime() -> &'static Mutex<RuntimeSession> {
             ext_auto_offset_sec: None,
             ext_matched_cues: 0,
             user_adjusted_offset: false,
+            user_selected_sub_track: false,
+            track_prefs: player::EffectiveTrackPrefs::default(),
         })
     })
 }
@@ -199,13 +203,31 @@ pub fn reload_cues_if_active(anilist_id: i64, ep_key: &str, sub_path: &str) -> b
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "External Subtitle".to_string());
+        let ext_lang = subtitles::detect_sub_language(&file_name).unwrap_or_else(|| "ja".to_string());
+        let should_select = match g.track_prefs.sub.as_deref() {
+            Some(pref) => player::lang_matches_code(&ext_lang, Some(&file_name), pref),
+            None => true,
+        };
 
-        for tr in &mut g.state.sub_tracks {
-            tr.selected = false;
+        if let Some((auto_off, matched)) =
+            subtitles::compute_live_cue_offset_from_tracks(&cues, &g.cues_by_track, EXTERNAL_SUB_TRACK_ID)
+        {
+            g.ext_auto_offset_sec = Some(auto_off);
+            g.ext_matched_cues = matched;
+        }
+        g.cues_by_track.insert(EXTERNAL_SUB_TRACK_ID, cues.clone());
+
+        if should_select {
+            for tr in &mut g.state.sub_tracks {
+                tr.selected = false;
+            }
         }
         if let Some(existing) = g.state.sub_tracks.iter_mut().find(|t| t.id == EXTERNAL_SUB_TRACK_ID) {
             existing.title = Some(file_name);
-            existing.selected = true;
+            existing.lang = Some(ext_lang);
+            if should_select {
+                existing.selected = true;
+            }
         } else {
             g.state.sub_tracks.insert(
                 0,
@@ -213,28 +235,24 @@ pub fn reload_cues_if_active(anilist_id: i64, ep_key: &str, sub_path: &str) -> b
                     id: EXTERNAL_SUB_TRACK_ID,
                     track_type: "sub".to_string(),
                     title: Some(file_name),
-                    lang: Some("ja".to_string()),
+                    lang: Some(ext_lang),
                     codec: Some("external".to_string()),
-                    selected: true,
+                    selected: should_select,
                     external: true,
                 },
             );
         }
-        g.state.sid = Some(EXTERNAL_SUB_TRACK_ID);
-        g.user_adjusted_offset = false;
-        g.ext_matched_cues = 0;
-        if let Some((auto_off, matched)) =
-            subtitles::compute_live_cue_offset_from_tracks(&cues, &g.cues_by_track, EXTERNAL_SUB_TRACK_ID)
-        {
-            g.ext_auto_offset_sec = Some(auto_off);
-            g.ext_matched_cues = matched;
-            g.state.sub_offset_sec = auto_off;
+        if should_select {
+            g.state.sid = Some(EXTERNAL_SUB_TRACK_ID);
+            g.user_adjusted_offset = false;
+            if let Some(auto_off) = g.ext_auto_offset_sec {
+                g.state.sub_offset_sec = auto_off;
+            }
+            let pos = g.state.position;
+            let off = g.state.sub_offset_sec;
+            g.state.sub_text = find_cue_at(&cues, pos, off).unwrap_or_default();
+            g.cues = cues;
         }
-        let pos = g.state.position;
-        let off = g.state.sub_offset_sec;
-        g.state.sub_text = find_cue_at(&cues, pos, off).unwrap_or_default();
-        g.cues_by_track.insert(EXTERNAL_SUB_TRACK_ID, cues.clone());
-        g.cues = cues;
         return true;
     }
     false
@@ -674,6 +692,63 @@ fn emit_state(app: &AppHandle, state: &BuiltinPlayerState) {
     let _ = app.emit("builtin-player-state", state);
 }
 
+fn pick_sub_track_for_code(tracks: &[TrackItem], code: &str) -> Option<i64> {
+    let c = code.trim().to_ascii_lowercase();
+    if c.is_empty() || c == "off" || c == "none" {
+        return None;
+    }
+    if c == "any" || c == "default" {
+        return tracks
+            .iter()
+            .find(|t| !t.external && !player::is_signs_or_songs_title(t.title.as_deref()))
+            .or_else(|| tracks.iter().find(|t| !t.external))
+            .or_else(|| tracks.first())
+            .map(|t| t.id);
+    }
+    let prefer_external = matches!(c.as_str(), "jpn" | "ja" | "japanese" | "jp");
+    // 1. Full dialogue tracks (not Signs/Songs)
+    if let Some(t) = tracks
+        .iter()
+        .filter(|t| {
+            player::lang_matches_code(t.lang.as_deref().unwrap_or(""), t.title.as_deref(), &c)
+                && !player::is_signs_or_songs_title(t.title.as_deref())
+        })
+        .min_by_key(|t| if prefer_external { !t.external } else { t.external })
+    {
+        return Some(t.id);
+    }
+    // 2. Any matching language track (including Signs/Songs if nothing else matches)
+    tracks
+        .iter()
+        .filter(|t| {
+            player::lang_matches_code(t.lang.as_deref().unwrap_or(""), t.title.as_deref(), &c)
+        })
+        .min_by_key(|t| if prefer_external { !t.external } else { t.external })
+        .map(|t| t.id)
+}
+
+fn pick_best_sub_track_id(tracks: &[TrackItem], prefs: &player::EffectiveTrackPrefs) -> Option<i64> {
+    let sub_pref = prefs.sub.as_deref().unwrap_or("jpn").trim();
+    if sub_pref.eq_ignore_ascii_case("off") || sub_pref.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    if let Some(id) = pick_sub_track_for_code(tracks, sub_pref) {
+        return Some(id);
+    }
+    if let Some(fb) = prefs.sub_fallback.as_deref() {
+        let fb_trim = fb.trim();
+        if !fb_trim.is_empty()
+            && !fb_trim.eq_ignore_ascii_case("off")
+            && !fb_trim.eq_ignore_ascii_case("none")
+        {
+            if let Some(id) = pick_sub_track_for_code(tracks, fb_trim) {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Launching & Controlling the Built-in Player
 // ---------------------------------------------------------------------------
@@ -682,7 +757,17 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
     let session_id = SESSION_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
     let _play_session = st.play_session.fetch_add(1, Ordering::SeqCst) + 1;
 
-    let (start_pos, threshold, autoplay, show_title, episode_title, has_next, ext_sub_path, ext_cues) = {
+    let (
+        start_pos,
+        threshold,
+        autoplay,
+        show_title,
+        episode_title,
+        has_next,
+        ext_sub_path,
+        ext_cues,
+        track_prefs,
+    ) = {
         let conn = st.db();
         let p = player::prefs(&conn);
         let saved = player::saved_progress(&conn, ep.anilist_id, &ep.ep_key);
@@ -693,7 +778,9 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         };
         let (show_title, episode_title) = resolve_titles(&conn, ep.anilist_id, &ep.ep_key);
         let has_next = player::next_episode(&conn, &ep).is_some();
-        let (ext_sub_path, ext_cues) = subtitles::load_cues_for_episode(&conn, ep.anilist_id, &ep.ep_key, &ep.path);
+        let (ext_sub_path, ext_cues) =
+            subtitles::load_cues_for_episode(&conn, ep.anilist_id, &ep.ep_key, &ep.path);
+        let track_prefs = player::effective_track_prefs(&conn, ep.anilist_id);
         (
             start_pos,
             p.threshold,
@@ -703,6 +790,7 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             has_next,
             ext_sub_path,
             ext_cues,
+            track_prefs,
         )
     };
 
@@ -718,6 +806,7 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
     let mut cues_by_track = HashMap::new();
     let mut active_sid = None;
     let mut initial_sub_text = String::new();
+    let mut initial_cues = Vec::new();
 
     if !ext_cues.is_empty() {
         let file_label = ext_sub_path
@@ -725,18 +814,27 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             .and_then(|p| Path::new(p).file_name())
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "External Subtitle".to_string());
+        let ext_lang =
+            subtitles::detect_sub_language(&file_label).unwrap_or_else(|| "ja".to_string());
+        let select_ext = match track_prefs.sub.as_deref() {
+            Some(pref) => player::lang_matches_code(&ext_lang, Some(&file_label), pref),
+            None => true,
+        };
         sub_tracks.push(TrackItem {
             id: EXTERNAL_SUB_TRACK_ID,
             track_type: "sub".to_string(),
             title: Some(file_label),
-            lang: Some("ja".to_string()),
+            lang: Some(ext_lang),
             codec: Some("external".to_string()),
-            selected: true,
+            selected: select_ext,
             external: true,
         });
-        active_sid = Some(EXTERNAL_SUB_TRACK_ID);
-        initial_sub_text = find_cue_at(&ext_cues, start_pos, 0.0).unwrap_or_default();
         cues_by_track.insert(EXTERNAL_SUB_TRACK_ID, ext_cues.clone());
+        if select_ext {
+            active_sid = Some(EXTERNAL_SUB_TRACK_ID);
+            initial_sub_text = find_cue_at(&ext_cues, start_pos, 0.0).unwrap_or_default();
+            initial_cues = ext_cues;
+        }
     }
 
     let initial_state = BuiltinPlayerState {
@@ -777,7 +875,7 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
     {
         let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
         g.state = initial_state.clone();
-        g.cues = ext_cues;
+        g.cues = initial_cues;
         g.cues_by_track = cues_by_track;
         g.threshold = threshold;
         g.autoplay = autoplay;
@@ -787,6 +885,8 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         g.ext_auto_offset_sec = None;
         g.ext_matched_cues = 0;
         g.user_adjusted_offset = false;
+        g.user_selected_sub_track = false;
+        g.track_prefs = track_prefs;
     }
 
     emit_state(&app, &initial_state);
@@ -879,10 +979,22 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
                     if g.state.audio_tracks.is_empty() && !embedded.audio_tracks.is_empty() {
                         let mut a_items = Vec::new();
                         let mut chosen_aid: Option<i64> = None;
-                        for (idx, tr) in embedded.audio_tracks.iter().enumerate() {
-                            let ordinal = (idx + 1) as i64;
-                            if chosen_aid.is_none() && is_japanese_lang(&tr.lang) {
-                                chosen_aid = Some(ordinal);
+                        if let Some(audio_pref) = g.track_prefs.audio.as_deref() {
+                            for (idx, tr) in embedded.audio_tracks.iter().enumerate() {
+                                let ordinal = (idx + 1) as i64;
+                                if player::lang_matches_code(&tr.lang, tr.title.as_deref(), audio_pref) {
+                                    chosen_aid = Some(ordinal);
+                                    break;
+                                }
+                            }
+                        }
+                        if chosen_aid.is_none() {
+                            for (idx, tr) in embedded.audio_tracks.iter().enumerate() {
+                                let ordinal = (idx + 1) as i64;
+                                if is_japanese_lang(&tr.lang) {
+                                    chosen_aid = Some(ordinal);
+                                    break;
+                                }
                             }
                         }
                         if chosen_aid.is_none() {
@@ -906,31 +1018,7 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
 
                     // Embedded subtitle tracks
                     if !embedded.sub_tracks.is_empty() {
-                        let current_sid = g.state.sid;
-                        let mut chosen_sid = current_sid;
-                        if chosen_sid.is_none() && g.state.sub_tracks.is_empty() {
-                            for tr in &embedded.sub_tracks {
-                                if is_japanese_lang(&tr.lang)
-                                    || tr.title.as_deref().map(is_japanese_lang).unwrap_or(false)
-                                {
-                                    chosen_sid = Some(tr.track_num);
-                                    break;
-                                }
-                            }
-                            if chosen_sid.is_none() {
-                                chosen_sid = embedded.sub_tracks.first().map(|t| t.track_num);
-                            }
-                        }
-
                         for tr in embedded.sub_tracks {
-                            let is_sel = Some(tr.track_num) == chosen_sid;
-                            if is_sel {
-                                g.state.sid = Some(tr.track_num);
-                                let pos = g.state.position;
-                                let off = g.state.sub_offset_sec;
-                                g.state.sub_text = find_cue_at(&tr.cues, pos, off).unwrap_or_default();
-                                g.cues = tr.cues.clone();
-                            }
                             g.cues_by_track.insert(tr.track_num, tr.cues);
                             if !g.state.sub_tracks.iter().any(|existing| existing.id == tr.track_num) {
                                 g.state.sub_tracks.push(TrackItem {
@@ -939,9 +1027,43 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
                                     title: tr.title,
                                     lang: Some(tr.lang),
                                     codec: Some(tr.codec),
-                                    selected: is_sel,
+                                    selected: false,
                                     external: false,
                                 });
+                            }
+                        }
+
+                        if !g.user_selected_sub_track {
+                            let chosen_sid = pick_best_sub_track_id(&g.state.sub_tracks, &g.track_prefs);
+                            g.state.sid = chosen_sid;
+                            for tr in &mut g.state.sub_tracks {
+                                tr.selected = Some(tr.id) == chosen_sid;
+                            }
+                            if !g.user_adjusted_offset {
+                                if chosen_sid == Some(EXTERNAL_SUB_TRACK_ID) {
+                                    g.state.sub_offset_sec = g.ext_auto_offset_sec.unwrap_or(0.0);
+                                } else {
+                                    g.state.sub_offset_sec = 0.0;
+                                }
+                            }
+                            if let Some(sid) = chosen_sid {
+                                if let Some(track_cues) = g.cues_by_track.get(&sid).cloned() {
+                                    let pos = g.state.position;
+                                    let off = g.state.sub_offset_sec;
+                                    g.state.sub_text = find_cue_at(&track_cues, pos, off).unwrap_or_default();
+                                    g.cues = track_cues;
+                                }
+                            } else {
+                                g.state.sub_text.clear();
+                                g.cues.clear();
+                            }
+                        } else if let Some(sid) = g.state.sid {
+                            // Keep active cues updated as streaming MKV clusters arrive
+                            if let Some(track_cues) = g.cues_by_track.get(&sid).cloned() {
+                                let pos = g.state.position;
+                                let off = g.state.sub_offset_sec;
+                                g.state.sub_text = find_cue_at(&track_cues, pos, off).unwrap_or_default();
+                                g.cues = track_cues;
                             }
                         }
                     }
@@ -1199,28 +1321,52 @@ pub async fn dispatch_command(
             emit_state(&app, &g.state);
         }
         BuiltinCommand::SetSubTrack { id } => {
-            let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-            g.state.sid = if id <= 0 { None } else { Some(id) };
-            for tr in &mut g.state.sub_tracks {
-                tr.selected = tr.id == id;
-            }
-            if !g.user_adjusted_offset {
-                if id == EXTERNAL_SUB_TRACK_ID {
-                    g.state.sub_offset_sec = g.ext_auto_offset_sec.unwrap_or(0.0);
-                } else {
-                    g.state.sub_offset_sec = 0.0;
+            let mut chosen_lang_pref: Option<String> = None;
+            {
+                let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                g.user_selected_sub_track = true;
+                g.state.sid = if id <= 0 { None } else { Some(id) };
+                for tr in &mut g.state.sub_tracks {
+                    tr.selected = tr.id == id;
+                    if tr.selected {
+                        if let Some(ref l) = tr.lang {
+                            let low = l.trim().to_ascii_lowercase();
+                            if matches!(low.as_str(), "eng" | "en" | "english") {
+                                chosen_lang_pref = Some("eng".to_string());
+                            } else if matches!(low.as_str(), "jpn" | "ja" | "japanese" | "jp") {
+                                chosen_lang_pref = Some("jpn".to_string());
+                            }
+                        }
+                    }
                 }
+                if id <= 0 {
+                    chosen_lang_pref = Some("off".to_string());
+                }
+                if let Some(ref lp) = chosen_lang_pref {
+                    g.track_prefs.sub = Some(lp.clone());
+                }
+                if !g.user_adjusted_offset {
+                    if id == EXTERNAL_SUB_TRACK_ID {
+                        g.state.sub_offset_sec = g.ext_auto_offset_sec.unwrap_or(0.0);
+                    } else {
+                        g.state.sub_offset_sec = 0.0;
+                    }
+                }
+                if id <= 0 {
+                    g.state.sub_text.clear();
+                    g.cues.clear();
+                } else if let Some(track_cues) = g.cues_by_track.get(&id).cloned() {
+                    let pos = g.state.position;
+                    let off = g.state.sub_offset_sec;
+                    g.state.sub_text = find_cue_at(&track_cues, pos, off).unwrap_or_default();
+                    g.cues = track_cues;
+                }
+                emit_state(&app, &g.state);
             }
-            if id <= 0 {
-                g.state.sub_text.clear();
-                g.cues.clear();
-            } else if let Some(track_cues) = g.cues_by_track.get(&id).cloned() {
-                let pos = g.state.position;
-                let off = g.state.sub_offset_sec;
-                g.state.sub_text = find_cue_at(&track_cues, pos, off).unwrap_or_default();
-                g.cues = track_cues;
+            if let Some(lp) = chosen_lang_pref {
+                let conn = st.db();
+                let _ = db::set_setting(&conn, "pref.sub_lang", &lp);
             }
-            emit_state(&app, &g.state);
         }
         BuiltinCommand::AddSubOffset { delta } => {
             let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());

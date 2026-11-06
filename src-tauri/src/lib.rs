@@ -19,17 +19,56 @@ pub mod subtitles;
 pub mod torrent;
 pub mod watcher;
 
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::Manager;
+
+const SINGLE_INSTANCE_ADDR: ([u8; 4], u16) = ([127, 0, 0, 1], 45872);
+
+fn restore_main_window(app_handle: &tauri::AppHandle) {
+    if let Some(w) = app_handle.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_always_on_top(true);
+        let _ = w.set_focus();
+        let _ = w.set_always_on_top(false);
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Enable native GPU 10-bit HEVC (Main/Main10) hardware decoding and zero-copy video
-    // rendering inside Windows WebView2 so 10-bit HEVC anime plays directly on the GPU
-    // without CPU transcoding.
+    // Enforce single-instance on desktop: if Kura is already running (e.g. minimized
+    // to the system tray), wake and focus the existing window and exit immediately
+    // before spawning another WebView2 process tree or opening SQLite.
+    let single_instance_listener = if std::env::var_os("KURA_DATA_DIR").is_none() {
+        let addr = SocketAddr::from(SINGLE_INSTANCE_ADDR);
+        match TcpListener::bind(addr) {
+            Ok(listener) => Some(listener),
+            Err(_) => {
+                if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(400))
+                {
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+                    let _ = stream.write_all(b"KURA_SHOW\n");
+                    let _ = stream.flush();
+                    let mut ack = [0u8; 8];
+                    let _ = stream.read(&mut ack);
+                    return;
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Enable native GPU 10-bit HEVC (Main/Main10) hardware decoding inside Windows
+    // WebView2 so 10-bit HEVC anime plays directly on the GPU without CPU transcoding.
     #[cfg(target_os = "windows")]
     {
-        const WV2_ARGS: &str = "--enable-features=PlatformHEVCDecoderSupport,PlatformHEVCEncoderSupport --autoplay-policy=no-user-gesture-required --ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy";
+        const WV2_ARGS: &str = "--enable-features=PlatformHEVCDecoderSupport,PlatformHEVCEncoderSupport --autoplay-policy=no-user-gesture-required";
         match std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") {
             Ok(existing) if !existing.contains("PlatformHEVCDecoderSupport") => {
                 std::env::set_var(
@@ -51,7 +90,28 @@ pub fn run() {
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     builder
-        .setup(|app| {
+        .setup(move |app| {
+            if let Some(listener) = single_instance_listener {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    for stream in listener.incoming().flatten() {
+                        let mut stream = stream;
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
+                        let mut buf = [0u8; 32];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        if std::str::from_utf8(&buf[..n])
+                            .unwrap_or("")
+                            .starts_with("KURA_SHOW")
+                        {
+                            let _ = stream.write_all(b"KURA_OK\n");
+                            let _ = stream.flush();
+                            restore_main_window(&app_handle);
+                        }
+                    }
+                });
+            }
+
             #[cfg_attr(not(debug_assertions), allow(unused_mut))]
             let mut data_dir = app.path().app_data_dir()?;
             #[cfg(debug_assertions)]
@@ -140,11 +200,7 @@ pub fn run() {
                     .show_menu_on_left_click(false)
                     .on_menu_event(|app_handle, event| match event.id.as_ref() {
                         "show" => {
-                            if let Some(w) = app_handle.get_webview_window("main") {
-                                let _ = w.unminimize();
-                                let _ = w.show();
-                                let _ = w.set_focus();
-                            }
+                            restore_main_window(app_handle);
                         }
                         "check_updates" => {
                             if let Some(st) = app_handle.try_state::<Arc<service::AppState>>() {
@@ -177,11 +233,7 @@ pub fn run() {
                             ..
                         } = event
                         {
-                            if let Some(w) = tray.app_handle().get_webview_window("main") {
-                                let _ = w.unminimize();
-                                let _ = w.show();
-                                let _ = w.set_focus();
-                            }
+                            restore_main_window(tray.app_handle());
                         }
                     });
 

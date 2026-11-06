@@ -493,18 +493,21 @@ pub fn decide_merge(
 
 /// Apply remote progress to local `watch_state` without regressing or overwriting existing timestamps.
 pub fn apply_remote_progress_to_local(conn: &Connection, anilist_id: i64, remote_progress: i64) -> Result<usize> {
-    if remote_progress <= 0 {
+    let capped = remote_progress.min(2500);
+    if capped <= 0 {
         return Ok(0);
     }
     let ts = now();
-    let mut added = 0usize;
-    for n in 1..=remote_progress {
-        let changed = conn.execute(
-            "INSERT OR IGNORE INTO watch_state (anilist_id, ep_key, watched_at) VALUES (?1, ?2, ?3)",
-            params![anilist_id, n.to_string(), ts],
-        )?;
-        added += changed;
-    }
+    let added = conn.execute(
+        "WITH RECURSIVE eps(n) AS (
+            SELECT 1
+            UNION ALL
+            SELECT n + 1 FROM eps WHERE n < ?2
+         )
+         INSERT OR IGNORE INTO watch_state (anilist_id, ep_key, watched_at)
+         SELECT ?1, CAST(n AS TEXT), ?3 FROM eps",
+        params![anilist_id, capped, ts],
+    )?;
     Ok(added)
 }
 
@@ -1143,6 +1146,7 @@ pub fn start_worker(app: AppHandle, st: Arc<AppState>) {
             let conn = st.db();
             reconcile_cached_entries(&conn);
         }
+        tokio::time::sleep(Duration::from_secs(6)).await;
         let has_token = {
             let conn = st.db();
             db::get_setting(&conn, "anilist.token")
@@ -1175,7 +1179,9 @@ pub fn start_worker(app: AppHandle, st: Arc<AppState>) {
                     let _ = sync_now(&app, &st).await;
                 }
             }
-            check_airing_notifications(&app, &st).await;
+            if ticks % 10 == 0 {
+                check_airing_notifications(&app, &st).await;
+            }
         }
     });
 }
@@ -1192,8 +1198,6 @@ pub async fn check_airing_notifications(app: &AppHandle, st: &Arc<AppState>) {
         if !enabled {
             return;
         }
-        let _ = conn.execute_batch(db::SCHEMA_V5);
-        let _ = conn.execute_batch(db::SCHEMA_V7);
 
         let Ok(mut stmt) = conn.prepare(
             "SELECT m.anilist_id,

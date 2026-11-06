@@ -267,7 +267,6 @@ pub struct MediaCard {
 #[tauri::command]
 pub async fn get_library(st: St<'_>, library_id: Option<i64>) -> CmdResult<Vec<MediaCard>> {
     let conn = st.db();
-    crate::anilist_sync::reconcile_cached_entries(&conn);
     let mut stmt = conn
         .prepare(
             "SELECT m.anilist_id, m.title_romaji, m.title_english, m.title_native, m.synonyms, m.format, m.status,
@@ -353,8 +352,6 @@ pub async fn get_library(st: St<'_>, library_id: Option<i64>) -> CmdResult<Vec<M
         .flatten()
         .unwrap_or_else(|| "local".to_string());
     if app_mode == "streaming" && library_id.is_none() {
-        let _ = conn.execute_batch(db::SCHEMA_V5);
-        let _ = conn.execute_batch(db::SCHEMA_V7);
         let existing_ids: std::collections::HashSet<i64> =
             rows.iter().map(|c| c.anilist_id).collect();
         if let Ok(mut s_stmt) = conn.prepare(

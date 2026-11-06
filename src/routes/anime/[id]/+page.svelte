@@ -1277,13 +1277,11 @@
     height: 100%;
     object-fit: cover;
     object-position: center 25%;
-    filter: blur(2px) saturate(1.1);
-    transform: scale(1.04);
-    animation: hero-in 1s var(--ease) both;
+    animation: hero-in 400ms var(--ease) both;
   }
   .banner img.blur {
-    filter: blur(28px) saturate(1.3) brightness(0.75);
-    transform: scale(1.2);
+    filter: blur(14px) brightness(0.72);
+    transform: scale(1.08);
   }
   @keyframes hero-in {
     from {
@@ -1726,12 +1724,12 @@
     padding: 10px;
     border-radius: var(--r-lg);
     border: var(--bw) solid transparent;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 138px;
     transition:
       background var(--t-fast) var(--ease),
       border-color var(--t-fast) var(--ease),
       box-shadow var(--t-fast) var(--ease);
-    animation: fade-up 380ms var(--ease) both;
-    animation-delay: calc(var(--i) * 14ms);
   }
   .ep:hover {
     background: var(--surface);
@@ -1763,8 +1761,7 @@
     transition: transform 500ms var(--ease);
   }
   .ep-thumb img.fallback {
-    filter: blur(6px) brightness(0.6);
-    transform: scale(1.15);
+    opacity: 0.45;
   }
   .ep:hover .ep-thumb:not(:disabled) img {
     transform: scale(1.05);

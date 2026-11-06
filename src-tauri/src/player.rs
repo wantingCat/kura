@@ -1194,6 +1194,51 @@ pub fn expand_lang_list(code: &str) -> Vec<String> {
     }
 }
 
+pub fn lang_matches_code(track_lang: &str, track_title: Option<&str>, target_code: &str) -> bool {
+    let target = target_code.trim().to_ascii_lowercase();
+    if target.is_empty() || target == "off" || target == "none" {
+        return false;
+    }
+    if target == "any" || target == "default" {
+        return true;
+    }
+    let aliases = lang_aliases(&target);
+    let tl = track_lang.trim().to_ascii_lowercase();
+    if !aliases.is_empty() {
+        for a in &aliases {
+            let al = a.to_ascii_lowercase();
+            if tl == al || tl.starts_with(&format!("{al}-")) || tl.starts_with(&format!("{al}_")) {
+                return true;
+            }
+        }
+        if let Some(title) = track_title {
+            let t_low = title.to_ascii_lowercase();
+            for a in &aliases {
+                let al = a.to_ascii_lowercase();
+                if al.len() >= 3 && t_low.contains(&al) {
+                    return true;
+                }
+            }
+        }
+        false
+    } else {
+        tl == target
+    }
+}
+
+pub fn is_signs_or_songs_title(title: Option<&str>) -> bool {
+    let Some(t) = title else { return false };
+    let low = t.to_ascii_lowercase();
+    low.contains("signs") || low.contains("songs") || low.contains("forced")
+}
+
+pub fn wants_japanese_subs(prefs: &EffectiveTrackPrefs) -> bool {
+    matches!(
+        prefs.sub.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("jpn" | "ja" | "japanese" | "jp")
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Progress storage
 // ---------------------------------------------------------------------------
@@ -1809,7 +1854,12 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         let p = prefs(&conn);
         let start = if p.resume { resume_point(saved_progress(&conn, ep.anilist_id, &ep.ep_key), p.threshold) } else { 0.0 };
         let track_prefs = effective_track_prefs(&conn, ep.anilist_id);
-        let linked_subs = crate::subtitles::episode_subtitle_paths(&conn, ep.anilist_id, &ep.ep_key);
+        let linked_subs = crate::subtitles::episode_subtitle_paths_for_pref(
+            &conn,
+            ep.anilist_id,
+            &ep.ep_key,
+            track_prefs.sub.as_deref(),
+        );
         (p, start, track_prefs, linked_subs)
     };
     if p.kind == Kind::Builtin {
@@ -2174,10 +2224,14 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
             ctl.notify(&format!("Up next: episode {}", next.ep_key)).await;
             let (next_tracks, next_subs) = {
                 let conn = st.db();
-                (
-                    effective_track_prefs(&conn, next.anilist_id),
-                    crate::subtitles::episode_subtitle_paths(&conn, next.anilist_id, &next.ep_key),
-                )
+                let tr = effective_track_prefs(&conn, next.anilist_id);
+                let subs = crate::subtitles::episode_subtitle_paths_for_pref(
+                    &conn,
+                    next.anilist_id,
+                    &next.ep_key,
+                    tr.sub.as_deref(),
+                );
+                (tr, subs)
             };
             if !ctl.load(&next.path, start, &next_tracks, &next_subs).await {
                 break;
@@ -2220,23 +2274,34 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
 /// Hot-load a newly fetched or retimed subtitle file into a running mpv window over JSON IPC.
 pub async fn try_hotload_subtitle_in_mpv(st: &AppState, anilist_id: i64, ep_key: &str, sub_path: &str) -> bool {
     let builtin_loaded = crate::embedded_player::reload_cues_if_active(anilist_id, ep_key, sub_path);
-    let addr = {
+    let (addr, should_select) = {
+        let conn = st.db();
+        let prefs = effective_track_prefs(&conn, anilist_id);
+        let sub_lang = crate::subtitles::detect_sub_language(sub_path).unwrap_or_else(|| "ja".to_string());
+        let sel = match prefs.sub.as_deref() {
+            Some(p) => lang_matches_code(&sub_lang, Some(sub_path), p),
+            None => true,
+        };
         let g = st.active_mpv_ipc.lock().unwrap_or_else(|e| e.into_inner());
-        match g.as_ref() {
+        let a = match g.as_ref() {
             Some((id, k, a)) if *id == anilist_id && k == ep_key => Some(a.clone()),
             _ => None,
-        }
+        };
+        (a, sel)
     };
     let Some(addr) = addr else { return builtin_loaded };
     let Ok(mut mpv) = Mpv::connect(&addr).await else { return builtin_loaded };
-    let res = mpv.call(serde_json::json!(["sub-add", sub_path, "select"])).await;
-    let fname = std::path::Path::new(sub_path)
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_else(|| sub_path.to_string());
-    let _ = mpv
-        .call(serde_json::json!(["show-text", format!("Kura · Loaded subtitle: {fname}"), 3500]))
-        .await;
+    let flag = if should_select { "select" } else { "auto" };
+    let res = mpv.call(serde_json::json!(["sub-add", sub_path, flag])).await;
+    if should_select {
+        let fname = std::path::Path::new(sub_path)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| sub_path.to_string());
+        let _ = mpv
+            .call(serde_json::json!(["show-text", format!("Kura · Loaded subtitle: {fname}"), 3500]))
+            .await;
+    }
     res.is_some() || builtin_loaded
 }
 

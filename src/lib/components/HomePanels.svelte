@@ -55,7 +55,10 @@
   $effect(() => {
     const n = heroes.length;
     if (n < 2 || paused) return;
-    const t = setInterval(() => (heroIdx = (heroIdx + 1) % n), 9000);
+    const t = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      heroIdx = (heroIdx + 1) % n;
+    }, 9000);
     return () => clearInterval(t);
   });
 
@@ -233,22 +236,13 @@
     inset: 0;
     z-index: -2;
     background: var(--surface);
-    animation: fade-in 700ms var(--ease) both;
+    animation: fade-in 400ms var(--ease) both;
   }
   .hero-art img {
     width: 100%;
     height: 100%;
     object-fit: cover;
     object-position: center 30%;
-    animation: hero-zoom 12s ease-out both;
-  }
-  @keyframes hero-zoom {
-    from {
-      transform: scale(1.06);
-    }
-    to {
-      transform: scale(1);
-    }
   }
   .hero-shade {
     position: absolute;
