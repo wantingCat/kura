@@ -2124,11 +2124,12 @@ dependencies = [
 
 [[package]]
 name = "kura"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "chrono",
  "flate2",
+ "libloading",
  "notify",
  "regex",
  "reqwest 0.12.28",

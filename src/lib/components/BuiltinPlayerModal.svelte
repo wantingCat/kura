@@ -49,16 +49,11 @@
     return `${mins}m`;
   }
 
-  // In-window HTML5 video surface binding + automatic live mpv transcoding fallback
-  let html5Video = $state<HTMLVideoElement | null>(null);
-  let useTranscode = $state(false);
-  let transcodeVideoCodec = $state<"copy" | "h264">("copy");
-  let transcodeStartOffset = $state(0);
-  let transcodeRev = $state(0);
-  let initialSeekDone = $state(false);
-  let pendingSeekOnLoad = $state<number | null>(null);
+  // Native libmpv playback state
   let lastLoadedPath = $state("");
-  let isBuffering = $state(false);
+  let wasPaused = $state(true);
+  let lastMouseX = -1;
+  let lastMouseY = -1;
 
   // Smooth 60fps scrubber state
   let isScrubbing = $state(false);
@@ -66,7 +61,6 @@
   let hoverPct = $state(0);
   let hoverTime = $state<number | null>(null);
   let hoverChapter = $state<string | null>(null);
-  let transcodeSeekTimer: ReturnType<typeof setTimeout> | null = null;
 
   let displayPosition = $derived(isScrubbing ? scrubValue : playerState.position);
 
@@ -89,63 +83,14 @@
     return `${(bytes / 1024).toFixed(0)} KB`;
   }
 
-  function isUnsupportedAudioCodec(codecRaw: string | null | undefined): boolean {
-    const codec = (codecRaw ?? "").toLowerCase();
-    return /eac3|ac3|dts|truehd|mlp/.test(codec);
-  }
-
   $effect(() => {
     const curPath = `${playerState.anilistId}:${playerState.epKey}:${playerState.path}`;
     if (curPath !== lastLoadedPath) {
       lastLoadedPath = curPath;
-      useTranscode = false;
-      transcodeVideoCodec = "copy";
-      transcodeStartOffset = playerState.position > 1.0 ? playerState.position : 0;
-      transcodeRev = 0;
-      initialSeekDone = false;
-      pendingSeekOnLoad = null;
-      isBuffering = false;
       isScrubbing = false;
       clearLookup();
+      bumpControls(true);
     }
-  });
-
-  // Engage live mpv audio remux (`vc=copy`) ONLY when the selected audio track's codec
-  // is unsupported by Chromium/WebView2 (E-AC3, AC3, DTS, TrueHD, MLP).
-  // Dual-Audio AAC/Opus/FLAC tracks (`aid > 1`) are served natively over HTTP 206 byte-ranges
-  // using zero-transcode Matroska EBML header track masking (`?aid=N`) for instant <10ms seeking!
-  $effect(() => {
-    if (
-      !useTranscode &&
-      playerState.transcodeBaseUrl &&
-      playerState.audioTracks.length > 0
-    ) {
-      const selectedTrack =
-        playerState.audioTracks.find((t) => t.selected) ?? playerState.audioTracks[0];
-      if (isUnsupportedAudioCodec(selectedTrack?.codec)) {
-        transcodeVideoCodec = "copy";
-        transcodeStartOffset = playerState.position > 1.0 ? playerState.position : 0;
-        useTranscode = true;
-      }
-    }
-  });
-
-  let activeVideoSrc = $derived.by(() => {
-    const aid = playerState.aid ?? 1;
-    if (useTranscode && playerState.transcodeBaseUrl) {
-      return `${playerState.transcodeBaseUrl}?start=${transcodeStartOffset.toFixed(1)}&aid=${aid}&vc=${transcodeVideoCodec}&rev=${transcodeRev}`;
-    }
-    const base =
-      playerState.streamUrl ||
-      (playerState.path.startsWith("http://") || playerState.path.startsWith("https://")
-        ? playerState.path
-        : "");
-    if (!base) return "";
-    if (aid > 1) {
-      const sep = base.includes("?") ? "&" : "?";
-      return `${base}${sep}aid=${aid}`;
-    }
-    return base;
   });
 
   // Split subtitle text into an array of Unicode codepoints with their character indices
@@ -205,12 +150,14 @@
     return null;
   });
 
-  // Automatically clear Yomitan popup and schedule HUD auto-hide when video resumes playing
+  // Automatically clear Yomitan popup and schedule HUD auto-hide when video transitions from paused -> playing
   $effect(() => {
-    if (!playerState.paused) {
+    const paused = playerState.paused;
+    if (wasPaused && !paused) {
       clearLookup();
       bumpControls(true);
     }
+    wasPaused = paused;
   });
 
   // Sync bounds on window resize
@@ -271,7 +218,7 @@
   function bumpControls(forcePlaying = false) {
     controlsVisible = true;
     if (hideTimer) clearTimeout(hideTimer);
-    const isPlaying = forcePlaying || !playerState.paused || (html5Video ? !html5Video.paused : false);
+    const isPlaying = forcePlaying || !playerState.paused;
     if (isPlaying) {
       hideTimer = setTimeout(() => {
         if (!playerState.paused && activeMenu === "none" && !isScrubbing) {
@@ -279,6 +226,19 @@
         }
       }, 2400);
     }
+  }
+
+  function handlePlayerMouseMove(e: MouseEvent) {
+    if (
+      lastMouseX >= 0 &&
+      Math.abs(e.clientX - lastMouseX) < 3 &&
+      Math.abs(e.clientY - lastMouseY) < 3
+    ) {
+      return;
+    }
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+    bumpControls();
   }
 
   async function triggerLookup(charIdx: number, targetEl: HTMLElement, pin: boolean) {
@@ -349,47 +309,13 @@
   }
 
   async function togglePlayPause() {
-    if (html5Video) {
-      if (html5Video.paused) {
-        await html5Video.play().catch(() => {});
-      } else {
-        html5Video.pause();
-      }
-    }
     await api.builtinPlayerCommand({ type: "play_pause" });
     bumpControls();
-  }
-
-  function canSeekWithinTranscodeBuffer(v: HTMLVideoElement, targetSec: number): boolean {
-    const rel = targetSec - transcodeStartOffset;
-    if (rel < 0) return false;
-    const buf = v.buffered;
-    for (let i = 0; i < buf.length; i++) {
-      if (rel >= buf.start(i) - 0.35 && rel <= buf.end(i) - 0.15) {
-        return true;
-      }
-    }
-    return false;
   }
 
   async function seekTo(sec: number) {
     const maxDur = playerState.duration > 0 ? playerState.duration : sec;
     const clamped = Math.max(0, Math.min(sec, maxDur));
-
-    if (useTranscode && playerState.transcodeBaseUrl) {
-      if (html5Video && canSeekWithinTranscodeBuffer(html5Video, clamped)) {
-        // Target is already in WebView2's media buffer — seek in <10ms without respawning mpv!
-        html5Video.currentTime = Math.max(0, clamped - transcodeStartOffset);
-      } else {
-        if (transcodeSeekTimer) clearTimeout(transcodeSeekTimer);
-        transcodeSeekTimer = setTimeout(() => {
-          transcodeStartOffset = clamped;
-          transcodeRev += 1;
-        }, 120);
-      }
-    } else if (html5Video) {
-      html5Video.currentTime = clamped;
-    }
     await api.builtinPlayerCommand({ type: "seek", position: clamped });
   }
 
@@ -403,9 +329,6 @@
     const val = Number((e.currentTarget as HTMLInputElement).value);
     isScrubbing = true;
     scrubValue = val;
-    if (!useTranscode && html5Video) {
-      html5Video.currentTime = val;
-    }
     bumpControls();
   }
 
@@ -439,48 +362,20 @@
   }
 
   async function setVolume(vol: number) {
-    if (html5Video) {
-      html5Video.volume = Math.max(0, Math.min(1, vol / 100));
-    }
     await api.builtinPlayerCommand({ type: "set_volume", volume: vol });
   }
 
   async function toggleMute() {
-    if (html5Video) {
-      html5Video.muted = !html5Video.muted;
-    }
     await api.builtinPlayerCommand({ type: "toggle_mute" });
   }
 
   async function setSpeed(speed: number) {
-    if (html5Video) {
-      html5Video.playbackRate = speed;
-    }
     await api.builtinPlayerCommand({ type: "set_speed", speed });
     activeMenu = "none";
   }
 
   async function selectAudioTrack(id: number) {
-    const savedPos = html5Video
-      ? useTranscode
-        ? transcodeStartOffset + html5Video.currentTime
-        : html5Video.currentTime
-      : playerState.position;
-    const targetTrack = playerState.audioTracks.find((t) => t.id === id);
-    const needsAudioTc = isUnsupportedAudioCodec(targetTrack?.codec);
-
     await api.builtinPlayerCommand({ type: "set_audio_track", id });
-
-    if (needsAudioTc || transcodeVideoCodec === "h264") {
-      if (playerState.transcodeBaseUrl) {
-        transcodeStartOffset = savedPos;
-        useTranscode = true;
-        transcodeRev += 1;
-      }
-    } else {
-      pendingSeekOnLoad = savedPos;
-      useTranscode = false;
-    }
     activeMenu = "none";
   }
 
@@ -576,6 +471,24 @@
         e.preventDefault();
         void toggleFullscreen();
         break;
+      case "z":
+      case "Z":
+        e.preventDefault();
+        void api.builtinPlayerCommand({
+          type: "add_sub_offset",
+          delta: e.shiftKey ? -0.5 : -0.1,
+        });
+        bumpControls();
+        break;
+      case "x":
+      case "X":
+        e.preventDefault();
+        void api.builtinPlayerCommand({
+          type: "add_sub_offset",
+          delta: e.shiftKey ? 0.5 : 0.1,
+        });
+        bumpControls();
+        break;
       case "Escape":
         e.preventDefault();
         if (lookupResult) {
@@ -598,7 +511,7 @@
   <div
     class="kura-player-root"
     class:controls-hidden={!controlsVisible && !playerState.paused}
-    onmousemove={() => bumpControls()}
+    onmousemove={handlePlayerMouseMove}
     onclick={() => {
       if (popupPinned) {
         clearLookup();
@@ -610,127 +523,6 @@
     }}
     ondblclick={() => void toggleFullscreen()}
   >
-    {#if activeVideoSrc}
-      <video
-        bind:this={html5Video}
-        class="html5-video-surface"
-        src={activeVideoSrc}
-        autoplay
-        playsinline
-        onwaiting={() => {
-          isBuffering = true;
-        }}
-        onplaying={() => {
-          isBuffering = false;
-        }}
-        oncanplay={() => {
-          isBuffering = false;
-        }}
-        onloadedmetadata={(e) => {
-          const v = e.currentTarget;
-          isBuffering = false;
-          if ((!useTranscode || transcodeVideoCodec === "copy") && v.videoWidth === 0 && playerState.transcodeBaseUrl) {
-            transcodeVideoCodec = "h264";
-            transcodeStartOffset = playerState.position > 1.0 ? playerState.position : 0;
-            useTranscode = true;
-            transcodeRev += 1;
-            return;
-          }
-          if (!useTranscode) {
-            if (pendingSeekOnLoad !== null && pendingSeekOnLoad > 0.5) {
-              v.currentTime = pendingSeekOnLoad;
-              pendingSeekOnLoad = null;
-              initialSeekDone = true;
-            } else if (!initialSeekDone && playerState.position > 1.0) {
-              initialSeekDone = true;
-              v.currentTime = playerState.position;
-            }
-          }
-          v.volume = Math.max(0, Math.min(1, playerState.volume / 100));
-          v.muted = playerState.muted;
-          v.playbackRate = playerState.speed;
-        }}
-        onerror={() => {
-          if ((!useTranscode || transcodeVideoCodec === "copy") && playerState.transcodeBaseUrl) {
-            transcodeVideoCodec = "h264";
-            transcodeStartOffset = playerState.position > 1.0 ? playerState.position : 0;
-            useTranscode = true;
-            transcodeRev += 1;
-          }
-        }}
-        ontimeupdate={(e) => {
-          const v = e.currentTarget;
-          const isRemoteStream =
-            playerState.path.startsWith("http://") || playerState.path.startsWith("https://");
-          if (
-            !isRemoteStream &&
-            !useTranscode &&
-            playerState.transcodeBaseUrl &&
-            !v.paused &&
-            v.currentTime > 2.5
-          ) {
-            const audioBytes = (v as unknown as { webkitAudioDecodedByteCount?: number }).webkitAudioDecodedByteCount;
-            if (typeof audioBytes === "number" && audioBytes === 0 && playerState.audioTracks.length > 0) {
-              transcodeVideoCodec = "copy";
-              transcodeStartOffset = v.currentTime > 1.0 ? v.currentTime : 0;
-              useTranscode = true;
-              return;
-            }
-          }
-          const pos = useTranscode ? transcodeStartOffset + v.currentTime : v.currentTime;
-          const dur =
-            !useTranscode && Number.isFinite(v.duration) && v.duration > 0
-              ? v.duration
-              : playerState.duration;
-          void api.builtinPlayerCommand({
-            type: "html5_tick",
-            position: pos,
-            duration: dur,
-            paused: v.paused,
-            ended: v.ended,
-          });
-        }}
-        onplay={(e) => {
-          const v = e.currentTarget;
-          const pos = useTranscode ? transcodeStartOffset + v.currentTime : v.currentTime;
-          const dur =
-            !useTranscode && Number.isFinite(v.duration) && v.duration > 0
-              ? v.duration
-              : playerState.duration;
-          void api.builtinPlayerCommand({
-            type: "html5_tick",
-            position: pos,
-            duration: dur,
-            paused: false,
-            ended: false,
-          });
-        }}
-        onpause={(e) => {
-          const v = e.currentTarget;
-          const pos = useTranscode ? transcodeStartOffset + v.currentTime : v.currentTime;
-          const dur =
-            !useTranscode && Number.isFinite(v.duration) && v.duration > 0
-              ? v.duration
-              : playerState.duration;
-          void api.builtinPlayerCommand({
-            type: "html5_tick",
-            position: pos,
-            duration: dur,
-            paused: true,
-            ended: false,
-          });
-        }}
-      >
-        <track kind="captions" />
-      </video>
-    {/if}
-
-    {#if isBuffering && !playerState.paused}
-      <div class="buffering-indicator" aria-hidden="true">
-        <div class="buffering-ring"></div>
-      </div>
-    {/if}
-
     <!-- Top Bar -->
     <header
       class="player-top-bar"
@@ -946,15 +738,31 @@
 
         <div class="controls-right">
           <!-- Subtitle Delay Nudge -->
-          <div class="sub-delay-pill" title="Subtitle Timing Offset">
+          <div class="sub-delay-pill" title="Subtitle Timing Offset (Z / X keys, click value to reset)">
             <button
               type="button"
               onclick={() => api.builtinPlayerCommand({ type: "add_sub_offset", delta: -0.1 })}
+              title="Earlier (−0.1s, Z)"
             >−</button>
-            <span>Sub {playerState.subOffsetSec >= 0 ? `+${playerState.subOffsetSec.toFixed(1)}` : playerState.subOffsetSec.toFixed(1)}s</span>
+            <button
+              type="button"
+              class="sub-delay-reset"
+              onclick={() => {
+                if (Math.abs(playerState.subOffsetSec) > 0.001) {
+                  void api.builtinPlayerCommand({
+                    type: "add_sub_offset",
+                    delta: -playerState.subOffsetSec,
+                  });
+                }
+              }}
+              title="Click to reset subtitle offset to 0.0s"
+            >
+              Sub {playerState.subOffsetSec >= 0 ? `+${playerState.subOffsetSec.toFixed(1)}` : playerState.subOffsetSec.toFixed(1)}s
+            </button>
             <button
               type="button"
               onclick={() => api.builtinPlayerCommand({ type: "add_sub_offset", delta: 0.1 })}
+              title="Later (+0.1s, X)"
             >+</button>
           </div>
 
@@ -1065,7 +873,7 @@
     position: fixed;
     inset: 0;
     z-index: 9000;
-    background: #000;
+    background: transparent;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -1075,42 +883,6 @@
 
   .kura-player-root.controls-hidden {
     cursor: none;
-  }
-
-  .html5-video-surface {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    background: #000;
-    z-index: -1;
-    pointer-events: none;
-  }
-
-  .buffering-indicator {
-    position: fixed;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    pointer-events: none;
-    z-index: 9100;
-  }
-
-  .buffering-ring {
-    width: 44px;
-    height: 44px;
-    border-radius: 50%;
-    border: 3px solid rgba(255, 255, 255, 0.14);
-    border-top-color: #f97316;
-    animation: kura-spin 0.75s linear infinite;
-  }
-
-  @keyframes kura-spin {
-    to {
-      transform: rotate(360deg);
-    }
   }
 
   .player-top-bar {
@@ -1610,9 +1382,13 @@
     background: rgba(255, 255, 255, 0.09);
   }
 
-  .sub-delay-pill span {
+  .sub-delay-pill span,
+  .sub-delay-pill .sub-delay-reset {
     padding: 0 6px;
     font-variant-numeric: tabular-nums;
+    color: rgba(244, 244, 246, 0.88);
+    font-weight: 600;
+    font-size: 11.5px;
   }
 
   .menu-anchor {

@@ -1,11 +1,17 @@
-//! Built-in Kura video player engine.
+//! Built-in Kura video player engine powered by native `libmpv`.
 //!
-//! Renders video directly inside Kura's window using a local HTTP byte-range media server
-//! (with automatic live `mpv` H.264/AAC stream transcoding fallback for 10-bit HEVC / AC3),
-//! pure-Rust Matroska embedded subtitle/chapter extraction, Skip OP/ED, and pause-gated
+//! Renders video directly via `libmpv` (`libmpv-2.dll` / `libmpv.so.2` / `libmpv.2.dylib`)
+//! onto a hardware-accelerated surface synchronized behind Kura's transparent WebView2 HUD,
+//! with zero-transcode multi-audio/subtitle track switching, Skip OP/ED, and pause-gated
 //! interactive Japanese subtitles with Yomitan dictionary lookup.
 
 use crate::db;
+use crate::klog;
+use crate::libmpv::{
+    self, MpvEventEndFile, MpvEventProperty, MpvInstance, MPV_END_FILE_REASON_EOF,
+    MPV_EVENT_END_FILE, MPV_EVENT_FILE_LOADED, MPV_EVENT_NONE, MPV_EVENT_PROPERTY_CHANGE,
+    MPV_EVENT_SHUTDOWN, MPV_FORMAT_DOUBLE, MPV_FORMAT_FLAG, MPV_FORMAT_INT64, MPV_FORMAT_STRING,
+};
 use crate::player::{self, AniSkipTimes, Ep, Kind};
 use crate::service::AppState;
 use crate::subtitles::{self, SubtitleCue};
@@ -13,14 +19,12 @@ use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{Read, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::ffi::CStr;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::Instant;
 use tauri::{AppHandle, Emitter};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 
 const EXTERNAL_SUB_TRACK_ID: i64 = 1000;
 
@@ -51,7 +55,7 @@ pub struct ChapterItem {
 #[serde(rename_all = "camelCase")]
 pub struct BuiltinPlayerState {
     pub active: bool,
-    pub backend: String, // "html5" | "transcode"
+    pub backend: String, // "libmpv"
     pub anilist_id: i64,
     pub ep_key: String,
     pub path: String,
@@ -85,7 +89,7 @@ impl Default for BuiltinPlayerState {
     fn default() -> Self {
         Self {
             active: false,
-            backend: "html5".to_string(),
+            backend: "libmpv".to_string(),
             anilist_id: 0,
             ep_key: String::new(),
             path: String::new(),
@@ -146,6 +150,7 @@ pub enum BuiltinCommand {
 
 struct RuntimeSession {
     state: BuiltinPlayerState,
+    mpv: Option<MpvInstance>,
     cues: Vec<SubtitleCue>,
     cues_by_track: HashMap<i64, Vec<SubtitleCue>>,
     threshold: f64,
@@ -153,22 +158,25 @@ struct RuntimeSession {
     marked_watched: bool,
     aniskip_queried: bool,
     tick_count: u64,
-    ext_auto_offset_sec: Option<f64>,
-    ext_matched_cues: usize,
+    pending_start_pos: f64,
     user_adjusted_offset: bool,
+    auto_aligned_offset: bool,
     user_selected_sub_track: bool,
     track_prefs: player::EffectiveTrackPrefs,
-    last_unpaused_tick: Option<std::time::Instant>,
+    last_unpaused_tick: Option<Instant>,
     unflushed_immersion_sec: f64,
+    last_emit_at: Option<Instant>,
 }
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static RUNTIME: OnceLock<Mutex<RuntimeSession>> = OnceLock::new();
+static MPV_EVENT_LOOP_STARTED: OnceLock<()> = OnceLock::new();
 
 fn runtime() -> &'static Mutex<RuntimeSession> {
     RUNTIME.get_or_init(|| {
         Mutex::new(RuntimeSession {
             state: BuiltinPlayerState::default(),
+            mpv: None,
             cues: Vec::new(),
             cues_by_track: HashMap::new(),
             threshold: 0.90,
@@ -176,13 +184,14 @@ fn runtime() -> &'static Mutex<RuntimeSession> {
             marked_watched: false,
             aniskip_queried: false,
             tick_count: 0,
-            ext_auto_offset_sec: None,
-            ext_matched_cues: 0,
+            pending_start_pos: 0.0,
             user_adjusted_offset: false,
+            auto_aligned_offset: false,
             user_selected_sub_track: false,
             track_prefs: player::EffectiveTrackPrefs::default(),
             last_unpaused_tick: None,
             unflushed_immersion_sec: 0.0,
+            last_emit_at: None,
         })
     })
 }
@@ -195,7 +204,592 @@ pub fn get_state() -> BuiltinPlayerState {
         .clone()
 }
 
-pub fn sync_bounds(_app: &AppHandle) {}
+pub fn sync_bounds(app: &AppHandle) {
+    let active = runtime()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .state
+        .active;
+    libmpv::sync_surface_bounds(app, active);
+}
+
+fn ensure_mpv(app: &AppHandle, st: &Arc<AppState>) -> Result<MpvInstance> {
+    {
+        let g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mpv) = g.mpv {
+            return Ok(mpv);
+        }
+    }
+
+    let wid = libmpv::ensure_video_surface()?;
+    let mpv = MpvInstance::new(wid)?;
+    {
+        let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+        g.mpv = Some(mpv);
+    }
+
+    let app_ev = app.clone();
+    let st_ev = st.clone();
+    MPV_EVENT_LOOP_STARTED.get_or_init(|| {
+        std::thread::Builder::new()
+            .name("kura-libmpv-events".to_string())
+            .spawn(move || run_mpv_event_loop(app_ev, st_ev, mpv))
+            .ok();
+    });
+
+    Ok(mpv)
+}
+
+fn clean_mpv_sub_text(raw: &str) -> String {
+    let mut lines = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Ignore raw ASS vector drawing coordinate strings (`m 0 0 l 100 100 ...`)
+        let is_vector_draw = trimmed.starts_with("m ")
+            && trimmed
+                .chars()
+                .all(|c| c.is_ascii_digit() || matches!(c, 'm' | 'l' | 'b' | 's' | 'p' | 'c' | 'n' | ' ' | '-' | '.'));
+        if is_vector_draw {
+            continue;
+        }
+        lines.push(trimmed);
+    }
+    lines.join("\n")
+}
+
+fn is_bitmap_sub_codec(codec: Option<&str>) -> bool {
+    let c = codec.unwrap_or("").to_ascii_lowercase();
+    c.contains("pgs") || c.contains("vobsub") || c.contains("dvd_subtitle") || c.contains("dvb_subtitle")
+}
+
+fn apply_sub_track_to_mpv(mpv: &MpvInstance, sub_tracks: &[TrackItem], chosen_sid: Option<i64>) {
+    match chosen_sid {
+        None => {
+            let _ = mpv.set_property_string("sid", "no");
+            let _ = mpv.set_property_string("sub-visibility", "no");
+        }
+        Some(id) if id == EXTERNAL_SUB_TRACK_ID => {
+            // External cues are rendered directly by Kura's interactive subtitle overlay
+            let _ = mpv.set_property_string("sid", "no");
+            let _ = mpv.set_property_string("sub-visibility", "no");
+        }
+        Some(id) => {
+            let is_bitmap = sub_tracks
+                .iter()
+                .find(|t| t.id == id)
+                .and_then(|t| t.codec.as_deref())
+                .map(|c| is_bitmap_sub_codec(Some(c)))
+                .unwrap_or(false);
+            let _ = mpv.set_property_i64("sid", id);
+            if is_bitmap {
+                let _ = mpv.set_property_string("sub-visibility", "yes");
+            } else {
+                // Hide libass on-video OSD so Kura's interactive Yomitan DOM overlay renders cleanly
+                let _ = mpv.set_property_string("sub-visibility", "no");
+            }
+        }
+    }
+}
+
+fn refresh_tracks_and_chapters_from_mpv(mpv: &MpvInstance, g: &mut RuntimeSession) {
+    if let Some(dur) = mpv.get_property_double("duration") {
+        if dur > 0.0 && dur.is_finite() {
+            g.state.duration = dur;
+        }
+    }
+
+    let track_count = mpv.get_property_i64("track-list/count").unwrap_or(0);
+    let mut audio_tracks = Vec::new();
+    let mut sub_tracks: Vec<TrackItem> = g
+        .state
+        .sub_tracks
+        .iter()
+        .filter(|t| t.id == EXTERNAL_SUB_TRACK_ID)
+        .cloned()
+        .collect();
+
+    for i in 0..track_count {
+        let t_type = mpv
+            .get_property_string(&format!("track-list/{i}/type"))
+            .unwrap_or_default();
+        let Some(id) = mpv.get_property_i64(&format!("track-list/{i}/id")) else {
+            continue;
+        };
+        let title = mpv.get_property_string(&format!("track-list/{i}/title"));
+        let lang = mpv.get_property_string(&format!("track-list/{i}/lang"));
+        let codec = mpv.get_property_string(&format!("track-list/{i}/codec"));
+        let selected = mpv
+            .get_property_bool(&format!("track-list/{i}/selected"))
+            .unwrap_or(false);
+        let external = mpv
+            .get_property_bool(&format!("track-list/{i}/external"))
+            .unwrap_or(false);
+
+        if t_type == "audio" {
+            audio_tracks.push(TrackItem {
+                id,
+                track_type: "audio".to_string(),
+                title,
+                lang,
+                codec,
+                selected,
+                external,
+            });
+        } else if t_type == "sub" {
+            sub_tracks.push(TrackItem {
+                id,
+                track_type: "sub".to_string(),
+                title,
+                lang,
+                codec,
+                selected: false,
+                external,
+            });
+        }
+    }
+
+    // Choose preferred audio track
+    if !audio_tracks.is_empty() {
+        let mut chosen_aid: Option<i64> = None;
+        if let Some(audio_pref) = g.track_prefs.audio.as_deref() {
+            for tr in &audio_tracks {
+                if player::lang_matches_code(
+                    tr.lang.as_deref().unwrap_or(""),
+                    tr.title.as_deref(),
+                    audio_pref,
+                ) {
+                    chosen_aid = Some(tr.id);
+                    break;
+                }
+            }
+        }
+        if chosen_aid.is_none() {
+            for tr in &audio_tracks {
+                if is_japanese_lang(tr.lang.as_deref().unwrap_or("")) {
+                    chosen_aid = Some(tr.id);
+                    break;
+                }
+            }
+        }
+        if chosen_aid.is_none() {
+            chosen_aid = audio_tracks.first().map(|t| t.id);
+        }
+        if let Some(aid) = chosen_aid {
+            let _ = mpv.set_property_i64("aid", aid);
+        }
+        for tr in &mut audio_tracks {
+            tr.selected = Some(tr.id) == chosen_aid;
+        }
+        g.state.aid = chosen_aid;
+        g.state.audio_tracks = audio_tracks;
+    }
+
+    // Choose preferred subtitle track
+    if !g.user_selected_sub_track {
+        let chosen_sid = pick_best_sub_track_id(&sub_tracks, &g.track_prefs);
+        for tr in &mut sub_tracks {
+            tr.selected = Some(tr.id) == chosen_sid;
+        }
+        g.state.sid = chosen_sid;
+        g.state.sub_tracks = sub_tracks;
+        apply_sub_track_to_mpv(mpv, &g.state.sub_tracks, chosen_sid);
+
+        if chosen_sid == Some(EXTERNAL_SUB_TRACK_ID) {
+            if let Some(ext_cues) = g.cues_by_track.get(&EXTERNAL_SUB_TRACK_ID).cloned() {
+                g.state.sub_text =
+                    find_cue_at(&ext_cues, g.state.position, g.state.sub_offset_sec).unwrap_or_default();
+                g.cues = ext_cues;
+            }
+        } else if chosen_sid.is_some() {
+            let raw = mpv.get_property_string("sub-text").unwrap_or_default();
+            g.state.sub_text = clean_mpv_sub_text(&raw);
+        } else {
+            g.state.sub_text.clear();
+        }
+    } else {
+        let active_sid = g.state.sid;
+        for tr in &mut sub_tracks {
+            tr.selected = Some(tr.id) == active_sid;
+        }
+        g.state.sub_tracks = sub_tracks;
+    }
+
+    // Read chapters & infer OP/ED
+    let ch_count = mpv.get_property_i64("chapter-list/count").unwrap_or(0);
+    if ch_count > 0 {
+        let mut ch_items = Vec::new();
+        for i in 0..ch_count {
+            let title = mpv
+                .get_property_string(&format!("chapter-list/{i}/title"))
+                .unwrap_or_else(|| format!("Chapter {}", i + 1));
+            if let Some(time) = mpv.get_property_double(&format!("chapter-list/{i}/time")) {
+                ch_items.push(ChapterItem { title, time });
+            }
+        }
+        if !ch_items.is_empty() {
+            let dur = g.state.duration;
+            let (op_s, op_e, ed_s, ed_e) = infer_op_ed_from_chapters(&ch_items, dur);
+            if g.state.op_start.is_none() && op_s.is_some() {
+                g.state.op_start = op_s;
+                g.state.op_end = op_e;
+            }
+            if g.state.ed_start.is_none() && ed_s.is_some() {
+                g.state.ed_start = ed_s;
+                g.state.ed_end = ed_e;
+            }
+            g.state.chapters = ch_items;
+        }
+    }
+}
+
+fn run_mpv_event_loop(app: AppHandle, st: Arc<AppState>, mpv: MpvInstance) {
+    loop {
+        let ev_ptr = mpv.wait_event(0.20);
+        if ev_ptr.is_null() {
+            continue;
+        }
+        let ev = unsafe { &*ev_ptr };
+        let event_id = ev.event_id;
+
+        {
+            let g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+            if g.state.active {
+                libmpv::sync_surface_bounds(&app, true);
+            }
+        }
+
+        if event_id == MPV_EVENT_NONE {
+            continue;
+        }
+        if event_id == MPV_EVENT_SHUTDOWN {
+            klog!("[libmpv] Event loop received MPV_EVENT_SHUTDOWN");
+            break;
+        }
+
+        if event_id == MPV_EVENT_FILE_LOADED {
+            let (dur_for_aniskip, cur_ep, sess_id) = {
+                let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                if !g.state.active {
+                    continue;
+                }
+                if g.pending_start_pos > 1.0 {
+                    let pos = g.pending_start_pos;
+                    g.pending_start_pos = 0.0;
+                    let _ = mpv.set_property_double("time-pos", pos);
+                    g.state.position = pos;
+                }
+                refresh_tracks_and_chapters_from_mpv(&mpv, &mut g);
+                emit_state(&app, &g.state);
+                (
+                    g.state.duration,
+                    Ep {
+                        anilist_id: g.state.anilist_id,
+                        ep_key: g.state.ep_key.clone(),
+                        path: g.state.path.clone(),
+                    },
+                    SESSION_COUNTER.load(Ordering::SeqCst),
+                )
+            };
+
+            if dur_for_aniskip > 0.0 {
+                let app_c = app.clone();
+                let st_c = st.clone();
+                tauri::async_runtime::spawn(async move {
+                    fetch_and_apply_aniskip(&app_c, &st_c, &cur_ep, dur_for_aniskip, sess_id).await;
+                });
+            }
+            continue;
+        }
+
+        if event_id == MPV_EVENT_END_FILE && !ev.data.is_null() {
+            let end_ev = unsafe { &*(ev.data as *const MpvEventEndFile) };
+            if end_ev.reason == MPV_END_FILE_REASON_EOF {
+                let (active, autoplay, cur_ep) = {
+                    let g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                    (
+                        g.state.active,
+                        g.autoplay,
+                        Ep {
+                            anilist_id: g.state.anilist_id,
+                            ep_key: g.state.ep_key.clone(),
+                            path: g.state.path.clone(),
+                        },
+                    )
+                };
+                if active && autoplay {
+                    let next = player::next_episode(&st.db(), &cur_ep);
+                    if let Some(next_ep) = next {
+                        let _ = start(app.clone(), st.clone(), next_ep);
+                    }
+                }
+            }
+            continue;
+        }
+
+        if event_id == MPV_EVENT_PROPERTY_CHANGE && !ev.data.is_null() {
+            let prop = unsafe { &*(ev.data as *const MpvEventProperty) };
+            if prop.name.is_null() {
+                continue;
+            }
+            let prop_name = unsafe { CStr::from_ptr(prop.name).to_string_lossy() };
+
+            match prop_name.as_ref() {
+                "time-pos" if prop.format == MPV_FORMAT_DOUBLE && !prop.data.is_null() => {
+                    let pos = unsafe { *(prop.data as *const f64) };
+                    if !pos.is_finite() || pos < 0.0 {
+                        continue;
+                    }
+                    handle_mpv_time_tick(&app, &st, pos);
+                }
+                "duration" if prop.format == MPV_FORMAT_DOUBLE && !prop.data.is_null() => {
+                    let dur = unsafe { *(prop.data as *const f64) };
+                    if dur > 0.0 && dur.is_finite() {
+                        let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                        if g.state.active {
+                            g.state.duration = dur;
+                            emit_state(&app, &g.state);
+                        }
+                    }
+                }
+                "pause" if prop.format == MPV_FORMAT_FLAG && !prop.data.is_null() => {
+                    let paused = unsafe { *(prop.data as *const i32) != 0 };
+                    let (flush_sec, cur_ep, show_title) = {
+                        let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                        if !g.state.active {
+                            continue;
+                        }
+                        g.state.paused = paused;
+                        if paused {
+                            g.last_unpaused_tick = None;
+                        }
+                        let flush_sec = if paused && g.unflushed_immersion_sec >= 1.0 {
+                            let sec = g.unflushed_immersion_sec.floor() as i64;
+                            g.unflushed_immersion_sec -= sec as f64;
+                            g.state.today_immersion_sec += sec;
+                            sec
+                        } else {
+                            0
+                        };
+                        emit_state(&app, &g.state);
+                        (
+                            flush_sec,
+                            Ep {
+                                anilist_id: g.state.anilist_id,
+                                ep_key: g.state.ep_key.clone(),
+                                path: g.state.path.clone(),
+                            },
+                            g.state.show_title.clone(),
+                        )
+                    };
+                    if flush_sec > 0 {
+                        let _ = db::record_immersion_time(
+                            &st.db(),
+                            Some(cur_ep.anilist_id),
+                            Some(&cur_ep.ep_key),
+                            Some(&show_title),
+                            flush_sec,
+                        );
+                    }
+                }
+                "sub-text" if prop.format == MPV_FORMAT_STRING => {
+                    let raw = if prop.data.is_null() {
+                        String::new()
+                    } else {
+                        unsafe {
+                            let cstr_ptr = *(prop.data as *const *const std::ffi::c_char);
+                            if cstr_ptr.is_null() {
+                                String::new()
+                            } else {
+                                CStr::from_ptr(cstr_ptr).to_string_lossy().into_owned()
+                            }
+                        }
+                    };
+                    let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                    if g.state.active
+                        && g.state.sid.is_some()
+                        && g.state.sid != Some(EXTERNAL_SUB_TRACK_ID)
+                    {
+                        let cleaned = clean_mpv_sub_text(&raw);
+                        if g.state.sub_text != cleaned {
+                            g.state.sub_text = cleaned;
+                            emit_state(&app, &g.state);
+                        }
+                    }
+                }
+                "aid" if prop.format == MPV_FORMAT_INT64 && !prop.data.is_null() => {
+                    let aid = unsafe { *(prop.data as *const i64) };
+                    let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                    if g.state.active {
+                        g.state.aid = Some(aid);
+                        for tr in &mut g.state.audio_tracks {
+                            tr.selected = tr.id == aid;
+                        }
+                        emit_state(&app, &g.state);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn resolve_mkv_disk_path(anilist_id: i64, ep_key: &str, play_path: &str) -> Option<std::path::PathBuf> {
+    let p = Path::new(play_path);
+    if p.is_file() {
+        return Some(p.to_path_buf());
+    }
+    crate::torrent::active_save_path_for_episode(anilist_id, ep_key).filter(|f| f.is_file())
+}
+
+fn handle_mpv_time_tick(app: &AppHandle, st: &Arc<AppState>, position: f64) {
+    let (
+        eff_dur,
+        should_mark_watched,
+        should_save_prog,
+        flush_immersion_sec,
+        show_title,
+        cur_ep,
+        try_live_align,
+    ) = {
+        let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+        if !g.state.active {
+            return;
+        }
+        let paused = g.state.paused;
+        let now_inst = Instant::now();
+        if !paused {
+            if let Some(prev) = g.last_unpaused_tick {
+                let dt = now_inst.duration_since(prev).as_secs_f64();
+                if (0.01..=2.5).contains(&dt) {
+                    g.unflushed_immersion_sec += dt;
+                }
+            }
+            g.last_unpaused_tick = Some(now_inst);
+        } else {
+            g.last_unpaused_tick = None;
+        }
+
+        let flush_immersion_sec = if g.unflushed_immersion_sec >= 5.0 {
+            let sec = g.unflushed_immersion_sec.floor() as i64;
+            g.unflushed_immersion_sec -= sec as f64;
+            g.state.today_immersion_sec += sec;
+            sec
+        } else {
+            0
+        };
+        let show_title = g.state.show_title.clone();
+
+        g.state.position = position;
+        let eff_dur = g.state.duration;
+
+        let mut sub_changed = false;
+        if g.state.sid == Some(EXTERNAL_SUB_TRACK_ID) {
+            let off = g.state.sub_offset_sec;
+            let next_sub = find_cue_at(&g.cues, position, off).unwrap_or_default();
+            if g.state.sub_text != next_sub {
+                g.state.sub_text = next_sub;
+                sub_changed = true;
+            }
+        }
+
+        g.tick_count += 1;
+        let try_live_align = !g.user_adjusted_offset
+            && !g.auto_aligned_offset
+            && g.state.sid == Some(EXTERNAL_SUB_TRACK_ID)
+            && !g.cues.is_empty()
+            && (g.tick_count == 5 || g.tick_count % 60 == 0)
+            && g.tick_count <= 600;
+        let threshold = g.threshold;
+        let should_mark_watched =
+            !g.marked_watched && player::reached(position, eff_dur, threshold);
+        if should_mark_watched {
+            g.marked_watched = true;
+        }
+        let should_save_prog =
+            !g.marked_watched && position > 15.0 && eff_dur > 0.0 && g.tick_count % 25 == 0;
+
+        let should_emit = sub_changed
+            || flush_immersion_sec > 0
+            || g.last_emit_at
+                .map(|t| now_inst.duration_since(t).as_millis() >= 90)
+                .unwrap_or(true);
+        if should_emit {
+            g.last_emit_at = Some(now_inst);
+            emit_state(app, &g.state);
+        }
+
+        (
+            eff_dur,
+            should_mark_watched,
+            should_save_prog,
+            flush_immersion_sec,
+            show_title,
+            Ep {
+                anilist_id: g.state.anilist_id,
+                ep_key: g.state.ep_key.clone(),
+                path: g.state.path.clone(),
+            },
+            if try_live_align {
+                Some(g.cues.clone())
+            } else {
+                None
+            },
+        )
+    };
+
+    if let Some(cues_snapshot) = try_live_align {
+        let ep_clone = cur_ep.clone();
+        let app_clone = app.clone();
+        let sess_id = SESSION_COUNTER.load(Ordering::SeqCst);
+        tauri::async_runtime::spawn_blocking(move || {
+            let Some(mkv_path) =
+                resolve_mkv_disk_path(ep_clone.anilist_id, &ep_clone.ep_key, &ep_clone.path)
+            else {
+                return;
+            };
+            if let Some(off_sec) = subtitles::compute_live_mkv_cue_offset_sec(&cues_snapshot, &mkv_path)
+            {
+                if SESSION_COUNTER.load(Ordering::SeqCst) != sess_id {
+                    return;
+                }
+                let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                if g.state.active
+                    && !g.user_adjusted_offset
+                    && !g.auto_aligned_offset
+                    && g.state.anilist_id == ep_clone.anilist_id
+                    && g.state.ep_key == ep_clone.ep_key
+                {
+                    g.auto_aligned_offset = true;
+                    g.state.sub_offset_sec = off_sec;
+                    let pos = g.state.position;
+                    g.state.sub_text = find_cue_at(&g.cues, pos, off_sec).unwrap_or_default();
+                    emit_state(&app_clone, &g.state);
+                }
+            }
+        });
+    }
+
+    if flush_immersion_sec > 0 {
+        let _ = db::record_immersion_time(
+            &st.db(),
+            Some(cur_ep.anilist_id),
+            Some(&cur_ep.ep_key),
+            Some(&show_title),
+            flush_immersion_sec,
+        );
+    }
+
+    if should_mark_watched {
+        save_watched(&st.db(), &cur_ep);
+        crate::anilist_sync::on_episode_watched(app, st, cur_ep.anilist_id);
+        let _ = app.emit("library-changed", ());
+    } else if should_save_prog {
+        save_ep_progress(&st.db(), &cur_ep, position, eff_dur);
+    }
+}
 
 pub fn reload_cues_if_active(anilist_id: i64, ep_key: &str, sub_path: &str) -> bool {
     let cues = subtitles::parse_subtitle_file_cues(Path::new(sub_path));
@@ -209,18 +803,13 @@ pub fn reload_cues_if_active(anilist_id: i64, ep_key: &str, sub_path: &str) -> b
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "External Subtitle".to_string());
-        let ext_lang = subtitles::detect_sub_language(&file_name).unwrap_or_else(|| "ja".to_string());
+        let ext_lang =
+            subtitles::detect_sub_language(&file_name).unwrap_or_else(|| "ja".to_string());
         let should_select = match g.track_prefs.sub.as_deref() {
             Some(pref) => player::lang_matches_code(&ext_lang, Some(&file_name), pref),
             None => true,
         };
 
-        if let Some((auto_off, matched)) =
-            subtitles::compute_live_cue_offset_from_tracks(&cues, &g.cues_by_track, EXTERNAL_SUB_TRACK_ID)
-        {
-            g.ext_auto_offset_sec = Some(auto_off);
-            g.ext_matched_cues = matched;
-        }
         g.cues_by_track.insert(EXTERNAL_SUB_TRACK_ID, cues.clone());
 
         if should_select {
@@ -228,7 +817,12 @@ pub fn reload_cues_if_active(anilist_id: i64, ep_key: &str, sub_path: &str) -> b
                 tr.selected = false;
             }
         }
-        if let Some(existing) = g.state.sub_tracks.iter_mut().find(|t| t.id == EXTERNAL_SUB_TRACK_ID) {
+        if let Some(existing) = g
+            .state
+            .sub_tracks
+            .iter_mut()
+            .find(|t| t.id == EXTERNAL_SUB_TRACK_ID)
+        {
             existing.title = Some(file_name);
             existing.lang = Some(ext_lang);
             if should_select {
@@ -250,9 +844,21 @@ pub fn reload_cues_if_active(anilist_id: i64, ep_key: &str, sub_path: &str) -> b
         }
         if should_select {
             g.state.sid = Some(EXTERNAL_SUB_TRACK_ID);
-            g.user_adjusted_offset = false;
-            if let Some(auto_off) = g.ext_auto_offset_sec {
-                g.state.sub_offset_sec = auto_off;
+            if let Some(ref mpv) = g.mpv {
+                apply_sub_track_to_mpv(mpv, &g.state.sub_tracks, Some(EXTERNAL_SUB_TRACK_ID));
+            }
+            if !g.user_adjusted_offset {
+                g.auto_aligned_offset = false;
+                if let Some(mkv_path) =
+                    resolve_mkv_disk_path(anilist_id, ep_key, &g.state.path)
+                {
+                    if let Some(off_sec) =
+                        subtitles::compute_live_mkv_cue_offset_sec(&cues, &mkv_path)
+                    {
+                        g.auto_aligned_offset = true;
+                        g.state.sub_offset_sec = off_sec;
+                    }
+                }
             }
             let pos = g.state.position;
             let off = g.state.sub_offset_sec;
@@ -262,319 +868,6 @@ pub fn reload_cues_if_active(anilist_id: i64, ep_key: &str, sub_path: &str) -> b
         return true;
     }
     false
-}
-
-// ---------------------------------------------------------------------------
-// Local HTTP Byte-Range + Live MPV Transcode Server
-// ---------------------------------------------------------------------------
-
-async fn spawn_local_media_server(
-    source_path: String,
-    session_id: u64,
-    has_mpv: bool,
-) -> Result<(String, Option<String>)> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-    let is_remote = source_path.starts_with("http://") || source_path.starts_with("https://");
-
-    let stream_url = if is_remote {
-        source_path.clone()
-    } else {
-        format!("http://127.0.0.1:{port}/video")
-    };
-    let transcode_base = if has_mpv {
-        Some(format!("http://127.0.0.1:{port}/transcode"))
-    } else {
-        None
-    };
-
-    let active_transcode_id = Arc::new(AtomicU64::new(0));
-    let audio_type_offsets: Arc<Vec<usize>> = if !is_remote {
-        let mut hdr = vec![0u8; 65_536];
-        let offsets = if let Ok(mut f) = std::fs::File::open(&source_path) {
-            let n = f.read(&mut hdr).unwrap_or(0);
-            subtitles::find_mkv_audio_track_type_offsets(&hdr[..n])
-        } else {
-            Vec::new()
-        };
-        Arc::new(offsets)
-    } else {
-        Arc::new(Vec::new())
-    };
-
-    tokio::spawn(async move {
-        loop {
-            if SESSION_COUNTER.load(Ordering::SeqCst) != session_id {
-                break;
-            }
-            let accept_res = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
-            let Ok(Ok((socket, _))) = accept_res else {
-                continue;
-            };
-            if SESSION_COUNTER.load(Ordering::SeqCst) != session_id {
-                break;
-            }
-            let src = source_path.clone();
-            let tc_counter = active_transcode_id.clone();
-            let a_offsets = audio_type_offsets.clone();
-            tokio::spawn(async move {
-                let _ = handle_media_http_client(socket, src, session_id, tc_counter, a_offsets).await;
-            });
-        }
-    });
-
-    Ok((stream_url, transcode_base))
-}
-
-fn parse_query_param(query: &str, key: &str) -> Option<String> {
-    for pair in query.split('&') {
-        let mut kv = pair.splitn(2, '=');
-        if kv.next()? == key {
-            return kv.next().map(String::from);
-        }
-    }
-    None
-}
-
-fn content_type_for_path(path: &str) -> &'static str {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".mp4") || lower.ends_with(".m4v") {
-        "video/mp4"
-    } else if lower.ends_with(".webm") {
-        "video/webm"
-    } else {
-        "video/x-matroska"
-    }
-}
-
-async fn handle_media_http_client(
-    mut socket: TcpStream,
-    source_path: String,
-    session_id: u64,
-    active_transcode_id: Arc<AtomicU64>,
-    audio_type_offsets: Arc<Vec<usize>>,
-) -> Result<()> {
-    let mut req_buf = [0u8; 4096];
-    let n = tokio::time::timeout(Duration::from_secs(10), socket.read(&mut req_buf)).await??;
-    if n == 0 {
-        return Ok(());
-    }
-    let req_str = String::from_utf8_lossy(&req_buf[..n]);
-    let first_line = req_str.lines().next().unwrap_or("");
-    let is_head = first_line.starts_with("HEAD ");
-    let is_options = first_line.starts_with("OPTIONS ");
-
-    if is_options {
-        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, HEAD, OPTIONS\r\nAccess-Control-Allow-Headers: Range\r\nConnection: close\r\n\r\n";
-        socket.write_all(resp.as_bytes()).await?;
-        return Ok(());
-    }
-
-    let req_target = first_line.split_whitespace().nth(1).unwrap_or("/");
-    let (route_path, query) = req_target.split_once('?').unwrap_or((req_target, ""));
-
-    if route_path.starts_with("/transcode") {
-        let start_sec = parse_query_param(query, "start")
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(0.0);
-        let aid = parse_query_param(query, "aid")
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(0);
-        let copy_video = parse_query_param(query, "vc")
-            .map(|v| v != "h264")
-            .unwrap_or(true);
-        return handle_transcode_stream(
-            socket,
-            &source_path,
-            start_sec,
-            aid,
-            copy_video,
-            session_id,
-            active_transcode_id,
-        )
-        .await;
-    }
-
-    let selected_aid = parse_query_param(query, "aid")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(0);
-
-    // Serve local file with HTTP 206 Partial Content byte-range support
-    let file_meta = tokio::fs::metadata(&source_path).await?;
-    let total_len = file_meta.len();
-    if total_len == 0 {
-        return Ok(());
-    }
-
-    let mut range_start = 0u64;
-    let mut range_end = total_len.saturating_sub(1);
-    let mut has_range = false;
-
-    for line in req_str.lines() {
-        let lower = line.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("range: bytes=") {
-            has_range = true;
-            let mut parts = rest.trim().splitn(2, '-');
-            if let Some(s) = parts.next().and_then(|s| s.parse::<u64>().ok()) {
-                range_start = s.min(total_len.saturating_sub(1));
-            }
-            if let Some(e) = parts.next().and_then(|e| e.parse::<u64>().ok()) {
-                range_end = e.min(total_len.saturating_sub(1));
-            }
-        }
-    }
-
-    let content_len = (range_end - range_start) + 1;
-    let mime = content_type_for_path(&source_path);
-    let header = if has_range {
-        format!(
-            "HTTP/1.1 206 Partial Content\r\nContent-Type: {mime}\r\nAccept-Ranges: bytes\r\nAccess-Control-Allow-Origin: *\r\nContent-Range: bytes {range_start}-{range_end}/{total_len}\r\nContent-Length: {content_len}\r\nConnection: close\r\n\r\n"
-        )
-    } else {
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nAccept-Ranges: bytes\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {total_len}\r\nConnection: close\r\n\r\n"
-        )
-    };
-    socket.write_all(header.as_bytes()).await?;
-    if is_head {
-        return Ok(());
-    }
-
-    let mut f = tokio::fs::File::open(&source_path).await?;
-    f.seek(SeekFrom::Start(range_start)).await?;
-
-    let mut cur_file_offset = range_start;
-    let mut remaining = content_len;
-    let mut buf = vec![0u8; 65_536];
-    while remaining > 0 {
-        if SESSION_COUNTER.load(Ordering::SeqCst) != session_id {
-            break;
-        }
-        let to_read = (remaining as usize).min(buf.len());
-        let read_n = f.read(&mut buf[..to_read]).await?;
-        if read_n == 0 {
-            break;
-        }
-        if selected_aid > 0 && cur_file_offset < 65_536 && !audio_type_offsets.is_empty() {
-            subtitles::apply_mkv_audio_track_mask(
-                &mut buf[..read_n],
-                cur_file_offset,
-                &audio_type_offsets,
-                selected_aid,
-            );
-        }
-        if socket.write_all(&buf[..read_n]).await.is_err() {
-            break;
-        }
-        cur_file_offset += read_n as u64;
-        remaining -= read_n as u64;
-    }
-
-    Ok(())
-}
-
-async fn handle_transcode_stream(
-    mut socket: TcpStream,
-    source_path: &str,
-    start_sec: f64,
-    aid: i64,
-    copy_video: bool,
-    session_id: u64,
-    active_transcode_id: Arc<AtomicU64>,
-) -> Result<()> {
-    let Some(mpv_exe) = player::detect(Kind::Mpv) else {
-        return Ok(());
-    };
-
-    let my_tc_id = active_transcode_id.fetch_add(1, Ordering::SeqCst) + 1;
-
-    let header = "HTTP/1.1 200 OK\r\nContent-Type: video/x-matroska\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
-    socket.write_all(header.as_bytes()).await?;
-
-    let mut cmd = std::process::Command::new(&mpv_exe);
-    cmd.arg("--no-config")
-        .arg("--no-terminal")
-        .arg("--cache=no")
-        .arg("--demuxer-lavf-o=fflags=+nobuffer")
-        .arg("--sub=no")
-        .arg("--vid=1");
-
-    if copy_video {
-        cmd.arg("--ovc=copy");
-    } else {
-        cmd.arg("--hwdec=auto-copy")
-            .arg("--vf=format=yuv420p")
-            .arg("--ovc=libx264")
-            .arg("--ovcopts=preset=ultrafast,tune=zerolatency,crf=20");
-    }
-
-    cmd.arg("--audio-channels=stereo")
-        .arg("--oac=aac")
-        .arg("--oacopts=b=192k")
-        .arg("--of=matroska")
-        .arg("--o=-");
-
-    if aid > 0 {
-        cmd.arg(format!("--aid={aid}"));
-    } else {
-        cmd.arg("--alang=jpn,ja,jp,japanese,und,eng,en");
-    }
-    if start_sec > 0.5 {
-        cmd.arg(format!("--start=+{start_sec:.1}"));
-    }
-    cmd.arg("--").arg(source_path);
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let mut child = cmd.spawn()?;
-    let Some(mut stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        return Ok(());
-    };
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
-    let tc_clone = active_transcode_id.clone();
-    std::thread::spawn(move || {
-        let mut buf = vec![0u8; 32_768];
-        loop {
-            if SESSION_COUNTER.load(Ordering::SeqCst) != session_id
-                || tc_clone.load(Ordering::SeqCst) != my_tc_id
-            {
-                break;
-            }
-            match stdout.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if tx.blocking_send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-    });
-
-    while let Some(chunk) = rx.recv().await {
-        if SESSION_COUNTER.load(Ordering::SeqCst) != session_id
-            || active_transcode_id.load(Ordering::SeqCst) != my_tc_id
-        {
-            break;
-        }
-        if socket.write_all(&chunk).await.is_err() {
-            break;
-        }
-    }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -667,7 +960,13 @@ fn infer_op_ed_from_chapters(
         let next_t = chapters
             .get(i + 1)
             .map(|n| n.time)
-            .unwrap_or_else(|| if duration > ch.time { duration } else { ch.time + 90.0 });
+            .unwrap_or_else(|| {
+                if duration > ch.time {
+                    duration
+                } else {
+                    ch.time + 90.0
+                }
+            });
         let span = next_t - ch.time;
         if !(25.0..=210.0).contains(&span) {
             continue;
@@ -712,7 +1011,6 @@ fn pick_sub_track_for_code(tracks: &[TrackItem], code: &str) -> Option<i64> {
             .map(|t| t.id);
     }
     let prefer_external = matches!(c.as_str(), "jpn" | "ja" | "japanese" | "jp");
-    // 1. Full dialogue tracks (not Signs/Songs)
     if let Some(t) = tracks
         .iter()
         .filter(|t| {
@@ -723,7 +1021,6 @@ fn pick_sub_track_for_code(tracks: &[TrackItem], code: &str) -> Option<i64> {
     {
         return Some(t.id);
     }
-    // 2. Any matching language track (including Signs/Songs if nothing else matches)
     tracks
         .iter()
         .filter(|t| {
@@ -733,7 +1030,10 @@ fn pick_sub_track_for_code(tracks: &[TrackItem], code: &str) -> Option<i64> {
         .map(|t| t.id)
 }
 
-fn pick_best_sub_track_id(tracks: &[TrackItem], prefs: &player::EffectiveTrackPrefs) -> Option<i64> {
+fn pick_best_sub_track_id(
+    tracks: &[TrackItem],
+    prefs: &player::EffectiveTrackPrefs,
+) -> Option<i64> {
     let sub_pref = prefs.sub.as_deref().unwrap_or("jpn").trim();
     if sub_pref.eq_ignore_ascii_case("off") || sub_pref.eq_ignore_ascii_case("none") {
         return None;
@@ -756,12 +1056,14 @@ fn pick_best_sub_track_id(tracks: &[TrackItem], prefs: &player::EffectiveTrackPr
 }
 
 // ---------------------------------------------------------------------------
-// Launching & Controlling the Built-in Player
+// Launching & Controlling the Built-in libmpv Player
 // ---------------------------------------------------------------------------
 
 pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
     let session_id = SESSION_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
     let _play_session = st.play_session.fetch_add(1, Ordering::SeqCst) + 1;
+
+    let mpv = ensure_mpv(&app, &st)?;
 
     let (
         start_pos,
@@ -774,6 +1076,8 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         ext_cues,
         track_prefs,
         today_immersion_sec,
+        prev_volume,
+        prev_muted,
     ) = {
         let conn = st.db();
         let p = player::prefs(&conn);
@@ -795,6 +1099,10 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
                 |r| r.get(0),
             )
             .unwrap_or(0);
+        let (vol, muted) = {
+            let g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+            (g.state.volume, g.state.muted)
+        };
         (
             start_pos,
             p.threshold,
@@ -806,10 +1114,12 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             ext_cues,
             track_prefs,
             today_sec,
+            vol,
+            muted,
         )
     };
 
-    // Ensure starter Japanese dictionary is seeded in background so first hover is instant
+    // Seed starter Japanese dictionary in background so first hover is instant
     let st_dict = st.clone();
     tauri::async_runtime::spawn_blocking(move || {
         if let Ok(conn) = crate::dictionary::open_dict_db(&st_dict.data_dir) {
@@ -854,23 +1164,19 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
 
     let initial_state = BuiltinPlayerState {
         active: true,
-        backend: "html5".to_string(),
+        backend: "libmpv".to_string(),
         anilist_id: ep.anilist_id,
         ep_key: ep.ep_key.clone(),
         path: ep.path.clone(),
-        stream_url: if ep.path.starts_with("http://") || ep.path.starts_with("https://") {
-            ep.path.clone()
-        } else {
-            String::new()
-        },
+        stream_url: String::new(),
         transcode_base_url: None,
         show_title,
         episode_title,
         paused: false,
         position: start_pos,
         duration: 0.0,
-        volume: 100.0,
-        muted: false,
+        volume: prev_volume,
+        muted: prev_muted,
         speed: 1.0,
         aid: None,
         sid: active_sid,
@@ -898,243 +1204,35 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         g.marked_watched = false;
         g.aniskip_queried = false;
         g.tick_count = 0;
-        g.ext_auto_offset_sec = None;
-        g.ext_matched_cues = 0;
+        g.pending_start_pos = start_pos;
         g.user_adjusted_offset = false;
+        g.auto_aligned_offset = false;
         g.user_selected_sub_track = false;
         g.track_prefs = track_prefs;
         g.last_unpaused_tick = None;
         g.unflushed_immersion_sec = 0.0;
+        g.last_emit_at = None;
     }
 
+    // Attach and synchronize the Win32 hardware surface window behind Kura's main window
+    libmpv::sync_surface_bounds(&app, true);
     emit_state(&app, &initial_state);
     player::sync_discord_activity(&st, &ep, start_pos, 0.0, true);
 
-    let has_mpv = player::detect(Kind::Mpv).is_some();
+    // Load file into native libmpv
+    let _ = mpv.set_property_double("volume", prev_volume);
+    let _ = mpv.set_property_bool("mute", prev_muted);
+    let _ = mpv.set_property_double("speed", 1.0);
+    let _ = mpv.set_property_double("sub-delay", 0.0);
+    let _ = mpv.set_property_bool("pause", false);
+    mpv.command(&["loadfile", &ep.path, "replace"])?;
+
+    // Query AniSkip in parallel
     let app_srv = app.clone();
     let st_srv = st.clone();
     let ep_srv = ep.clone();
-
     tauri::async_runtime::spawn(async move {
-        if let Ok((stream_url, transcode_base)) =
-            spawn_local_media_server(ep_srv.path.clone(), session_id, has_mpv).await
-        {
-            if SESSION_COUNTER.load(Ordering::SeqCst) == session_id {
-                let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-                if g.state.active {
-                    g.state.stream_url = stream_url;
-                    g.state.transcode_base_url = transcode_base;
-                    emit_state(&app_srv, &g.state);
-                }
-            }
-        }
-
-        // Also query AniSkip in parallel
         fetch_and_apply_aniskip(&app_srv, &st_srv, &ep_srv, 0.0, session_id).await;
-    });
-
-    // Extract embedded Matroska (.mkv) subtitle tracks, audio tracks, chapters, and duration in background
-    let app_mkv = app.clone();
-    let st_mkv = st.clone();
-    let ep_mkv = ep.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let is_remote_stream = ep_mkv.path.starts_with("http://") || ep_mkv.path.starts_with("https://");
-        let local_mkv_path: PathBuf = if is_remote_stream {
-            let Some(p) = crate::torrent::save_path_for_stream_url(&ep_mkv.path) else {
-                return;
-            };
-            p
-        } else {
-            PathBuf::from(&ep_mkv.path)
-        };
-
-        let mut aniskip_sent = false;
-        let mut scan_iter = 0u32;
-        loop {
-            if SESSION_COUNTER.load(Ordering::SeqCst) != session_id {
-                return;
-            }
-            if let Ok(embedded) = subtitles::extract_mkv_embedded_data(&local_mkv_path) {
-                if SESSION_COUNTER.load(Ordering::SeqCst) != session_id {
-                    return;
-                }
-                let dur_for_aniskip;
-                {
-                    let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-                    if !g.state.active || SESSION_COUNTER.load(Ordering::SeqCst) != session_id {
-                        return;
-                    }
-
-                    if let Some(dur) = embedded.duration_sec {
-                        if g.state.duration <= 0.0 {
-                            g.state.duration = dur;
-                        }
-                    }
-
-                    // Live auto-synchronization of external Japanese subtitles (e.g. from Jimaku) against
-                    // the streaming/local `.mkv`'s embedded subtitle cues or leading studio/distributor bumper
-                    // (such as a 6–12s Viz Media / Crunchyroll / Netflix intro animation before episode start).
-                    if !g.user_adjusted_offset {
-                        if let Some(ext_track_cues) = g.cues_by_track.get(&EXTERNAL_SUB_TRACK_ID).cloned() {
-                            if let Some((auto_off, matched)) =
-                                subtitles::compute_live_cue_offset_sec(&ext_track_cues, &embedded)
-                            {
-                                if g.ext_auto_offset_sec.is_none() || matched >= g.ext_matched_cues {
-                                    g.ext_auto_offset_sec = Some(auto_off);
-                                    g.ext_matched_cues = matched;
-                                    if g.state.sid == Some(EXTERNAL_SUB_TRACK_ID) {
-                                        g.state.sub_offset_sec = auto_off;
-                                        let pos = g.state.position;
-                                        g.state.sub_text =
-                                            find_cue_at(&g.cues, pos, auto_off).unwrap_or_default();
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Audio tracks (populate once if empty; use 1-based audio ordinal matching `mpv --aid=1,2,...`)
-                    if g.state.audio_tracks.is_empty() && !embedded.audio_tracks.is_empty() {
-                        let mut a_items = Vec::new();
-                        let mut chosen_aid: Option<i64> = None;
-                        if let Some(audio_pref) = g.track_prefs.audio.as_deref() {
-                            for (idx, tr) in embedded.audio_tracks.iter().enumerate() {
-                                let ordinal = (idx + 1) as i64;
-                                if player::lang_matches_code(&tr.lang, tr.title.as_deref(), audio_pref) {
-                                    chosen_aid = Some(ordinal);
-                                    break;
-                                }
-                            }
-                        }
-                        if chosen_aid.is_none() {
-                            for (idx, tr) in embedded.audio_tracks.iter().enumerate() {
-                                let ordinal = (idx + 1) as i64;
-                                if is_japanese_lang(&tr.lang) {
-                                    chosen_aid = Some(ordinal);
-                                    break;
-                                }
-                            }
-                        }
-                        if chosen_aid.is_none() {
-                            chosen_aid = Some(1);
-                        }
-                        for (idx, tr) in embedded.audio_tracks.into_iter().enumerate() {
-                            let ordinal = (idx + 1) as i64;
-                            a_items.push(TrackItem {
-                                id: ordinal,
-                                track_type: "audio".to_string(),
-                                title: tr.title,
-                                lang: Some(tr.lang),
-                                codec: Some(tr.codec),
-                                selected: Some(ordinal) == chosen_aid,
-                                external: false,
-                            });
-                        }
-                        g.state.aid = chosen_aid;
-                        g.state.audio_tracks = a_items;
-                    }
-
-                    // Embedded subtitle tracks
-                    if !embedded.sub_tracks.is_empty() {
-                        for tr in embedded.sub_tracks {
-                            g.cues_by_track.insert(tr.track_num, tr.cues);
-                            if !g.state.sub_tracks.iter().any(|existing| existing.id == tr.track_num) {
-                                g.state.sub_tracks.push(TrackItem {
-                                    id: tr.track_num,
-                                    track_type: "sub".to_string(),
-                                    title: tr.title,
-                                    lang: Some(tr.lang),
-                                    codec: Some(tr.codec),
-                                    selected: false,
-                                    external: false,
-                                });
-                            }
-                        }
-
-                        if !g.user_selected_sub_track {
-                            let chosen_sid = pick_best_sub_track_id(&g.state.sub_tracks, &g.track_prefs);
-                            g.state.sid = chosen_sid;
-                            for tr in &mut g.state.sub_tracks {
-                                tr.selected = Some(tr.id) == chosen_sid;
-                            }
-                            if !g.user_adjusted_offset {
-                                if chosen_sid == Some(EXTERNAL_SUB_TRACK_ID) {
-                                    g.state.sub_offset_sec = g.ext_auto_offset_sec.unwrap_or(0.0);
-                                } else {
-                                    g.state.sub_offset_sec = 0.0;
-                                }
-                            }
-                            if let Some(sid) = chosen_sid {
-                                if let Some(track_cues) = g.cues_by_track.get(&sid).cloned() {
-                                    let pos = g.state.position;
-                                    let off = g.state.sub_offset_sec;
-                                    g.state.sub_text = find_cue_at(&track_cues, pos, off).unwrap_or_default();
-                                    g.cues = track_cues;
-                                }
-                            } else {
-                                g.state.sub_text.clear();
-                                g.cues.clear();
-                            }
-                        } else if let Some(sid) = g.state.sid {
-                            // Keep active cues updated as streaming MKV clusters arrive
-                            if let Some(track_cues) = g.cues_by_track.get(&sid).cloned() {
-                                let pos = g.state.position;
-                                let off = g.state.sub_offset_sec;
-                                g.state.sub_text = find_cue_at(&track_cues, pos, off).unwrap_or_default();
-                                g.cues = track_cues;
-                            }
-                        }
-                    }
-
-                    // Chapters & OP/ED inference
-                    if g.state.chapters.is_empty() && !embedded.chapters.is_empty() {
-                        let ch_items: Vec<ChapterItem> = embedded
-                            .chapters
-                            .into_iter()
-                            .map(|c| ChapterItem {
-                                title: c.title,
-                                time: c.time_sec,
-                            })
-                            .collect();
-                        let dur = g.state.duration;
-                        let (op_s, op_e, ed_s, ed_e) = infer_op_ed_from_chapters(&ch_items, dur);
-                        if g.state.op_start.is_none() && op_s.is_some() {
-                            g.state.op_start = op_s;
-                            g.state.op_end = op_e;
-                        }
-                        if g.state.ed_start.is_none() && ed_s.is_some() {
-                            g.state.ed_start = ed_s;
-                            g.state.ed_end = ed_e;
-                        }
-                        g.state.chapters = ch_items;
-                    }
-
-                    dur_for_aniskip = g.state.duration;
-                    emit_state(&app_mkv, &g.state);
-                }
-
-                if !aniskip_sent && dur_for_aniskip > 0.0 {
-                    aniskip_sent = true;
-                    let app_c = app_mkv.clone();
-                    let st_c = st_mkv.clone();
-                    let ep_c = ep_mkv.clone();
-                    tauri::async_runtime::spawn(async move {
-                        fetch_and_apply_aniskip(&app_c, &st_c, &ep_c, dur_for_aniskip, session_id).await;
-                    });
-                }
-            }
-
-            if !is_remote_stream {
-                break;
-            }
-            scan_iter += 1;
-            let sleep_dur = if scan_iter <= 10 {
-                Duration::from_millis(750)
-            } else {
-                Duration::from_secs(3)
-            };
-            std::thread::sleep(sleep_dur);
-        }
     });
 
     Ok(())
@@ -1159,7 +1257,9 @@ async fn fetch_and_apply_aniskip(
     let ep_num: Option<i64> = ep.ep_key.parse().ok();
     let Some(mid) = mal_id else { return };
     let Some(enum_val) = ep_num else { return };
-    let Ok(client) = reqwest::Client::builder().no_proxy().build() else { return };
+    let Ok(client) = reqwest::Client::builder().no_proxy().build() else {
+        return;
+    };
 
     if let Some(AniSkipTimes {
         op_start,
@@ -1227,19 +1327,29 @@ pub async fn dispatch_command(
     st: Arc<AppState>,
     cmd: BuiltinCommand,
 ) -> Result<BuiltinPlayerState> {
-    let cur_ep = {
+    let (cur_ep, mpv_opt) = {
         let g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-        Ep {
-            anilist_id: g.state.anilist_id,
-            ep_key: g.state.ep_key.clone(),
-            path: g.state.path.clone(),
-        }
+        (
+            Ep {
+                anilist_id: g.state.anilist_id,
+                ep_key: g.state.ep_key.clone(),
+                path: g.state.path.clone(),
+            },
+            g.mpv,
+        )
     };
 
     match cmd {
-        BuiltinCommand::SyncBounds => {}
+        BuiltinCommand::SyncBounds => {
+            sync_bounds(&app);
+        }
         BuiltinCommand::Stop => {
             SESSION_COUNTER.fetch_add(1, Ordering::SeqCst);
+            if let Some(mpv) = mpv_opt {
+                let _ = mpv.command(&["stop"]);
+            }
+            libmpv::sync_surface_bounds(&app, false);
+
             let (pos, dur, flush_sec, show_title) = {
                 let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
                 let pos = g.state.position;
@@ -1271,6 +1381,11 @@ pub async fn dispatch_command(
         }
         BuiltinCommand::OpenExternalMpv => {
             SESSION_COUNTER.fetch_add(1, Ordering::SeqCst);
+            if let Some(mpv) = mpv_opt {
+                let _ = mpv.command(&["stop"]);
+            }
+            libmpv::sync_surface_bounds(&app, false);
+
             let (pos, dur, ext_sub) = {
                 let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
                 let pos = g.state.position;
@@ -1303,38 +1418,70 @@ pub async fn dispatch_command(
             }
         }
         BuiltinCommand::PlayPause => {
-            let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-            g.state.paused = !g.state.paused;
-            emit_state(&app, &g.state);
+            let next_paused = {
+                let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                g.state.paused = !g.state.paused;
+                emit_state(&app, &g.state);
+                g.state.paused
+            };
+            if let Some(mpv) = mpv_opt {
+                let _ = mpv.set_property_bool("pause", next_paused);
+            }
         }
         BuiltinCommand::Pause => {
-            let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-            g.state.paused = true;
-            emit_state(&app, &g.state);
+            {
+                let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                g.state.paused = true;
+                emit_state(&app, &g.state);
+            }
+            if let Some(mpv) = mpv_opt {
+                let _ = mpv.set_property_bool("pause", true);
+            }
         }
         BuiltinCommand::Resume => {
-            let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-            g.state.paused = false;
-            emit_state(&app, &g.state);
+            {
+                let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                g.state.paused = false;
+                emit_state(&app, &g.state);
+            }
+            if let Some(mpv) = mpv_opt {
+                let _ = mpv.set_property_bool("pause", false);
+            }
         }
         BuiltinCommand::Seek { position } => {
             let target = position.max(0.0);
+            if let Some(mpv) = mpv_opt {
+                let _ = mpv.command(&["seek", &format!("{target:.3}"), "absolute", "exact"]);
+            }
             let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
             g.state.position = target;
-            let offset = g.state.sub_offset_sec;
-            g.state.sub_text = find_cue_at(&g.cues, target, offset).unwrap_or_default();
+            if g.state.sid == Some(EXTERNAL_SUB_TRACK_ID) {
+                let offset = g.state.sub_offset_sec;
+                g.state.sub_text = find_cue_at(&g.cues, target, offset).unwrap_or_default();
+            }
             emit_state(&app, &g.state);
         }
         BuiltinCommand::SeekRelative { delta } => {
+            if let Some(mpv) = mpv_opt {
+                let _ = mpv.command(&["seek", &format!("{delta:.3}"), "relative", "exact"]);
+            }
             let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
             let target = (g.state.position + delta).max(0.0);
             g.state.position = target;
-            let offset = g.state.sub_offset_sec;
-            g.state.sub_text = find_cue_at(&g.cues, target, offset).unwrap_or_default();
+            if g.state.sid == Some(EXTERNAL_SUB_TRACK_ID) {
+                let offset = g.state.sub_offset_sec;
+                g.state.sub_text = find_cue_at(&g.cues, target, offset).unwrap_or_default();
+            }
             emit_state(&app, &g.state);
         }
         BuiltinCommand::SetVolume { volume } => {
             let v = volume.clamp(0.0, 130.0);
+            if let Some(mpv) = mpv_opt {
+                let _ = mpv.set_property_double("volume", v);
+                if v > 0.0 {
+                    let _ = mpv.set_property_bool("mute", false);
+                }
+            }
             let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
             g.state.volume = v;
             if v > 0.0 {
@@ -1343,17 +1490,29 @@ pub async fn dispatch_command(
             emit_state(&app, &g.state);
         }
         BuiltinCommand::ToggleMute => {
-            let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-            g.state.muted = !g.state.muted;
-            emit_state(&app, &g.state);
+            let next_muted = {
+                let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                g.state.muted = !g.state.muted;
+                emit_state(&app, &g.state);
+                g.state.muted
+            };
+            if let Some(mpv) = mpv_opt {
+                let _ = mpv.set_property_bool("mute", next_muted);
+            }
         }
         BuiltinCommand::SetSpeed { speed } => {
             let sp = speed.clamp(0.25, 3.0);
+            if let Some(mpv) = mpv_opt {
+                let _ = mpv.set_property_double("speed", sp);
+            }
             let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
             g.state.speed = sp;
             emit_state(&app, &g.state);
         }
         BuiltinCommand::SetAudioTrack { id } => {
+            if let Some(mpv) = mpv_opt {
+                let _ = mpv.set_property_i64("aid", id);
+            }
             let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
             g.state.aid = Some(id);
             for tr in &mut g.state.audio_tracks {
@@ -1366,7 +1525,8 @@ pub async fn dispatch_command(
             {
                 let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
                 g.user_selected_sub_track = true;
-                g.state.sid = if id <= 0 { None } else { Some(id) };
+                let chosen_sid = if id <= 0 { None } else { Some(id) };
+                g.state.sid = chosen_sid;
                 for tr in &mut g.state.sub_tracks {
                     tr.selected = tr.id == id;
                     if tr.selected {
@@ -1386,21 +1546,24 @@ pub async fn dispatch_command(
                 if let Some(ref lp) = chosen_lang_pref {
                     g.track_prefs.sub = Some(lp.clone());
                 }
-                if !g.user_adjusted_offset {
-                    if id == EXTERNAL_SUB_TRACK_ID {
-                        g.state.sub_offset_sec = g.ext_auto_offset_sec.unwrap_or(0.0);
-                    } else {
-                        g.state.sub_offset_sec = 0.0;
-                    }
+
+                if let Some(ref mpv) = g.mpv {
+                    apply_sub_track_to_mpv(mpv, &g.state.sub_tracks, chosen_sid);
                 }
+
                 if id <= 0 {
                     g.state.sub_text.clear();
                     g.cues.clear();
-                } else if let Some(track_cues) = g.cues_by_track.get(&id).cloned() {
-                    let pos = g.state.position;
-                    let off = g.state.sub_offset_sec;
-                    g.state.sub_text = find_cue_at(&track_cues, pos, off).unwrap_or_default();
-                    g.cues = track_cues;
+                } else if id == EXTERNAL_SUB_TRACK_ID {
+                    if let Some(track_cues) = g.cues_by_track.get(&id).cloned() {
+                        let pos = g.state.position;
+                        let off = g.state.sub_offset_sec;
+                        g.state.sub_text = find_cue_at(&track_cues, pos, off).unwrap_or_default();
+                        g.cues = track_cues;
+                    }
+                } else if let Some(ref mpv) = g.mpv {
+                    let raw = mpv.get_property_string("sub-text").unwrap_or_default();
+                    g.state.sub_text = clean_mpv_sub_text(&raw);
                 }
                 emit_state(&app, &g.state);
             }
@@ -1410,13 +1573,22 @@ pub async fn dispatch_command(
             }
         }
         BuiltinCommand::AddSubOffset { delta } => {
-            let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-            g.user_adjusted_offset = true;
-            g.state.sub_offset_sec = ((g.state.sub_offset_sec + delta) * 100.0).round() / 100.0;
-            let pos = g.state.position;
-            let off = g.state.sub_offset_sec;
-            g.state.sub_text = find_cue_at(&g.cues, pos, off).unwrap_or_default();
-            emit_state(&app, &g.state);
+            let new_off = {
+                let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                g.user_adjusted_offset = true;
+                g.state.sub_offset_sec =
+                    ((g.state.sub_offset_sec + delta) * 100.0).round() / 100.0;
+                if g.state.sid == Some(EXTERNAL_SUB_TRACK_ID) {
+                    let pos = g.state.position;
+                    let off = g.state.sub_offset_sec;
+                    g.state.sub_text = find_cue_at(&g.cues, pos, off).unwrap_or_default();
+                }
+                emit_state(&app, &g.state);
+                g.state.sub_offset_sec
+            };
+            if let Some(mpv) = mpv_opt {
+                let _ = mpv.set_property_double("sub-delay", new_off);
+            }
         }
         BuiltinCommand::LoadSubFile { path } => {
             let cues = subtitles::parse_subtitle_file_cues(Path::new(&path));
@@ -1426,10 +1598,16 @@ pub async fn dispatch_command(
                 .unwrap_or_else(|| "External Subtitle".to_string());
             let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
             g.state.external_sub_path = Some(path);
+            g.user_selected_sub_track = true;
             for tr in &mut g.state.sub_tracks {
                 tr.selected = false;
             }
-            if let Some(ext) = g.state.sub_tracks.iter_mut().find(|t| t.id == EXTERNAL_SUB_TRACK_ID) {
+            if let Some(ext) = g
+                .state
+                .sub_tracks
+                .iter_mut()
+                .find(|t| t.id == EXTERNAL_SUB_TRACK_ID)
+            {
                 ext.title = Some(file_label);
                 ext.selected = true;
             } else {
@@ -1447,14 +1625,8 @@ pub async fn dispatch_command(
                 );
             }
             g.state.sid = Some(EXTERNAL_SUB_TRACK_ID);
-            g.user_adjusted_offset = false;
-            g.ext_matched_cues = 0;
-            if let Some((auto_off, matched)) =
-                subtitles::compute_live_cue_offset_from_tracks(&cues, &g.cues_by_track, EXTERNAL_SUB_TRACK_ID)
-            {
-                g.ext_auto_offset_sec = Some(auto_off);
-                g.ext_matched_cues = matched;
-                g.state.sub_offset_sec = auto_off;
+            if let Some(ref mpv) = g.mpv {
+                apply_sub_track_to_mpv(mpv, &g.state.sub_tracks, Some(EXTERNAL_SUB_TRACK_ID));
             }
             let pos = g.state.position;
             let off = g.state.sub_offset_sec;
@@ -1463,128 +1635,8 @@ pub async fn dispatch_command(
             g.cues = cues;
             emit_state(&app, &g.state);
         }
-        BuiltinCommand::Html5Tick {
-            position,
-            duration,
-            paused,
-            ended,
-        } => {
-            let (
-                eff_dur,
-                threshold,
-                autoplay,
-                should_mark_watched,
-                should_save_prog,
-                should_query_aniskip,
-                sid_opt,
-                flush_immersion_sec,
-                show_title,
-            ) = {
-                let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-                if !g.state.active {
-                    return Ok(g.state.clone());
-                }
-                let now_inst = std::time::Instant::now();
-                if !paused && !ended {
-                    if let Some(prev) = g.last_unpaused_tick {
-                        let dt = now_inst.duration_since(prev).as_secs_f64();
-                        if (0.01..=2.5).contains(&dt) {
-                            g.unflushed_immersion_sec += dt;
-                        }
-                    }
-                    g.last_unpaused_tick = Some(now_inst);
-                } else {
-                    g.last_unpaused_tick = None;
-                }
-
-                let flush_immersion_sec = if g.unflushed_immersion_sec >= 5.0
-                    || ((paused || ended) && g.unflushed_immersion_sec >= 1.0)
-                {
-                    let sec = g.unflushed_immersion_sec.floor() as i64;
-                    g.unflushed_immersion_sec -= sec as f64;
-                    g.state.today_immersion_sec += sec;
-                    sec
-                } else {
-                    0
-                };
-                let show_title = g.state.show_title.clone();
-
-                g.state.position = position;
-                if duration > 0.0 && duration.is_finite() {
-                    g.state.duration = duration;
-                }
-                let eff_dur = g.state.duration;
-                g.state.paused = paused;
-                let off = g.state.sub_offset_sec;
-                let sid_opt = g.state.sid;
-                if sid_opt.is_some() {
-                    g.state.sub_text = find_cue_at(&g.cues, position, off).unwrap_or_default();
-                } else {
-                    g.state.sub_text.clear();
-                }
-
-                g.tick_count += 1;
-                let threshold = g.threshold;
-                let autoplay = g.autoplay;
-                let should_mark_watched = !g.marked_watched && player::reached(position, eff_dur, threshold);
-                if should_mark_watched {
-                    g.marked_watched = true;
-                }
-                let should_save_prog = !g.marked_watched && position > 15.0 && eff_dur > 0.0 && g.tick_count % 12 == 0;
-                let should_query_aniskip = !g.aniskip_queried && eff_dur > 0.0;
-                if should_query_aniskip {
-                    g.aniskip_queried = true;
-                }
-
-                emit_state(&app, &g.state);
-                (
-                    eff_dur,
-                    threshold,
-                    autoplay,
-                    should_mark_watched,
-                    should_save_prog,
-                    should_query_aniskip,
-                    sid_opt,
-                    flush_immersion_sec,
-                    show_title,
-                )
-            };
-            let _ = (threshold, sid_opt);
-
-            if flush_immersion_sec > 0 {
-                let _ = db::record_immersion_time(
-                    &st.db(),
-                    Some(cur_ep.anilist_id),
-                    Some(&cur_ep.ep_key),
-                    Some(&show_title),
-                    flush_immersion_sec,
-                );
-            }
-
-            if should_query_aniskip {
-                let app_c = app.clone();
-                let st_c = st.clone();
-                let ep_c = cur_ep.clone();
-                let sess_id = SESSION_COUNTER.load(Ordering::SeqCst);
-                tauri::async_runtime::spawn(async move {
-                    fetch_and_apply_aniskip(&app_c, &st_c, &ep_c, eff_dur, sess_id).await;
-                });
-            }
-
-            if should_mark_watched {
-                save_watched(&st.db(), &cur_ep);
-                crate::anilist_sync::on_episode_watched(&app, &st, cur_ep.anilist_id);
-                let _ = app.emit("library-changed", ());
-            } else if should_save_prog {
-                save_ep_progress(&st.db(), &cur_ep, position, eff_dur);
-            }
-
-            if ended && autoplay {
-                let next = player::next_episode(&st.db(), &cur_ep);
-                if let Some(next_ep) = next {
-                    let _ = start(app.clone(), st.clone(), next_ep);
-                }
-            }
+        BuiltinCommand::Html5Tick { .. } => {
+            // Legacy no-op when running on native libmpv
         }
     }
 

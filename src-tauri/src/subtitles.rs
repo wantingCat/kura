@@ -1339,18 +1339,33 @@ fn span_overlap_score(sp: Span, offset_ms: i64, ref_spans: &[Span]) -> i64 {
 }
 
 /// Align target subtitle spans against reference subtitle spans using:
-/// 1. Pairwise start-time difference histogram to discover candidate offsets (supporting shifts up to ±120s).
-/// 2. Alass-style Dynamic Programming over `(cue_index, candidate_offset)` with split penalty
-///    to handle both constant lead-in offsets AND mid-episode commercial break / eyecatch / OP shifts.
-/// 3. Fine 10ms local refinement per segment.
+/// 1. Coverage validation so partial/sparse torrent files or short sign tracks are rejected.
+/// 2. Pairwise start-time difference histogram within ±30s to discover candidate constant offsets.
+/// 3. Global 10ms refinement with strict confidence validation against `0ms` so clean subtitles are never warped.
 pub fn align_subtitle_spans(target: &[Span], reference: &[Span]) -> Option<AlignmentModel> {
-    if target.is_empty() || reference.is_empty() {
+    if target.len() < 20 || reference.len() < 30 {
+        return None;
+    }
+
+    let target_span_ms = target
+        .last()
+        .map(|s| s.end_ms)
+        .unwrap_or(0)
+        .saturating_sub(target.first().map(|s| s.start_ms).unwrap_or(0));
+    let ref_span_ms = reference
+        .last()
+        .map(|s| s.end_ms)
+        .unwrap_or(0)
+        .saturating_sub(reference.first().map(|s| s.start_ms).unwrap_or(0));
+
+    // Reject incomplete/sparse reference tracks (e.g. in-progress torrent downloads or short sign tracks)
+    if target_span_ms <= 0 || ref_span_ms < (target_span_ms * 60) / 100 {
         return None;
     }
 
     // Step 1: Build a histogram of start-time differences `r.start_ms - t.start_ms` in 50ms buckets
-    // within [-120_000ms, +120_000ms].
-    const MAX_SHIFT_MS: i64 = 120_000;
+    // within [-30_000ms, +30_000ms] (covers distributor intro bumpers, sponsor cards, and prerolls).
+    const MAX_SHIFT_MS: i64 = 30_000;
     const BUCKET_MS: i64 = 50;
     let mut hist: HashMap<i64, i64> = HashMap::new();
 
@@ -1362,9 +1377,8 @@ pub fn align_subtitle_spans(target: &[Span], reference: &[Span]) -> Option<Align
             if r.start_ms > hi {
                 break;
             }
-            // Similar durations are more likely to be the same line of dialogue
             let dur_diff = (t.len() - r.len()).abs();
-            if dur_diff > 3_500 {
+            if dur_diff > 2_500 {
                 continue;
             }
             let diff = r.start_ms - t.start_ms;
@@ -1387,7 +1401,7 @@ pub fn align_subtitle_spans(target: &[Span], reference: &[Span]) -> Option<Align
         return None;
     }
 
-    // Pick top 12 distinct candidate offsets (at least 350ms apart)
+    // Pick top 8 distinct candidate offsets (at least 350ms apart)
     let mut ranked: Vec<(i64, i64)> = hist.into_iter().map(|(b, w)| (b * BUCKET_MS, w)).collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1));
 
@@ -1395,7 +1409,7 @@ pub fn align_subtitle_spans(target: &[Span], reference: &[Span]) -> Option<Align
     for (off, _) in ranked {
         if candidates.iter().all(|&c| (c - off).abs() >= 350) {
             candidates.push(off);
-            if candidates.len() >= 12 {
+            if candidates.len() >= 8 {
                 break;
             }
         }
@@ -1405,6 +1419,8 @@ pub fn align_subtitle_spans(target: &[Span], reference: &[Span]) -> Option<Align
     }
 
     // Refine each candidate offset to 10ms precision globally
+    let mut best_global_off = 0i64;
+    let mut best_global_score = -1i64;
     for cand in &mut candidates {
         let base = *cand;
         let mut best_off = base;
@@ -1421,105 +1437,144 @@ pub fn align_subtitle_spans(target: &[Span], reference: &[Span]) -> Option<Align
             }
         }
         *cand = best_off;
+        if best_score > best_global_score
+            || (best_score == best_global_score && best_off.abs() < best_global_off.abs())
+        {
+            best_global_score = best_score;
+            best_global_off = best_off;
+        }
     }
-    candidates.sort();
-    candidates.dedup_by(|a, b| (*a - *b).abs() < 40);
 
-    // Step 2: Dynamic Programming over `n` target cues and `k` candidate offsets.
-    // Penalty for switching offset mid-episode prevents noisy per-line jumps while allowing real eyecatch/OP cuts.
-    let n = target.len();
-    let k = candidates.len();
-    let total_single_best: i64 = candidates
+    let zero_score: i64 = target
         .iter()
-        .map(|&off| {
-            target
-                .iter()
-                .map(|&sp| span_overlap_score(sp, off, reference))
-                .sum::<i64>()
-        })
-        .max()
-        .unwrap_or(0);
-    let split_penalty = ((total_single_best / 12).max(4_500)).min(18_000);
+        .map(|&sp| span_overlap_score(sp, 0, reference))
+        .sum();
 
-    let mut dp = vec![vec![i64::MIN / 4; k]; n];
-    let mut back = vec![vec![0usize; k]; n];
-
-    for j in 0..k {
-        dp[0][j] = span_overlap_score(target[0], candidates[j], reference);
+    // Require non-zero offset to decisively beat 0ms by at least 18%
+    if best_global_off.abs() >= 250 && best_global_score < (zero_score * 118) / 100 {
+        best_global_off = 0;
     }
 
-    let allow_splits = reference.len() >= 15 && target.len() >= 20;
-    for i in 1..n {
-        // Larger gap between target cues (e.g. >= 5s commercial break / OP) reduces split penalty slightly
-        let gap_ms = (target[i].start_ms - target[i - 1].end_ms).max(0);
-        let penalty = if !allow_splits {
-            i64::MAX / 8
-        } else if gap_ms >= 5_000 {
-            split_penalty * 2 / 3
-        } else {
-            split_penalty
-        };
+    let matched_cues = target
+        .iter()
+        .filter(|&&sp| span_overlap_score(sp, best_global_off, reference) > 250)
+        .count();
 
-        for j in 0..k {
-            let cue_sc = span_overlap_score(target[i], candidates[j], reference);
-            let mut best_prev = dp[i - 1][j];
-            let mut best_idx = j;
-            if allow_splits {
-                for p in 0..k {
-                    if p == j {
-                        continue;
-                    }
-                    let cand_val = dp[i - 1][p] - penalty;
-                    if cand_val > best_prev {
-                        best_prev = cand_val;
-                        best_idx = p;
-                    }
-                }
-            }
-            dp[i][j] = best_prev + cue_sc;
-            back[i][j] = best_idx;
-        }
+    if matched_cues < (target.len() * 30) / 100 {
+        return None;
     }
-
-    // Backtrack (break exact score ties in favor of smaller absolute offset)
-    let mut cur_j = (0..k)
-        .max_by_key(|&j| (dp[n - 1][j], -candidates[j].abs()))
-        .unwrap_or(0);
-    let mut path = vec![0usize; n];
-    path[n - 1] = cur_j;
-    for i in (1..n).rev() {
-        cur_j = back[i][cur_j];
-        path[i - 1] = cur_j;
-    }
-
-    // Build segments and count matched cues
-    let mut segments: Vec<(i64, i64)> = Vec::new();
-    let mut off_counts: HashMap<i64, usize> = HashMap::new();
-    let mut matched_cues = 0usize;
-
-    for (i, &j) in path.iter().enumerate() {
-        let off = candidates[j];
-        *off_counts.entry(off).or_insert(0) += 1;
-        if span_overlap_score(target[i], off, reference) > 150 {
-            matched_cues += 1;
-        }
-        if segments.last().map(|&(_, last_off)| last_off) != Some(off) {
-            let seg_start = if i == 0 { 0 } else { target[i].start_ms };
-            segments.push((seg_start, off));
-        }
-    }
-
-    let primary_offset_ms = off_counts
-        .into_iter()
-        .max_by_key(|&(off, count)| (count, -off.abs()))
-        .map(|(off, _)| off)
-        .unwrap_or(0);
 
     Some(AlignmentModel {
-        segments,
-        primary_offset_ms,
+        segments: vec![(0, best_global_off)],
+        primary_offset_ms: best_global_off,
         matched_cues,
     })
+}
+
+/// Non-destructively estimate a constant subtitle offset (in seconds) between external `target_cues`
+/// and the embedded subtitle cues present in `video_path` (works even on partially-downloaded streaming MKVs).
+pub fn compute_live_mkv_cue_offset_sec(target_cues: &[SubtitleCue], video_path: &Path) -> Option<f64> {
+    if target_cues.len() < 15 || !video_path.is_file() {
+        return None;
+    }
+    let Ok((ref_spans, _)) = extract_mkv_subtitle_spans(video_path) else {
+        return None;
+    };
+    if ref_spans.len() < 12 {
+        return None;
+    }
+    let max_ref_ms = ref_spans.last().map(|s| s.end_ms).unwrap_or(0);
+    if max_ref_ms < 45_000 {
+        return None;
+    }
+
+    let window_target: Vec<Span> = target_cues
+        .iter()
+        .filter(|c| c.start_ms <= max_ref_ms + 25_000 && c.end_ms > c.start_ms)
+        .map(|c| Span {
+            start_ms: c.start_ms,
+            end_ms: c.end_ms,
+        })
+        .collect();
+    if window_target.len() < 12 {
+        return None;
+    }
+
+    const MAX_SHIFT_MS: i64 = 25_000;
+    const BUCKET_MS: i64 = 50;
+    let mut hist: HashMap<i64, i64> = HashMap::new();
+
+    for t in &window_target {
+        let lo = t.start_ms - MAX_SHIFT_MS;
+        let hi = t.start_ms + MAX_SHIFT_MS;
+        let start_idx = ref_spans.partition_point(|r| r.start_ms < lo);
+        for r in &ref_spans[start_idx..] {
+            if r.start_ms > hi {
+                break;
+            }
+            let dur_diff = (t.len() - r.len()).abs();
+            if dur_diff > 2_200 {
+                continue;
+            }
+            let diff = r.start_ms - t.start_ms;
+            let b = (diff
+                + if diff >= 0 {
+                    BUCKET_MS / 2
+                } else {
+                    -BUCKET_MS / 2
+                })
+                / BUCKET_MS;
+            let weight = (1_500 - dur_diff / 2).max(200);
+            for neighbor in [b - 1, b, b + 1] {
+                let factor = if neighbor == b { 2 } else { 1 };
+                *hist.entry(neighbor).or_insert(0) += weight * factor;
+            }
+        }
+    }
+
+    let mut ranked: Vec<(i64, i64)> = hist.into_iter().map(|(b, w)| (b * BUCKET_MS, w)).collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let mut candidates: Vec<i64> = ranked.into_iter().take(6).map(|(off, _)| off).collect();
+    candidates.push(0);
+
+    let mut best_off = 0i64;
+    let mut best_score = -1i64;
+    for base in candidates {
+        for delta in (-150..=150).step_by(10) {
+            let off = base + delta;
+            let sc: i64 = window_target
+                .iter()
+                .map(|&sp| span_overlap_score(sp, off, &ref_spans))
+                .sum();
+            if sc > best_score || (sc == best_score && off.abs() < best_off.abs()) {
+                best_score = sc;
+                best_off = off;
+            }
+        }
+    }
+
+    if best_off.abs() < 300 {
+        return Some(0.0);
+    }
+
+    let zero_score: i64 = window_target
+        .iter()
+        .map(|&sp| span_overlap_score(sp, 0, &ref_spans))
+        .sum();
+    if best_score < (zero_score * 125) / 100 {
+        return None;
+    }
+
+    let matched = window_target
+        .iter()
+        .filter(|&&sp| span_overlap_score(sp, best_off, &ref_spans) > 300)
+        .count();
+    if matched < 8 || matched < (window_target.len() * 35) / 100 {
+        return None;
+    }
+
+    Some(((best_off as f64 / 1000.0) * 10.0).round() / 10.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1656,7 +1711,9 @@ pub fn extract_mkv_subtitle_spans(mkv_path: &Path) -> Result<(Vec<Span>, String)
                         // TrackEntry
                         let mut track_num = 0u64;
                         let mut track_type = 0u64;
+                        let mut flag_forced = 0u64;
                         let mut lang = String::from("und");
+                        let mut track_name: Option<String> = None;
                         while file.stream_position()? < entry_end {
                             let Ok((tid, _)) = read_ebml_vint(&mut file, true) else {
                                 break;
@@ -1672,6 +1729,22 @@ pub fn extract_mkv_subtitle_spans(mkv_path: &Path) -> Result<(Vec<Span>, String)
                                 0x83 if tsz <= 8 => {
                                     track_type =
                                         read_ebml_uint(&mut file, tsz as usize).unwrap_or(0)
+                                }
+                                0x55AA if tsz <= 8 => {
+                                    flag_forced =
+                                        read_ebml_uint(&mut file, tsz as usize).unwrap_or(0)
+                                }
+                                0x536E if tsz <= 256 => {
+                                    let mut b = vec![0u8; tsz as usize];
+                                    if file.read_exact(&mut b).is_ok() {
+                                        let s = String::from_utf8_lossy(&b)
+                                            .trim_matches('\0')
+                                            .trim()
+                                            .to_string();
+                                        if !s.is_empty() {
+                                            track_name = Some(s);
+                                        }
+                                    }
                                 }
                                 0x22B59C | 0x22B59D if tsz <= 32 => {
                                     let mut b = vec![0u8; tsz as usize];
@@ -1689,8 +1762,9 @@ pub fn extract_mkv_subtitle_spans(mkv_path: &Path) -> Result<(Vec<Span>, String)
                             }
                             let _ = file.seek(SeekFrom::Start(tstart + tsz));
                         }
-                        // 0x11 == Subtitle track in Matroska spec
-                        if track_type == 0x11 && track_num > 0 {
+                        // 0x11 == Subtitle track in Matroska spec (skip forced / signs & songs tracks)
+                        let is_signs = crate::player::is_signs_or_songs_title(track_name.as_deref());
+                        if track_type == 0x11 && track_num > 0 && flag_forced == 0 && !is_signs {
                             sub_tracks.push((track_num, lang));
                         }
                     }
@@ -1813,7 +1887,7 @@ pub fn extract_mkv_subtitle_spans(mkv_path: &Path) -> Result<(Vec<Span>, String)
         if let Some(mut sp) = spans_by_track.remove(&tnum) {
             sp.sort_by_key(|s| s.start_ms);
             sp.dedup_by(|a, b| (a.start_ms - b.start_ms).abs() < 40);
-            if sp.len() >= 4 {
+            if sp.len() >= 12 {
                 let is_better = match &best_track {
                     None => true,
                     Some((_, _, prev)) => sp.len() > prev.len(),
@@ -2328,9 +2402,8 @@ pub async fn jimaku_download_and_process(
         .map(PathBuf::from)
         .filter(|p| p.is_file())
     };
-    let video_path: Option<PathBuf> = local_video_path
-        .clone()
-        .or_else(|| crate::torrent::active_save_path_for_episode(anilist_id, ep_key));
+    // Only use a completed local video file for destructive full-file retiming (never an in-progress torrent file!)
+    let video_path: Option<PathBuf> = local_video_path.clone();
 
     let cache_dir = st.data_dir.join("subtitles").join(anilist_id.to_string());
     std::fs::create_dir_all(&cache_dir)?;
@@ -2437,22 +2510,29 @@ pub async fn jimaku_download_and_process(
                     linked_count += 1;
                 }
             }
-            if !matched_current {
+            if !matched_current && extracted.len() == 1 {
                 let first = &extracted[0];
-                let p_str = first.to_string_lossy().to_string();
-                let _ = upsert_linked_subtitle(
-                    &st.db(),
-                    anilist_id,
-                    ep_key,
-                    &p_str,
-                    "ja",
-                    false,
-                    "jimaku",
-                    false,
-                    None,
-                );
-                saved_paths.push(p_str);
-                linked_count += 1;
+                let fname = first
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let detected_ep = parse_subtitle_filename(&fname).and_then(|p| p.episode);
+                if detected_ep.is_none() || detected_ep.map(|e| e.to_string()).as_deref() == Some(ep_key) {
+                    let p_str = first.to_string_lossy().to_string();
+                    let _ = upsert_linked_subtitle(
+                        &st.db(),
+                        anilist_id,
+                        ep_key,
+                        &p_str,
+                        "ja",
+                        false,
+                        "jimaku",
+                        false,
+                        None,
+                    );
+                    saved_paths.push(p_str);
+                    linked_count += 1;
+                }
             }
         }
     } else {
@@ -2696,6 +2776,72 @@ pub fn parse_subtitle_file_cues(path: &Path) -> Vec<SubtitleCue> {
     parse_subtitle_cues(content, &ext)
 }
 
+/// Heal any subtitle in `linked_subtitles` that was previously warped by partial-MKV retiming
+/// or wrongly linked from a multi-episode `.zip` pack fallback.
+fn heal_linked_subtitles_for_episode(conn: &Connection, anilist_id: i64, ep_key: &str) {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, path, retimed FROM linked_subtitles WHERE anilist_id = ?1 AND ep_key = ?2",
+    ) else {
+        return;
+    };
+    let rows: Vec<(i64, String, i64)> = stmt
+        .query_map(params![anilist_id, ep_key], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .ok()
+        .map(|it| it.flatten().collect())
+        .unwrap_or_default();
+
+    for (row_id, path_str, retimed) in rows {
+        let p = Path::new(&path_str);
+        let Some(parent) = p.parent() else { continue };
+        let fname = p
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+
+        // 1. If this is an `ep{ep_key}_retimed_{orig_fname}` file and `pack/{orig_fname}` exists, restore clean pack file
+        let retimed_prefix = format!("ep{ep_key}_retimed_");
+        if let Some(orig_fname) = fname.strip_prefix(&retimed_prefix) {
+            let pack_cand = parent.join("pack").join(orig_fname);
+            if pack_cand.is_file() {
+                let clean_str = pack_cand.to_string_lossy().to_string();
+                let _ = conn.execute(
+                    "UPDATE linked_subtitles SET path = ?1, retimed = 0, offset_ms = NULL WHERE id = ?2",
+                    params![clean_str, row_id],
+                );
+                let _ = std::fs::remove_file(p);
+                continue;
+            }
+        }
+
+        // 2. If `ep{ep_key}.orig.{ext}` backup exists in `parent`, restore clean original over `p`
+        if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+            let orig_backup = parent.join(format!("ep{ep_key}.orig.{}", ext.to_ascii_lowercase()));
+            if orig_backup.is_file() && retimed != 0 {
+                if std::fs::copy(&orig_backup, p).is_ok() {
+                    let _ = std::fs::remove_file(&orig_backup);
+                    let _ = conn.execute(
+                        "UPDATE linked_subtitles SET retimed = 0, offset_ms = NULL WHERE id = ?1",
+                        params![row_id],
+                    );
+                }
+            }
+        }
+
+        // 3. If this file came from `.../pack/{fname}`, verify its detected episode isn't a different episode
+        if parent.file_name().and_then(|n| n.to_str()) == Some("pack") {
+            if let Some(parsed) = parse_subtitle_filename(fname) {
+                if let Some(det_ep) = parsed.episode {
+                    if det_ep.to_string() != ep_key {
+                        let _ = conn.execute("DELETE FROM linked_subtitles WHERE id = ?1", [row_id]);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Load external subtitle cues for an episode (either from linked subtitles in DB or sibling `.srt`/`.ass` files).
 pub fn load_cues_for_episode(
     conn: &Connection,
@@ -2703,6 +2849,7 @@ pub fn load_cues_for_episode(
     ep_key: &str,
     video_path: &str,
 ) -> (Option<String>, Vec<SubtitleCue>) {
+    heal_linked_subtitles_for_episode(conn, anilist_id, ep_key);
     let mut candidate_paths = episode_subtitle_paths(conn, anilist_id, ep_key);
     let vpath = Path::new(video_path);
     if let (Some(parent), Some(stem)) = (vpath.parent(), vpath.file_stem().and_then(|s| s.to_str()))

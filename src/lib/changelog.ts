@@ -16,10 +16,35 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.8.1",
+    title: "Native libmpv Built-In Player Engine, Instant Zero-Transcode Playback & Non-Destructive Subtitle Sync",
+    date: "November 2026",
+    badge: "Latest",
+    summary:
+      "Kura 0.8.1 replaces the HTML5 <video> + live transcode pipeline in the Built-In Player with native libmpv (libmpv-2.dll) rendering directly onto a hardware-accelerated D3D11 surface behind Kura's transparent HUD, eliminating audio/codec incompatibilities, dual-audio switching stalls, and partial-torrent subtitle retiming corruption.",
+    items: [
+      {
+        type: "new",
+        text: "Native libmpv Built-In Player Engine: plays MKV, HEVC 10-bit, AV1, FLAC, Opus, EAC3, TrueHD, and DTS natively with D3D11 hardware decoding and zero live transcoding.",
+      },
+      {
+        type: "improvement",
+        text: "Instant audio & subtitle track switching: switch between Japanese/English audio tracks and embedded or external subtitle tracks at the current timestamp without re-buffering or restarting streams.",
+      },
+      {
+        type: "fix",
+        text: "Non-destructive subtitle timing & auto-healing: prevents partial torrent streams from warping downloaded Jimaku subtitle files, automatically heals previously corrupted retimed subtitles, and adds 1-click offset reset plus Z / X timing hotkeys.",
+      },
+      {
+        type: "fix",
+        text: "Player HUD auto-hide: fixed high-frequency playback state ticks and synthetic Chromium mousemove events preventing the player controls from fading out during playback.",
+      },
+    ],
+  },
+  {
     version: "0.8.0",
     title: "Japanese Immersion Hub, Looked-Up Words Leaderboard, Migaku-Style Word Tracking & Immersion Time Analytics",
     date: "November 2026",
-    badge: "Latest",
     summary:
       "Kura 0.8.0 introduces a dedicated Japanese Immersion Suite: automatic unpaused immersion time tracking, a Looked-Up Words Leaderboard & Revision Bank ranked by lookup frequency (20× → 1×) with full Yomitan definitions and anime context sentences, Migaku-style word status controls (Track, Known, Ignore) inside the Yomitan popup, live subtitle underlining, and selective AniList custom/private immersion list syncing.",
     items: [

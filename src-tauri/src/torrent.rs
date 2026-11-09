@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -4207,10 +4207,10 @@ async fn run_swarm_orchestrator(
                 if let Some(best) = res
                     .files
                     .into_iter()
-                    .find(|f| !f.is_rar && f.match_score >= 50)
+                    .find(|f| !f.is_rar && (f.detected_episode == episode_num || f.is_archive) && f.match_score >= 45)
                 {
                     let _ = crate::subtitles::jimaku_download_and_process(
-                        &st_sub, anilist_id, &ep_key, &best.name, &best.url, true,
+                        &st_sub, anilist_id, &ep_key, &best.name, &best.url, false,
                     )
                     .await;
                 }
@@ -4363,19 +4363,6 @@ async fn run_swarm_orchestrator(
 
             // If mode is "hybrid" or "download", trigger a rescan so the downloaded file is linked in library
             if session.mode == "hybrid" || session.mode == "download" {
-                // Attempt auto-retime on any linked Japanese subtitles now that the full .mkv is on disk
-                if let Ok(subs) =
-                    crate::subtitles::list_linked_subtitles(&st.db(), session.anilist_id)
-                {
-                    for sub in subs.into_iter().filter(|s| s.ep_key == session.ep_key) {
-                        let sub_path = Path::new(&sub.path);
-                        let _ = crate::subtitles::retime_subtitle_file(
-                            sub_path,
-                            &session.save_path,
-                            sub_path,
-                        );
-                    }
-                }
                 crate::scan::spawn_scan(app.clone(), st.clone(), None);
             }
             break;

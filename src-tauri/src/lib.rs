@@ -7,6 +7,7 @@ pub mod dictionary;
 pub mod discord;
 pub mod embedded_player;
 pub mod franchise;
+pub mod libmpv;
 pub mod logging;
 pub mod matcher;
 pub mod parser;
@@ -348,6 +349,13 @@ pub fn run() {
                 if minimize_to_tray && window.label() == "main" {
                     api.prevent_close();
                     let _ = window.hide();
+                }
+            }
+            tauri::WindowEvent::Moved(_)
+            | tauri::WindowEvent::Resized(_)
+            | tauri::WindowEvent::Focused(_) => {
+                if window.label() == "main" {
+                    embedded_player::sync_bounds(window.app_handle());
                 }
             }
             tauri::WindowEvent::Destroyed => {

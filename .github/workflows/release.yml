@@ -55,12 +55,12 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libxdo-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libxdo-dev libmpv-dev mpv
 
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Bundle portable mpv (Windows)
+      - name: Bundle libmpv-2.dll and portable mpv (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         env:
@@ -70,11 +70,12 @@ jobs:
           $dest = "src-tauri/resources/mpv"
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
-          $downloaded = $false
+          $downloadedExe = $false
+          $downloadedDll = $false
           $repos = @("zhongfly/mpv-winbuild", "shinchiro/mpv-winbuild-cmake")
           foreach ($repo in $repos) {
             try {
-              Write-Host "Checking recent portable mpv releases from $repo..."
+              Write-Host "Checking recent libmpv and portable mpv releases from $repo..."
               $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=5" -Headers @{
                 Authorization = "Bearer $env:GH_TOKEN"
                 "User-Agent"  = "Kura-Release-Builder"
@@ -83,39 +84,79 @@ jobs:
               foreach ($r in $releases) {
                 if ($r.assets) { $allAssets += $r.assets }
               }
-              $asset = $allAssets | Where-Object {
-                $_.name -match "^mpv-x86_64-20.*\.7z$" -and $_.name -notmatch "v3" -and $_.name -notmatch "dev"
-              } | Select-Object -First 1
-              if (-not $asset) {
-                $asset = $allAssets | Where-Object {
-                  $_.name -match "^mpv-x86_64.*\.7z$" -and $_.name -notmatch "dev"
+
+              # 1. Download mpv-dev-x86_64 (contains libmpv-2.dll)
+              if (-not $downloadedDll) {
+                $devAsset = $allAssets | Where-Object {
+                  $_.name -match "^mpv-dev-x86_64-20.*\.7z$" -and $_.name -notmatch "v3"
                 } | Select-Object -First 1
-              }
-              if ($asset) {
-                $archive = Join-Path $env:RUNNER_TEMP $asset.name
-                Write-Host "Downloading $($asset.name) ($([math]::Round($asset.size / 1MB, 1)) MB)..."
-                Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive
-                $extractDir = Join-Path $env:RUNNER_TEMP "mpv-extract"
-                if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
-                7z x $archive "-o$extractDir" -y | Out-Null
-                $mpvExe = Get-ChildItem -Path $extractDir -Filter "mpv.exe" -Recurse | Select-Object -First 1
-                if ($mpvExe) {
-                  $srcFolder = $mpvExe.Directory.FullName
-                  Copy-Item -Path (Join-Path $srcFolder "mpv.exe") -Destination $dest -Force
-                  Get-ChildItem -Path $srcFolder -Filter "*.dll" -File | ForEach-Object {
-                    Copy-Item -Path $_.FullName -Destination $dest -Force
-                  }
-                  $bundledSize = [math]::Round((Get-Item (Join-Path $dest "mpv.exe")).Length / 1MB, 1)
-                  Write-Host "Bundled mpv.exe ($bundledSize MB) from $($asset.name) into $dest"
-                  $downloaded = $true
-                  break
+                if (-not $devAsset) {
+                  $devAsset = $allAssets | Where-Object {
+                    $_.name -match "^mpv-dev-x86_64.*\.7z$"
+                  } | Select-Object -First 1
                 }
+                if ($devAsset) {
+                  $devArchive = Join-Path $env:RUNNER_TEMP $devAsset.name
+                  Write-Host "Downloading $($devAsset.name) ($([math]::Round($devAsset.size / 1MB, 1)) MB)..."
+                  Invoke-WebRequest -Uri $devAsset.browser_download_url -OutFile $devArchive
+                  $devExtractDir = Join-Path $env:RUNNER_TEMP "mpv-dev-extract"
+                  if (Test-Path $devExtractDir) { Remove-Item -Recurse -Force $devExtractDir }
+                  7z x $devArchive "-o$devExtractDir" -y | Out-Null
+                  $libmpvDll = Get-ChildItem -Path $devExtractDir -Filter "libmpv-2.dll" -Recurse | Select-Object -First 1
+                  if ($libmpvDll) {
+                    $dllFolder = $libmpvDll.Directory.FullName
+                    Get-ChildItem -Path $dllFolder -Filter "*.dll" -File | ForEach-Object {
+                      Copy-Item -Path $_.FullName -Destination $dest -Force
+                    }
+                    $dllSize = [math]::Round((Get-Item (Join-Path $dest "libmpv-2.dll")).Length / 1MB, 1)
+                    Write-Host "Bundled libmpv-2.dll ($dllSize MB) from $($devAsset.name) into $dest"
+                    $downloadedDll = $true
+                  }
+                }
+              }
+
+              # 2. Download mpv-x86_64 (contains mpv.exe and d3dcompiler)
+              if (-not $downloadedExe) {
+                $asset = $allAssets | Where-Object {
+                  $_.name -match "^mpv-x86_64-20.*\.7z$" -and $_.name -notmatch "v3" -and $_.name -notmatch "dev"
+                } | Select-Object -First 1
+                if (-not $asset) {
+                  $asset = $allAssets | Where-Object {
+                    $_.name -match "^mpv-x86_64.*\.7z$" -and $_.name -notmatch "dev"
+                  } | Select-Object -First 1
+                }
+                if ($asset) {
+                  $archive = Join-Path $env:RUNNER_TEMP $asset.name
+                  Write-Host "Downloading $($asset.name) ($([math]::Round($asset.size / 1MB, 1)) MB)..."
+                  Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive
+                  $extractDir = Join-Path $env:RUNNER_TEMP "mpv-extract"
+                  if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
+                  7z x $archive "-o$extractDir" -y | Out-Null
+                  $mpvExe = Get-ChildItem -Path $extractDir -Filter "mpv.exe" -Recurse | Select-Object -First 1
+                  if ($mpvExe) {
+                    $srcFolder = $mpvExe.Directory.FullName
+                    Copy-Item -Path (Join-Path $srcFolder "mpv.exe") -Destination $dest -Force
+                    Get-ChildItem -Path $srcFolder -Filter "*.dll" -File | ForEach-Object {
+                      Copy-Item -Path $_.FullName -Destination $dest -Force
+                    }
+                    $bundledSize = [math]::Round((Get-Item (Join-Path $dest "mpv.exe")).Length / 1MB, 1)
+                    Write-Host "Bundled mpv.exe ($bundledSize MB) from $($asset.name) into $dest"
+                    $downloadedExe = $true
+                  }
+                }
+              }
+
+              if ($downloadedDll -and $downloadedExe) {
+                break
               }
             } catch {
               Write-Warning "Failed to fetch mpv from ${repo}: $_"
             }
           }
-          if (-not $downloaded -or -not (Test-Path (Join-Path $dest "mpv.exe"))) {
+          if (-not $downloadedDll -or -not (Test-Path (Join-Path $dest "libmpv-2.dll"))) {
+            throw "Could not download libmpv-2.dll from any release mirror"
+          }
+          if (-not $downloadedExe -or -not (Test-Path (Join-Path $dest "mpv.exe"))) {
             throw "Could not download portable mpv.exe from any release mirror"
           }
 

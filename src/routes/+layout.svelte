@@ -28,9 +28,19 @@
   afterNavigate(({ type }) => {
     if (type !== "popstate") main?.scrollTo({ top: 0 });
   });
+
+  $effect(() => {
+    const activeLibmpv = Boolean(
+      app.builtinPlayer?.active && app.builtinPlayer.backend === "libmpv"
+    );
+    document.documentElement.classList.toggle("libmpv-active", activeLibmpv);
+    return () => {
+      document.documentElement.classList.remove("libmpv-active");
+    };
+  });
 </script>
 
-<div class="shell">
+<div class="shell" class:player-hidden={app.builtinPlayer?.active && app.builtinPlayer.backend === "libmpv"}>
   {#if app.loaded && (app.libraries.length > 0 || app.appMode === "streaming")}
     <TopBar />
   {/if}
@@ -56,6 +66,12 @@
     width: 100vw;
     overflow: hidden;
     background: var(--bg);
+  }
+
+  .shell.player-hidden {
+    visibility: hidden;
+    pointer-events: none;
+    background: transparent;
   }
 
   main {
