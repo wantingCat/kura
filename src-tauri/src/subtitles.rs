@@ -1343,7 +1343,7 @@ fn span_overlap_score(sp: Span, offset_ms: i64, ref_spans: &[Span]) -> i64 {
 /// 2. Pairwise start-time difference histogram within ±30s to discover candidate constant offsets.
 /// 3. Global 10ms refinement with strict confidence validation against `0ms` so clean subtitles are never warped.
 pub fn align_subtitle_spans(target: &[Span], reference: &[Span]) -> Option<AlignmentModel> {
-    if target.len() < 20 || reference.len() < 30 {
+    if target.len() < 2 || reference.len() < 2 {
         return None;
     }
 
@@ -1358,8 +1358,8 @@ pub fn align_subtitle_spans(target: &[Span], reference: &[Span]) -> Option<Align
         .unwrap_or(0)
         .saturating_sub(reference.first().map(|s| s.start_ms).unwrap_or(0));
 
-    // Reject incomplete/sparse reference tracks (e.g. in-progress torrent downloads or short sign tracks)
-    if target_span_ms <= 0 || ref_span_ms < (target_span_ms * 60) / 100 {
+    // Reject incomplete/sparse reference tracks when aligning a full-episode target (25+ lines)
+    if target.len() >= 25 && (target_span_ms <= 0 || ref_span_ms < (target_span_ms * 55) / 100) {
         return None;
     }
 
@@ -1450,24 +1450,98 @@ pub fn align_subtitle_spans(target: &[Span], reference: &[Span]) -> Option<Align
         .map(|&sp| span_overlap_score(sp, 0, reference))
         .sum();
 
-    // Require non-zero offset to decisively beat 0ms by at least 18%
-    if best_global_off.abs() >= 250 && best_global_score < (zero_score * 118) / 100 {
+    // Require non-zero offset to decisively beat 0ms by at least 18% (on full-length tracks)
+    if target.len() >= 20
+        && best_global_off.abs() >= 250
+        && zero_score > 0
+        && best_global_score < (zero_score * 118) / 100
+    {
         best_global_off = 0;
     }
 
+    // Step 2: Alass-style Viterbi / dynamic programming piecewise commercial-break segmentation
+    // across the refined candidate offsets (`SPLIT_PENALTY` prevents false splits on jitter while
+    // cleanly splitting at mid-episode sponsor / eyecatch breaks!).
+    let segments: Vec<(i64, i64)> = if target.len() >= 20 && candidates.len() >= 2 {
+        const SPLIT_PENALTY: i64 = 8_500;
+        let n = target.len();
+        let k_len = candidates.len();
+        let mut dp = vec![i64::MIN / 4; k_len];
+        let mut back = vec![vec![0usize; k_len]; n];
+
+        for (k, &off) in candidates.iter().enumerate() {
+            let prior = if off == best_global_off { 0 } else { -200 };
+            dp[k] = span_overlap_score(target[0], off, reference) + prior;
+        }
+
+        for i in 1..n {
+            let mut next_dp = vec![i64::MIN / 4; k_len];
+            for (k, &off) in candidates.iter().enumerate() {
+                let mut best_prev = k;
+                let mut best_val = dp[k];
+                for prev_k in 0..k_len {
+                    if prev_k == k {
+                        continue;
+                    }
+                    let switched = dp[prev_k] - SPLIT_PENALTY;
+                    if switched > best_val {
+                        best_val = switched;
+                        best_prev = prev_k;
+                    }
+                }
+                back[i][k] = best_prev;
+                next_dp[k] = best_val + span_overlap_score(target[i], off, reference);
+            }
+            dp = next_dp;
+        }
+
+        let mut cur_k = (0..k_len).max_by_key(|&k| dp[k]).unwrap_or(0);
+        let mut chosen_k = vec![0usize; n];
+        for i in (0..n).rev() {
+            chosen_k[i] = cur_k;
+            if i > 0 {
+                cur_k = back[i][cur_k];
+            }
+        }
+
+        let mut segs: Vec<(i64, i64)> = Vec::new();
+        for (i, &k) in chosen_k.iter().enumerate() {
+            let off = candidates[k];
+            if segs.last().map(|&(_, prev_off)| prev_off != off).unwrap_or(true) {
+                let seg_start = if i == 0 { 0 } else { target[i].start_ms };
+                segs.push((seg_start, off));
+            }
+        }
+        segs
+    } else {
+        vec![(0, best_global_off)]
+    };
+
+    let primary_offset_ms = segments
+        .first()
+        .map(|&(_, off)| off)
+        .unwrap_or(best_global_off);
+    let model = AlignmentModel {
+        segments,
+        primary_offset_ms,
+        matched_cues: 0,
+    };
+
     let matched_cues = target
         .iter()
-        .filter(|&&sp| span_overlap_score(sp, best_global_off, reference) > 250)
+        .filter(|&&sp| {
+            let applied_off = model.apply(sp.start_ms) - sp.start_ms;
+            span_overlap_score(sp, applied_off, reference) > 250
+        })
         .count();
 
-    if matched_cues < (target.len() * 30) / 100 {
+    if matched_cues < ((target.len() * 30) / 100).max(2) {
         return None;
     }
 
     Some(AlignmentModel {
-        segments: vec![(0, best_global_off)],
-        primary_offset_ms: best_global_off,
         matched_cues,
+        ..model
     })
 }
 
@@ -2637,6 +2711,11 @@ pub async fn check_and_prefetch_jimaku_episode(
         .files
         .iter()
         .find(|f| !f.is_rar && f.detected_episode == Some(episode) && f.match_score >= 100)
+        .or_else(|| {
+            resp.files
+                .iter()
+                .find(|f| !f.is_rar && f.is_archive && f.detected_episode.is_none() && f.match_score >= 40)
+        })
     else {
         return false;
     };
@@ -2645,6 +2724,258 @@ pub async fn check_and_prefetch_jimaku_episode(
         .await
         .map(|r| r.linked_count > 0 || !r.saved_paths.is_empty())
         .unwrap_or(false)
+}
+
+/// Compute the primary time offset (in seconds) between Japanese subtitle cues and reference `.vtt`/`.ass` cues.
+pub fn compute_reference_cues_offset_sec(
+    jp_cues: &[SubtitleCue],
+    ref_cues: &[SubtitleCue],
+) -> Option<f64> {
+    let to_spans = |cues: &[SubtitleCue]| -> Vec<Span> {
+        let mut sp: Vec<Span> = cues
+            .iter()
+            .filter(|c| c.end_ms > c.start_ms && (c.end_ms - c.start_ms) <= 15_000)
+            .map(|c| Span {
+                start_ms: c.start_ms,
+                end_ms: c.end_ms,
+            })
+            .collect();
+        sp.sort_by_key(|s| s.start_ms);
+        sp.dedup_by(|a, b| (a.start_ms - b.start_ms).abs() < 40);
+        sp
+    };
+
+    let target_spans = to_spans(jp_cues);
+    let ref_spans = to_spans(ref_cues);
+    if target_spans.len() < 5 || ref_spans.len() < 5 {
+        return None;
+    }
+    let model = align_subtitle_spans(&target_spans, &ref_spans)?;
+    Some((model.primary_offset_ms as f64) / 1000.0)
+}
+
+/// Retime `sub_path` (e.g. Jimaku Japanese `.ass`/`.srt`) against already-parsed reference cues
+/// (such as a clean soft-sub `.vtt` stream track or AnimeTosho pre-extracted subtitle) using
+/// piecewise commercial-break-aware alignment, writing the synchronized subtitle to `out_path`.
+pub fn retime_subtitle_against_reference_cues(
+    sub_path: &Path,
+    ref_cues: &[SubtitleCue],
+    out_path: &Path,
+    reference_label: &str,
+) -> Result<RetimeReport> {
+    let raw_bytes =
+        std::fs::read(sub_path).with_context(|| format!("Reading {}", sub_path.display()))?;
+    let content = String::from_utf8_lossy(&raw_bytes);
+    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
+    let ext = sub_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("srt")
+        .to_ascii_lowercase();
+
+    let target_spans = parse_subtitle_spans(content, &ext);
+    if target_spans.len() < 5 {
+        bail!(
+            "Subtitle file has too few dialogue lines ({}) to auto-retime.",
+            target_spans.len()
+        );
+    }
+
+    let mut ref_spans: Vec<Span> = ref_cues
+        .iter()
+        .filter(|c| c.end_ms > c.start_ms && (c.end_ms - c.start_ms) <= 15_000)
+        .map(|c| Span {
+            start_ms: c.start_ms,
+            end_ms: c.end_ms,
+        })
+        .collect();
+    ref_spans.sort_by_key(|s| s.start_ms);
+    ref_spans.dedup_by(|a, b| (a.start_ms - b.start_ms).abs() < 40);
+    if ref_spans.len() < 8 {
+        bail!(
+            "Reference subtitle track has too few dialogue cues ({}) to align against.",
+            ref_spans.len()
+        );
+    }
+
+    let model = align_subtitle_spans(&target_spans, &ref_spans).ok_or_else(|| {
+        anyhow!("Could not compute a reliable alignment between Jimaku and stream subtitles.")
+    })?;
+
+    let retimed_text = rewrite_subtitle_timestamps(content, &ext, |ms| model.apply(ms));
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(out_path, retimed_text.as_bytes())
+        .with_context(|| format!("Writing retimed subtitle to {}", out_path.display()))?;
+
+    Ok(RetimeReport {
+        subtitle_path: sub_path.to_string_lossy().to_string(),
+        output_path: out_path.to_string_lossy().to_string(),
+        offset_ms: model.primary_offset_ms,
+        segments: model.segments.len(),
+        matched_cues: model.matched_cues,
+        total_cues: target_spans.len(),
+        reference_source: reference_label.to_string(),
+        loaded_into_mpv: false,
+    })
+}
+
+/// Download a remote `.vtt` / `.srt` / `.ass` subtitle URL (supporting optional `.gz` compression
+/// and custom stream headers) and parse its cues.
+pub async fn fetch_remote_subtitle_cues(
+    http: &reqwest::Client,
+    url: &str,
+    headers: &HashMap<String, String>,
+) -> Result<Vec<SubtitleCue>> {
+    let mut req = http.get(url).timeout(Duration::from_secs(15));
+    let mut has_ua = false;
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("user-agent") {
+            has_ua = true;
+        }
+        req = req.header(k.as_str(), v.as_str());
+    }
+    if !has_ua {
+        req = req.header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+        );
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        bail!("Remote subtitle returned HTTP {}", resp.status());
+    }
+    let raw_bytes = resp.bytes().await?;
+    let decoded_bytes = if raw_bytes.starts_with(&[0x1F, 0x8B]) {
+        let mut gz = flate2::read::GzDecoder::new(&raw_bytes[..]);
+        let mut out = Vec::new();
+        gz.read_to_end(&mut out)?;
+        out
+    } else {
+        raw_bytes.to_vec()
+    };
+
+    let content = String::from_utf8_lossy(&decoded_bytes);
+    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
+
+    let clean_path = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
+    let clean_path = clean_path.strip_suffix(".gz").unwrap_or(&clean_path);
+    let ext = if clean_path.ends_with(".ass") || clean_path.ends_with(".ssa")
+        || content.contains("[Script Info]")
+        || content.contains("Dialogue:")
+    {
+        "ass"
+    } else if clean_path.ends_with(".vtt") || content.trim_start().starts_with("WEBVTT") {
+        "vtt"
+    } else {
+        "srt"
+    };
+
+    Ok(parse_subtitle_cues(content, ext))
+}
+
+/// Automatically fetch Jimaku Japanese subtitles for a web stream or torrent stream episode,
+/// align them piecewise against reference `.vtt`/AnimeTosho cues when available, persist in
+/// `linked_subtitles`, and hot-load into the active `embedded_player` session.
+pub async fn auto_prepare_stream_subtitles(
+    app: &tauri::AppHandle,
+    st: &AppState,
+    anilist_id: i64,
+    ep_key: &str,
+    episode_num: i64,
+    ref_cues: &[SubtitleCue],
+    reference_label: &str,
+) -> Option<String> {
+    let (auto_subs_enabled, auto_retime_enabled) = {
+        let conn = st.db();
+        let auto_subs = db::get_setting(&conn, "pref.torrent_auto_subs")
+            .ok()
+            .flatten()
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+        let auto_retime = db::get_setting(&conn, "pref.jimaku_auto_retime")
+            .ok()
+            .flatten()
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+        (auto_subs, auto_retime)
+    };
+
+    // 1. Ensure Japanese subtitle exists in `linked_subtitles` (or auto-download from Jimaku)
+    let mut sub_path_opt = candidate_subtitle_paths_for_episode(&st.db(), anilist_id, ep_key)
+        .into_iter()
+        .find(|p| Path::new(p).is_file());
+
+    if sub_path_opt.is_none() && auto_subs_enabled && episode_num > 0 {
+        if check_and_prefetch_jimaku_episode(st, anilist_id, episode_num).await {
+            sub_path_opt = candidate_subtitle_paths_for_episode(&st.db(), anilist_id, ep_key)
+                .into_iter()
+                .find(|p| Path::new(p).is_file());
+        }
+    }
+
+    let sub_path_str = sub_path_opt?;
+    let sub_path = PathBuf::from(&sub_path_str);
+
+    // 2. If we have reference cues (e.g. clean soft-sub `.vtt` or AnimeTosho subtitle) and auto-retime is on,
+    //    write a piecewise-synchronized copy (`ep{ep_key}_streamsync_{fname}`) and link it!
+    let mut final_path_str = sub_path_str.clone();
+    if auto_retime_enabled && ref_cues.len() >= 8 {
+        let fname = sub_path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "ja.srt".to_string());
+        let clean_fname = fname
+            .strip_prefix(&format!("ep{ep_key}_streamsync_"))
+            .unwrap_or(&fname);
+        let cache_dir = st.data_dir.join("subtitles").join(anilist_id.to_string());
+        let synced_dest = cache_dir.join(format!("ep{ep_key}_streamsync_{clean_fname}"));
+        let source_for_align = if sub_path == synced_dest {
+            // Re-align from clean original if present, else current file
+            sub_path.clone()
+        } else {
+            sub_path.clone()
+        };
+
+        if let Ok(rt) = retime_subtitle_against_reference_cues(
+            &source_for_align,
+            ref_cues,
+            &synced_dest,
+            reference_label,
+        ) {
+            final_path_str = rt.output_path.clone();
+            let cc = detect_cc_tag(clean_fname);
+            let _ = upsert_linked_subtitle(
+                &st.db(),
+                anilist_id,
+                ep_key,
+                &final_path_str,
+                "ja",
+                cc,
+                "jimaku",
+                true,
+                Some(rt.offset_ms),
+            );
+            crate::klog!(
+                "[subtitles] Auto-retimed JP subtitle for anilist={} ep={} against {} (offset={}ms, segments={}, matched={}/{})",
+                anilist_id,
+                ep_key,
+                reference_label,
+                rt.offset_ms,
+                rt.segments,
+                rt.matched_cues,
+                rt.total_cues
+            );
+        }
+    }
+
+    // 3. Hot-load into built-in player (and emit state) if this episode is active
+    if crate::embedded_player::reload_stream_cues_if_active(app, anilist_id, ep_key, &final_path_str) {
+        let _ = tauri::Emitter::emit(app, "library-changed", ());
+    }
+
+    Some(final_path_str)
 }
 
 // ---------------------------------------------------------------------------
@@ -4071,5 +4402,61 @@ mod tests {
         apply_mkv_audio_track_mask(&mut chunk, 0, &offsets, 2);
         assert_eq!(chunk[offsets[0]], 0xFE);
         assert_eq!(chunk[offsets[1]], 0x02);
+    }
+
+    #[test]
+    fn vtt_reference_retiming_handles_short_timestamps_and_commercial_breaks() {
+        let mut vtt = String::from("WEBVTT\n\n");
+        let mut jp_ass = String::from(
+            "[Script Info]\nTitle: JP Broadcast\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
+        );
+
+        // Stream WebVTT uses short `MM:SS.mmm` timestamps with `<c.yellow>` markup and cue settings
+        // JP broadcast `.ass` starts 3.20s earlier in Part A and has a +10.00s sponsor/commercial break at line 20
+        for i in 0..40 {
+            let ref_start_ms = 5_000 + i * 4_100 + ((i * 733) % 1_700);
+            let ref_end_ms = ref_start_ms + 1_400 + ((i * 317) % 1_500);
+            let m1 = ref_start_ms / 60_000;
+            let s1 = (ref_start_ms % 60_000) / 1_000;
+            let ms1 = ref_start_ms % 1_000;
+            let m2 = ref_end_ms / 60_000;
+            let s2 = (ref_end_ms % 60_000) / 1_000;
+            let ms2 = ref_end_ms % 1_000;
+            vtt.push_str(&format!(
+                "{m1:02}:{s1:02}.{ms1:03} --> {m2:02}:{s2:02}.{ms2:03} line:85%\n<c.white>English cue {i}</c>\n\n"
+            ));
+
+            let jp_shift = if i < 20 { -3_200 } else { 6_800 };
+            let jp_s = ref_start_ms + jp_shift;
+            let jp_e = ref_end_ms + jp_shift;
+            jp_ass.push_str(&format!(
+                "Dialogue: 0,{},{},Default,,0,0,0,,日本語のセリフ {i}\n",
+                format_ass_time(jp_s),
+                format_ass_time(jp_e)
+            ));
+        }
+
+        let vtt_cues = parse_subtitle_cues(&vtt, "vtt");
+        assert_eq!(vtt_cues.len(), 40);
+        assert_eq!(vtt_cues[0].text, "English cue 0");
+
+        let tmp_dir = std::env::temp_dir().join(format!("kura_vtt_retime_{}", now()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let jp_in = tmp_dir.join("ep1_orig.ass");
+        let jp_out = tmp_dir.join("ep1_streamsync.ass");
+        std::fs::write(&jp_in, jp_ass.as_bytes()).unwrap();
+
+        let report =
+            retime_subtitle_against_reference_cues(&jp_in, &vtt_cues, &jp_out, "Stream VTT")
+                .unwrap();
+        assert!(report.segments >= 2);
+        assert!(report.matched_cues >= 35);
+
+        let aligned_cues = parse_subtitle_file_cues(&jp_out);
+        assert_eq!(aligned_cues.len(), 40);
+        assert!((aligned_cues[0].start_ms - vtt_cues[0].start_ms).abs() <= 30);
+        assert!((aligned_cues[39].start_ms - vtt_cues[39].start_ms).abs() <= 30);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }
