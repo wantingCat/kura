@@ -24,6 +24,19 @@
   import SubtitleMatcherDialog from "$lib/components/SubtitleMatcherDialog.svelte";
   import PersonModal from "$lib/components/PersonModal.svelte";
   import TorrentPickerDialog from "$lib/components/TorrentPickerDialog.svelte";
+  import Ja from "$lib/components/Ja.svelte";
+  import { JA, jaCour, jaEpisode, jaFormat, jaSeason, jaStatus } from "$lib/ja";
+  import type { FranchiseEntry } from "$lib/api";
+
+  // Tokyo Night presentational helpers (decorative Japanese accents only).
+  const JA_SYNOPSIS = "あらすじ";
+  const JA_SPECIALS = "特別編";
+  /** 第1期 for TV cours, otherwise the Japanese format (劇場版, OVA…). */
+  function seasonJa(s: FranchiseEntry, list: FranchiseEntry[]) {
+    const tvish = (x: FranchiseEntry) => !x.format || x.format === "TV" || x.format === "TV_SHORT" || x.format === "ONA";
+    if (!tvish(s)) return jaFormat(s.format);
+    return jaCour(list.filter(tvish).findIndex((x) => x.anilistId === s.anilistId) + 1);
+  }
 
   const id = $derived(Number(page.params.id));
   let d = $state<MediaDetail | null>(null);
@@ -397,6 +410,7 @@
       <div class="loading-banner-pill">
         <span class="spinner"></span>
         <span>Loading anime details…</span>
+        <Ja text={JA.states.loading} class="ja-sub" />
       </div>
     </section>
     <div class="page body">
@@ -413,10 +427,12 @@
   </div>
 {:else}
   {#key d.anilistId}
-    <div class="detail" style:--cover-accent={d.coverColor || "var(--coral)"}>
+    <div class="detail" style:--cover-accent={d.coverColor || "var(--neon-violet)"}>
       <section class="banner">
         {#if banner}<img src={banner} alt="" class:blur={!d.bannerUrl && !d.bannerPath} />{/if}
         <div class="banner-shade"></div>
+        <div class="banner-glow" aria-hidden="true"></div>
+        {#if d.titleNative}<Ja text={d.titleNative} class="tategaki banner-tategaki" />{/if}
         <button class="back" onclick={() => history.back()} id="detail-back" title="Back" aria-label="Back">
           <Icon name="arrow-left" size={18} />
         </button>
@@ -428,7 +444,7 @@
             {#if cover}<img src={cover} alt={`${displayTitle(d)} poster`} />{/if}
           </div>
           <div class="head-info">
-            {#if d.titleNative}<p class="alt jp">{d.titleNative}</p>{/if}
+            {#if d.titleNative}<Ja text={d.titleNative} block class="neon-text native-title" />{/if}
             {#if logo}
               <img class="title-logo" src={logo} alt={displayTitle(d)} onerror={() => (logoFailed = true)} />
               <h1 class="sr-only">{displayTitle(d)}</h1>
@@ -437,11 +453,20 @@
             {/if}
             {#if d.titleRomaji && d.titleRomaji !== displayTitle(d)}<p class="alt">{d.titleRomaji}</p>{/if}
             <div class="badges">
-              {#if d.format}<span class="badge">{formatLabel(d.format)}</span>{/if}
-              {#if d.status}
-                <span class="badge" class:badge-ok={d.status === "RELEASING"}>{statusLabel(d.status)}</span>
+              {#if d.format}
+                <span class="badge">
+                  {formatLabel(d.format)}
+                  {#if jaFormat(d.format) !== formatLabel(d.format)}<Ja text={jaFormat(d.format)} class="badge-ja" />{/if}
+                </span>
               {/if}
-              {#if d.seasonYear}<span class="badge">{seasonLabel(d.season, d.seasonYear)}</span>{/if}
+              {#if d.status}
+                <span class="badge" class:badge-ok={d.status === "RELEASING"}>
+                  {statusLabel(d.status)}<Ja text={jaStatus(d.status)} class="badge-ja" />
+                </span>
+              {/if}
+              {#if d.seasonYear}
+                <span class="badge">{seasonLabel(d.season, d.seasonYear)}<Ja text={jaSeason(d.season)} class="badge-ja" /></span>
+              {/if}
               {#if d.averageScore}
                 <span class="badge"><Icon name="star" size={11} fill /> {d.averageScore}%</span>
               {/if}
@@ -479,7 +504,7 @@
               {/if}
             </div>
             {#if totalEps > 0 && d.format !== "MOVIE"}
-              <div class="progress" title={`${pct}% watched`}><div style:width={`${pct}%`}></div></div>
+              <div class="progress neon-progress" title={`${pct}% watched`}><span style:width={`${pct}%`}></span></div>
             {/if}
 
             <div class="actions">
@@ -487,7 +512,7 @@
                 {@const isLaunchingNext = app.isLaunching(d.anilistId, nextUp.epKey)}
                 {@const isPlayingNext = app.isPlaying(d.anilistId, nextUp.epKey)}
                 <button
-                  class="btn btn-primary"
+                  class="btn btn-cta"
                   class:launching={isLaunchingNext}
                   disabled={isLaunchingNext}
                   onclick={() => play(nextUp!)}
@@ -697,7 +722,7 @@
                 style:--i={i}
                 id={`season-tab-${s.anilistId}`}
               >
-                <span class="s-label">{franchiseLabel(s, seasons[0])}</span>
+                <span class="s-label"><Ja text={seasonJa(s, seasons)} class="s-ja" />{franchiseLabel(s, seasons[0])}</span>
                 <span class="s-meta">{[formatLabel(s.format), s.seasonYear].filter(Boolean).join(" · ")}</span>
                 <span class="s-progress">
                   {#if done}
@@ -726,7 +751,7 @@
           <div class="main-col">
             {#if description}
               <section class="block">
-                <h2 class="section-title">Synopsis</h2>
+                <h2 class="section-title">Synopsis <Ja text={JA_SYNOPSIS} class="ja-sub" /></h2>
                 <p class="synopsis" class:open={synopsisOpen}>{description}</p>
                 {#if description.length > 420}
                   <button class="more" onclick={() => (synopsisOpen = !synopsisOpen)}>
@@ -759,7 +784,6 @@
                       aria-label={`Play ${epTitle(e)}`}
                     >
                       {#if thumb}<img src={thumb} alt="" loading="lazy" class:fallback={!e.thumbUrl} />{/if}
-                      <span class="ep-num">{e.isSpecial ? "SP" : ""}{e.number}</span>
                       {#if isLaunchingThis}
                         <span class="play-ov active"><span class="spinner spinner-sm"></span></span>
                       {:else if isPlayingThis}
@@ -769,11 +793,15 @@
                       {/if}
                       {#if e.watchedAt}<span class="seen"><Icon name="check" size={12} stroke={3} /></span>{/if}
                       {#if !e.watchedAt && progressPct(e) > 0}
-                        <span class="ep-prog"><span style:width={`${progressPct(e)}%`}></span></span>
+                        <span class="ep-prog neon-progress"><span style:width={`${progressPct(e)}%`}></span></span>
                       {/if}
                     </button>
 
                     <div class="ep-body">
+                      <span class="ep-label">
+                        <span class="tn-label">{e.isSpecial ? "SP" : "EP"} {String(e.number).padStart(2, "0")}</span>
+                        {#if !e.isSpecial}<Ja text={jaEpisode(e.number)} class="ep-label-ja" />{/if}
+                      </span>
                       <div class="ep-title-row">
                         <h3 title={epTitle(e)}>{epTitle(e)}</h3>
                         {#if isLaunchingThis}
@@ -912,6 +940,7 @@
               <section class="block">
                 <h2 class="section-title">
                   {d.format === "MOVIE" ? "Movie" : "Episodes"}
+                  <Ja text={d.format === "MOVIE" ? jaFormat("MOVIE") : JA.rows.episodes} class="ja-sub" />
                   <span class="count">{owned} of {totalEps || regular.length} in library · {effectiveWatched} watched</span>
                 </h2>
                 {@render episodeList(regular)}
@@ -921,7 +950,7 @@
             {#if specials.length > 0}
               <section class="block">
                 <h2 class="section-title">
-                  Specials <span class="count">{specials.filter((s) => s.files.length).length} of {specials.length} in library</span>
+                  Specials <Ja text={JA_SPECIALS} class="ja-sub" /> <span class="count">{specials.filter((s) => s.files.length).length} of {specials.length} in library</span>
                 </h2>
                 <p class="hint faint">Extra episodes listed by the metadata provider. Not all of these are required viewing.</p>
                 {@render episodeList(specials)}
@@ -994,7 +1023,7 @@
               {@const shownChars = showAllChars ? d.characters : d.characters.slice(0, 8)}
               <section class="block" id="detail-characters">
                 <h2 class="section-title">
-                  Characters & Voice Cast <span class="count">{d.characters.length}</span>
+                  Characters & Voice Cast <Ja text={JA.rows.characters} class="ja-sub" /> <span class="count">{d.characters.length}</span>
                 </h2>
                 <div class="chars-grid">
                   {#each shownChars as ch (ch.characterId + "-" + (ch.vaId ?? 0))}
@@ -1038,7 +1067,7 @@
             {#if d.staff && d.staff.length > 0}
               <section class="block" id="detail-staff">
                 <h2 class="section-title">
-                  Staff <span class="count">{d.staff.length}</span>
+                  Staff <Ja text={JA.rows.staff} class="ja-sub" /> <span class="count">{d.staff.length}</span>
                 </h2>
                 <div class="staff-grid">
                   {#each d.staff as st, idx (st.staffId + "-" + idx)}
@@ -1064,7 +1093,7 @@
           <aside class="side-col">
             {#if relations.length > 0}
               <section class="card side-card">
-                <h2 class="side-title">Related</h2>
+                <h2 class="side-title">Related <Ja text={JA.rows.related} class="ja-sub" /></h2>
                 <div class="relations">
                   {#each relations as r (r.relatedId)}
                     {@const rc = img(r.coverPath, r.coverUrl)}
@@ -1292,31 +1321,77 @@
     position: absolute;
     inset: 0;
     background:
-      linear-gradient(0deg, var(--bg) 0%, rgba(8, 8, 11, 0.82) 38%, rgba(8, 8, 11, 0.35) 75%, rgba(8, 8, 11, 0.45) 100%),
-      linear-gradient(90deg, rgba(8, 8, 11, 0.55) 0%, transparent 60%);
+      linear-gradient(
+        0deg,
+        var(--bg) 0%,
+        color-mix(in srgb, var(--bg) 82%, transparent) 38%,
+        color-mix(in srgb, var(--bg) 30%, transparent) 75%,
+        color-mix(in srgb, var(--bg) 55%, transparent) 100%
+      ),
+      linear-gradient(90deg, color-mix(in srgb, var(--bg) 60%, transparent) 0%, transparent 60%);
     pointer-events: none;
+  }
+  /* Ambient glow in the show's key colour, bleeding from the banner into the page. */
+  .banner-glow {
+    position: absolute;
+    left: -10%;
+    bottom: -45%;
+    width: 75%;
+    height: 90%;
+    background: radial-gradient(
+      closest-side,
+      color-mix(in srgb, var(--cover-accent) 32%, transparent),
+      transparent
+    );
+    filter: blur(40px);
+    pointer-events: none;
+    z-index: 1;
+  }
+  .banner :global(.banner-tategaki) {
+    position: absolute;
+    z-index: 2;
+    right: var(--page-x);
+    top: calc(var(--nav-h) + var(--nav-inset) + 24px);
+    max-height: 55%;
+    overflow: hidden;
+    padding: 12px 7px;
+    border-radius: var(--r-pill);
+    background: rgba(8, 9, 16, 0.5);
+    font-size: 15px;
+    font-weight: 500;
+    color: rgba(244, 242, 255, 0.82);
+    text-shadow: 0 1px 8px rgba(0, 0, 0, 0.8);
+    pointer-events: none;
+  }
+  @media (max-width: 900px) {
+    .banner :global(.banner-tategaki) {
+      display: none;
+    }
   }
   .back {
     position: absolute;
     z-index: 3;
-    top: 20px;
+    top: calc(var(--nav-h) + var(--nav-inset) + 16px);
     left: var(--page-x);
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
     padding: 0;
     border-radius: 50%;
     display: grid;
     place-items: center;
-    background: var(--glass);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
-    border: 1px solid var(--glass-border);
-    color: #fff;
+    background: var(--glass-tn);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
+    color: var(--text);
     cursor: pointer;
-    transition: background var(--t-fast) var(--ease);
+    transition:
+      background var(--t-fast) var(--ease),
+      box-shadow var(--t-fast) var(--ease);
   }
   .back:hover {
-    background: rgba(255, 255, 255, 0.16);
+    background: var(--surface-3);
+    box-shadow: var(--neon-glow);
   }
 
   /* Header ---------------------------------------------------------------- */
@@ -1324,6 +1399,23 @@
     position: relative;
     z-index: 2;
     margin-top: -250px;
+  }
+  /* Keep the overlap stable even if `.page` gains floating-nav padding globally. */
+  .detail .page.body {
+    padding-top: 32px;
+  }
+  .head-info :global(.native-title) {
+    margin: 0 0 6px;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.45));
+  }
+  .badges :global(.badge-ja) {
+    margin-left: 6px;
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--text-2);
   }
   .head {
     display: flex;
@@ -1383,14 +1475,9 @@
   }
   .alt {
     margin-top: 4px;
-    color: rgba(243, 243, 245, 0.66);
+    color: var(--text-2);
     font-size: 14px;
     overflow-wrap: anywhere;
-  }
-  .alt.jp {
-    margin: 0 0 4px;
-    color: rgba(243, 243, 245, 0.55);
-    font-size: 13.5px;
   }
   .badges {
     display: flex;
@@ -1453,14 +1540,8 @@
     margin-top: 14px;
     height: 4px;
     width: min(460px, 100%);
-    border-radius: 99px;
-    background: rgba(255, 255, 255, 0.12);
-    overflow: hidden;
   }
-  .progress div {
-    height: 100%;
-    background: var(--coral);
-    border-radius: inherit;
+  .progress span {
     transition: width 600ms var(--ease);
   }
   .actions {
@@ -1472,11 +1553,19 @@
   }
   .actions .btn {
     height: 44px;
-    border-radius: var(--r-md);
+    border-radius: var(--r-pill);
   }
-  .actions .btn-primary {
-    padding: 0 22px;
+  .actions .btn-cta {
+    padding: 0 24px;
     font-size: 14.5px;
+  }
+  .actions .btn-cta.launching {
+    opacity: 0.85;
+    cursor: wait;
+  }
+  .actions .btn-cta .spinner {
+    border-color: rgba(255, 255, 255, 0.3);
+    border-top-color: #fff;
   }
   .actions .btn-icon {
     width: 44px;
@@ -1514,10 +1603,10 @@
     min-width: 250px;
     padding: 6px;
     border-radius: var(--r-lg);
-    background: color-mix(in srgb, var(--surface-2) 92%, transparent);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
-    border: 1px solid var(--border-strong);
+    background: var(--glass-tn);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
     box-shadow: var(--sticker-lg);
     animation: fade-up 160ms var(--ease) both;
   }
@@ -1572,25 +1661,32 @@
     max-width: 250px;
     padding: 10px 14px 14px;
     border-radius: var(--r-md);
-    border: 1px solid var(--border);
+    border: none;
     background: var(--surface);
     color: var(--text);
     scroll-snap-align: start;
     overflow: hidden;
+    box-shadow: var(--shadow-sm);
     transition:
       transform var(--t-fast) var(--ease),
-      border-color var(--t-fast) var(--ease),
+      box-shadow var(--t-fast) var(--ease),
       background var(--t-fast) var(--ease);
   }
   .season:hover {
     transform: translateY(-2px);
-    border-color: var(--border-strong);
     background: var(--surface-2);
   }
   .season.active {
-    background: color-mix(in srgb, var(--coral) 16%, var(--surface));
-    border-color: color-mix(in srgb, var(--coral) 55%, transparent);
+    background: color-mix(in srgb, var(--neon-violet) 16%, var(--surface));
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--neon-violet) 45%, transparent),
+      var(--neon-glow);
     color: var(--text);
+  }
+  .s-label :global(.s-ja) {
+    margin-right: 6px;
+    font-size: 13px;
+    color: var(--text-2);
   }
   .s-label {
     font-family: var(--font-display);
@@ -1619,25 +1715,21 @@
   }
   .season.active .s-meta,
   .season.active .s-progress {
-    color: color-mix(in srgb, var(--on-coral) 75%, transparent);
+    color: var(--text-2);
   }
   .s-bar {
     position: absolute;
     left: 0;
     right: 0;
     bottom: 0;
-    height: 5px;
-    background: var(--bg-elev);
-    border-top: 1.5px solid var(--line);
+    height: 3px;
+    background: rgba(255, 255, 255, 0.1);
   }
   .s-bar span {
     display: block;
     height: 100%;
-    background: var(--coral);
+    background: var(--neon);
     transition: width 600ms var(--ease);
-  }
-  .season.active .s-bar span {
-    background: var(--on-coral);
   }
   .season.done .s-bar span {
     background: var(--ok);
@@ -1650,10 +1742,9 @@
     margin-top: 28px;
     padding: 11px 16px;
     border-radius: var(--r-md);
-    background: var(--surface);
-    border: var(--bw) solid var(--line);
-    border-left: 8px solid var(--amber);
-    box-shadow: var(--sticker);
+    background: color-mix(in srgb, var(--amber) 8%, var(--surface));
+    border: none;
+    box-shadow: inset 3px 0 0 var(--amber);
     color: var(--amber);
     font-size: 13.5px;
   }
@@ -1661,7 +1752,8 @@
     color: var(--text-2);
   }
   .notice.danger {
-    border-left-color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+    box-shadow: inset 3px 0 0 var(--danger);
     color: var(--danger);
   }
 
@@ -1715,29 +1807,41 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 4px;
   }
   .ep {
     display: flex;
-    gap: 18px;
+    gap: 20px;
     align-items: flex-start;
-    padding: 10px;
-    border-radius: var(--r-lg);
-    border: var(--bw) solid transparent;
+    padding: 14px;
+    border-radius: var(--r-md);
     content-visibility: auto;
     contain-intrinsic-size: auto 138px;
     transition:
       background var(--t-fast) var(--ease),
-      border-color var(--t-fast) var(--ease),
       box-shadow var(--t-fast) var(--ease);
   }
   .ep:hover {
     background: var(--surface);
-    border-color: var(--border);
   }
   .ep.next {
-    background: rgba(255, 255, 255, 0.045);
-    border-color: var(--border-strong);
+    background: color-mix(in srgb, var(--neon-violet) 12%, var(--surface));
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--neon-violet) 28%, transparent),
+      0 0 28px -8px rgba(139, 92, 246, 0.4);
+  }
+  .ep-label {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 3px;
+  }
+  .ep.next .ep-label .tn-label {
+    color: var(--neon-pink);
+  }
+  .ep-label :global(.ep-label-ja) {
+    font-size: 11px;
+    color: var(--text-2);
   }
   .ep-thumb {
     position: relative;
@@ -1793,27 +1897,6 @@
     color: var(--text-3);
     border-color: var(--border-strong);
   }
-  .ep-num {
-    position: absolute;
-    left: 7px;
-    top: 7px;
-    min-width: 26px;
-    height: 22px;
-    padding: 0 7px;
-    display: grid;
-    place-items: center;
-    border-radius: 6px;
-    background: rgba(0, 0, 0, 0.62);
-    color: #fff;
-    font-family: var(--font-display);
-    font-weight: 700;
-    font-size: 12px;
-    line-height: 1;
-  }
-  .ep.next .ep-num {
-    background: var(--coral);
-    color: #fff;
-  }
   .play-ov {
     position: absolute;
     inset: 0;
@@ -1835,12 +1918,11 @@
     border-top-color: var(--coral);
   }
   .play-ov .eq-bars {
-    background: var(--coral);
-    color: var(--on-coral);
+    background: var(--cta);
+    color: var(--on-cta);
     padding: 7px 9px;
     border-radius: 12px;
-    border: var(--bw) solid var(--line);
-    box-shadow: var(--sticker);
+    box-shadow: var(--neon-glow);
     height: 12px;
     gap: 2.5px;
   }
@@ -1855,8 +1937,8 @@
     height: 44px;
     padding: 12px 10px 12px 14px;
     border-radius: 50%;
-    background: rgba(255, 255, 255, 0.94);
-    color: #08080b;
+    background: var(--primary);
+    color: var(--on-primary);
     box-shadow: var(--sticker);
     transform: scale(0.85);
     transition: transform var(--t-med) var(--bounce);
@@ -1885,16 +1967,11 @@
     left: 0;
     right: 0;
     bottom: 0;
-    height: 5px;
-    background: color-mix(in srgb, var(--bg) 70%, transparent);
-  }
-  .ep-prog span {
-    display: block;
-    height: 100%;
-    background: var(--coral);
+    height: 3px;
+    border-radius: 0;
   }
   .resume-at {
-    color: var(--coral);
+    color: var(--neon-pink);
     font-weight: 700;
   }
   .ep-body {
@@ -2074,23 +2151,21 @@
     display: flex;
     gap: 12px;
     padding: 12px;
-    border: var(--bw) solid var(--line);
-    border-radius: var(--r-lg);
+    border-radius: var(--r-md);
     background: var(--surface);
-    box-shadow: var(--sticker-sm);
+    box-shadow: var(--shadow-sm);
     transition: transform var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
   }
   .extra-card:hover {
     transform: translateY(-2px);
-    box-shadow: var(--sticker-md);
+    box-shadow: var(--sticker);
   }
   .extra-thumb {
     position: relative;
     width: 64px;
     height: 64px;
     flex-shrink: 0;
-    border: var(--bw) solid var(--line);
-    border-radius: var(--r-md);
+    border-radius: var(--r-sm);
     background: var(--surface-2);
     display: flex;
     flex-direction: column;
@@ -2106,38 +2181,36 @@
     font-size: 10px;
     font-family: var(--font-display);
     font-weight: 700;
-    border-radius: var(--r-full);
-    border: 1.5px solid var(--line);
+    border-radius: var(--r-pill);
     background: var(--surface-3);
     color: var(--text);
   }
   .extra-kind-badge.badge-accent {
-    background: var(--coral);
-    color: var(--cream);
+    background: var(--neon-violet);
+    color: #fff;
   }
   .extra-kind-badge.badge-ok {
     background: var(--mint);
-    color: var(--ink);
+    color: var(--on-primary);
   }
   .extra-play-btn {
     width: 32px;
     height: 32px;
     border-radius: 50%;
-    border: var(--bw) solid var(--line);
-    background: var(--surface);
-    color: var(--coral);
+    border: none;
+    background: var(--primary);
+    color: var(--on-primary);
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    box-shadow: var(--sticker-sm);
-    transition: transform var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+    box-shadow: var(--shadow-sm);
+    transition: transform var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
     margin-top: 12px;
   }
   .extra-play-btn:hover {
     transform: scale(1.1);
-    background: var(--coral);
-    color: var(--cream);
+    box-shadow: var(--neon-glow);
   }
   .extra-body {
     flex: 1;
@@ -2189,6 +2262,7 @@
   }
   .side-card {
     padding: 18px;
+    border: none;
   }
   .side-title {
     font-size: 17px;
@@ -2226,7 +2300,6 @@
     height: 60px;
     flex: none;
     border-radius: 7px;
-    border: 1.5px solid var(--line);
     overflow: hidden;
     background: var(--surface-3);
   }
@@ -2247,7 +2320,7 @@
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--coral);
+    color: var(--neon-violet);
   }
   .r-info strong {
     font-size: 13px;
@@ -2328,6 +2401,7 @@
     margin-top: 14px;
     padding: 12px 14px;
     border-radius: var(--r-md);
+    border: none;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -2551,9 +2625,8 @@
     justify-content: space-between;
     gap: 8px;
     background: var(--surface);
-    border: var(--bw) solid var(--line);
     border-radius: var(--r-md);
-    box-shadow: var(--sticker-sm);
+    box-shadow: var(--shadow-sm);
     overflow: hidden;
   }
   .char-side {
@@ -2574,7 +2647,6 @@
     flex: 1;
     background: var(--bg-elev);
     border: 0;
-    border-left: 1.5px solid var(--border);
     text-align: right;
     color: inherit;
     cursor: pointer;
@@ -2584,7 +2656,7 @@
     background: var(--surface-2);
   }
   .va-side:hover strong {
-    color: var(--coral);
+    color: var(--neon-violet);
   }
   .char-avatar {
     width: 46px;
@@ -2592,7 +2664,6 @@
     border-radius: 6px;
     overflow: hidden;
     background: var(--surface-2);
-    border: 1.5px solid var(--line);
     flex-shrink: 0;
   }
   .char-avatar img {
@@ -2634,9 +2705,9 @@
     gap: 10px;
     padding: 8px;
     background: var(--surface);
-    border: var(--bw) solid var(--line);
+    border: none;
     border-radius: var(--r-md);
-    box-shadow: var(--sticker-sm);
+    box-shadow: var(--shadow-sm);
     text-align: left;
     color: inherit;
     cursor: pointer;
@@ -2644,10 +2715,17 @@
   }
   .staff-card:hover {
     background: var(--surface-2);
-    transform: translate(-1px, -1px);
+    transform: translateY(-2px);
   }
   .staff-card:hover strong {
-    color: var(--coral);
+    color: var(--neon-violet);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .season:hover,
+    .extra-card:hover,
+    .staff-card:hover {
+      transform: none;
+    }
   }
   @media (max-width: 900px) {
     .head {

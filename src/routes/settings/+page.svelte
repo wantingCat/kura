@@ -21,6 +21,8 @@
   import { updater } from "$lib/updater.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import NewLibraryForm from "$lib/components/NewLibraryForm.svelte";
+  import Ja from "$lib/components/Ja.svelte";
+  import { JA } from "$lib/ja";
   import { mpvModal } from "$lib/mpvModal.svelte";
   import { changelogModal } from "$lib/changelogModal.svelte";
   import {
@@ -498,6 +500,20 @@
     { id: "updates", label: "Updates", icon: "refresh" },
     { id: "about", label: "About & Diagnostics", icon: "info" },
   ];
+  // Japanese accents for the category nav + section headings (decorative).
+  // Words not in $lib/ja.ts are local: 拡張, アートワーク, 連携, バックアップ, 更新, 辞書.
+  const CAT_JA: Record<CatId, string> = {
+    libraries: JA.settings.library,
+    appearance: JA.settings.appearance,
+    playback: JA.settings.playback,
+    extensions: "拡張",
+    tracks: JA.settings.subtitles,
+    artwork: "アートワーク",
+    integrations: "連携",
+    backup: "バックアップ",
+    updates: "更新",
+    about: JA.settings.about,
+  };
   const catOf = (id: CatId) => CATEGORIES.find((c) => c.id === id)!;
 
   const CAT_KEY = "kura.settings.category";
@@ -733,7 +749,7 @@
     { cat: "libraries", label: "New library", hint: "Create an anime library from your folders", target: "settings-new-library", kw: "add create" },
     { cat: "libraries", label: "Library folders", hint: "Add, remove or rescan folders", target: "set-libraries", kw: "folder path rescan rename remove delete drive" },
     { cat: "libraries", label: "Live folder watcher", hint: "Auto-rescan when files change", target: "pref-folder-watcher", kw: "auto rescan watch sync new episodes" },
-    { cat: "appearance", label: "Theme", hint: "Kura Noir (dark) or Manga Editorial (light)", target: "set-theme", kw: "noir manga dark light color colour look" },
+    { cat: "appearance", label: "Japanese accents", hint: "Native titles, Japanese labels and kanji (日本語アクセント)", target: "set-japanese-accents", kw: "japanese jp kanji native title nihongo accent language 日本語" },
     { cat: "appearance", label: "Multi-season shows", hint: "Group seasons into one card or keep them separate", target: "set-seasons", kw: "group grouped separate season movie ova tabs" },
     { cat: "playback", label: "App Mode (Offline vs. Streaming)", hint: "Switch between Offline Library Mode and Streaming & Hybrid Mode", target: "set-app-mode", kw: "mode streaming torrent offline local hybrid discover" },
     { cat: "playback", label: "Torrent Streaming & Download Action", hint: "Stream Only (Temp Cache), Stream & Save to Library, or Download First", target: "set-torrent-action", fallback: "set-app-mode", kw: "torrent stream download hybrid nyaa animetosho cache" },
@@ -810,7 +826,8 @@
 
 <div class="page settings-page" bind:this={rootEl}>
   <header class="head">
-    <h1>Settings</h1>
+    <Ja text={JA.pages.settings.ja} class="kanji-watermark" />
+    <h1>Settings <Ja text={JA.pages.settings.ja} class="ja-sub" /></h1>
     <p class="muted">Tune Kura to the way you watch.</p>
   </header>
 
@@ -850,7 +867,10 @@
           id={`settings-cat-${c.id}`}
         >
           <span class="cat-icon"><Icon name={c.icon} size={16} /></span>
-          <span class="cat-label">{c.label}</span>
+          <span class="cat-text">
+            <span class="cat-label">{c.label}</span>
+            <Ja text={CAT_JA[c.id]} class="cat-ja" />
+          </span>
         </button>
       {/each}
     </nav>
@@ -886,7 +906,7 @@
   {#if active === "libraries"}
   <section class="block" id="set-libraries">
     <div class="block-head">
-      <h2 class="section-title">Libraries</h2>
+      <h2 class="section-title">Libraries <Ja text={JA.settings.library} class="ja-sub" /></h2>
       {#if !showNew}
         <button class="btn btn-primary btn-sm" onclick={() => (showNew = true)} id="settings-new-library">
           <Icon name="plus" size={14} /> New library
@@ -1000,53 +1020,24 @@
 
   {#if active === "appearance"}
   <section class="block" id="set-appearance">
-    <h2 class="section-title">Appearance</h2>
+    <h2 class="section-title">Appearance <Ja text={JA.settings.appearance} class="ja-sub" /></h2>
     <div class="card display">
-      <div class="opt-head" id="set-theme">
-        <h3>Theme</h3>
-        <p class="faint">Choose between Kura Noir editorial dark cinema and printed Manga ink &amp; paper.</p>
-      </div>
-      <div class="choices" role="radiogroup" aria-label="Theme">
-        <button
-          class="choice theme-choice"
-          class:on={app.theme === "comic"}
-          role="radio"
-          aria-checked={app.theme === "comic"}
-          onclick={() => app.setTheme("comic")}
-          id="pref-theme-comic"
-        >
-          <span class="theme-preview comic-preview" aria-hidden="true">
-            <span class="preview-shell">
-              <span class="preview-badge"></span>
-              <span class="preview-bar"></span>
-              <span class="preview-sub"></span>
-            </span>
-          </span>
-          <span class="choice-text">
-            <strong>Kura Noir <span class="rec">Dark</span></strong>
-            <small>Obsidian ink canvas, vermilion hanko accents, and borderless cinema artwork.</small>
-          </span>
-        </button>
-        <button
-          class="choice theme-choice"
-          class:on={app.theme === "manga"}
-          role="radio"
-          aria-checked={app.theme === "manga"}
-          onclick={() => app.setTheme("manga")}
-          id="pref-theme-manga"
-        >
-          <span class="theme-preview manga-preview" aria-hidden="true">
-            <span class="preview-shell">
-              <span class="preview-badge"></span>
-              <span class="preview-bar"></span>
-              <span class="preview-sub"></span>
-            </span>
-          </span>
-          <span class="choice-text">
-            <strong>Manga Editorial <span class="rec manga-rec">Light</span></strong>
-            <small>Warm ivory paper, crisp sumi hairlines, and vermilion stamp seals.</small>
-          </span>
-        </button>
+      <div class="rows ja-rows" id="set-japanese-accents">
+        <div class="row">
+          <div class="row-text">
+            <strong>Japanese accents <span class="ja-sub" lang="ja" aria-hidden="true">{JA.settings.japaneseAccents}</span></strong>
+            <small>Show native titles, Japanese labels and kanji throughout the app.</small>
+          </div>
+          <button
+            class="switch"
+            class:on={app.japaneseAccents}
+            role="switch"
+            aria-checked={app.japaneseAccents}
+            aria-label="Japanese accents"
+            onclick={() => app.setJapaneseAccents(!app.japaneseAccents)}
+            id="pref-japanese-accents"
+          ><span></span></button>
+        </div>
       </div>
 
       <div class="opt-divider"></div>
@@ -1091,7 +1082,7 @@
 
   {#if active === "artwork"}
   <section class="block" id="set-artwork">
-    <h2 class="section-title">Artwork & Metadata</h2>
+    <h2 class="section-title">Artwork & Metadata <Ja text={"アートワーク"} class="ja-sub" /></h2>
     <div class="card display">
       <div class="opt-head" id="set-pipeline">
         <h3>Priority Artwork Pipeline</h3>
@@ -1223,7 +1214,7 @@
 
   {#if active === "playback"}
   <section class="block" id="set-playback">
-    <h2 class="section-title">App Mode & Streaming</h2>
+    <h2 class="section-title">App Mode & Streaming <Ja text={JA.settings.streaming} class="ja-sub" /></h2>
     <div class="card display" id="set-app-mode" style="margin-bottom: 18px;">
       <div class="opt-head">
         <h3>Kura Operating Mode</h3>
@@ -1371,7 +1362,7 @@
         </div>
       {/if}
     </div>
-    <h2 class="section-title">Playback</h2>
+    <h2 class="section-title">Playback <Ja text={JA.settings.playback} class="ja-sub" /></h2>
     <div class="card playback">
       <div class="opt-head" id="set-player">
         <h3>Player</h3>
@@ -1519,7 +1510,7 @@
   {#if active === "extensions"}
   <section class="block" id="set-extensions">
     <div class="block-head">
-      <h2 class="section-title">Extensions</h2>
+      <h2 class="section-title">Extensions <Ja text={"拡張"} class="ja-sub" /></h2>
       <span class="ext-count">{torrentExtensions.filter((e) => e.enabled).length} active · {torrentExtensions.length} installed</span>
     </div>
 
@@ -1630,7 +1621,7 @@
 
   {#if active === "tracks"}
   <section class="block" id="set-tracks-section">
-    <h2 class="section-title">Audio & Subtitles</h2>
+    <h2 class="section-title">Audio & Subtitles <Ja text={JA.settings.subtitles} class="ja-sub" /></h2>
     <div class="card playback">
       <div class="opt-head" id="set-tracks">
         <h3>Default track preferences</h3>
@@ -1723,7 +1714,7 @@
       </div>
     </div>
 
-    <h2 class="section-title" style="margin-top: 22px;">Japanese Dictionary (Yomitan Engine)</h2>
+    <h2 class="section-title" style="margin-top: 22px;">Japanese Dictionary (Yomitan Engine) <Ja text={"辞書"} class="ja-sub" /></h2>
     <div class="card playback" id="set-yomitan">
       <div class="opt-head">
         <h3>Pause-to-Hover Yomitan Dictionary</h3>
@@ -1790,7 +1781,7 @@
   {#if active === "integrations"}
   <section class="block" id="set-integrations">
     <div class="anilist-section" id="set-anilist">
-      <h2 class="section-title">AniList Two-Way Sync</h2>
+      <h2 class="section-title">AniList Two-Way Sync <Ja text={JA.settings.sync} class="ja-sub" /></h2>
       <div class="card playback anilist-card">
         <div class="opt-head">
           <h3>AniList Account & Auto-Scrobble</h3>
@@ -1930,7 +1921,7 @@
     </div>
 
     <div class="anilist-section" id="set-jimaku">
-      <h2 class="section-title">Jimaku Subtitles & Auto-Retimer</h2>
+      <h2 class="section-title">Jimaku Subtitles & Auto-Retimer <Ja text={JA.settings.subtitles} class="ja-sub" /></h2>
       <div class="card playback">
         <div class="opt-head">
           <h3>Jimaku.cc Personal API Key</h3>
@@ -1992,7 +1983,7 @@
     </div>
 
     <div class="anilist-section" id="set-airing-notify">
-      <h2 class="section-title">Seasonal Calendar & Notifications</h2>
+      <h2 class="section-title">Seasonal Calendar & Notifications <Ja text={JA.settings.notifications} class="ja-sub" /></h2>
       <div class="card playback">
         <div class="rows">
           <div class="row">
@@ -2089,7 +2080,7 @@
 
   {#if active === "updates"}
   <section class="block" id="set-updates">
-    <h2 class="section-title">Updates</h2>
+    <h2 class="section-title">Updates <Ja text={"更新"} class="ja-sub" /></h2>
     <div class="card playback">
       <div class="rows">
         <div class="row">
@@ -2145,7 +2136,7 @@
 
   {#if active === "backup"}
   <section class="block" id="set-backup">
-    <h2 class="section-title">Backup & Restore</h2>
+    <h2 class="section-title">Backup & Restore <Ja text={"バックアップ"} class="ja-sub" /></h2>
     <div class="card playback">
       <div class="opt-head" id="set-export">
         <h3>Export a backup</h3>
@@ -2276,7 +2267,7 @@
 
   {#if active === "about"}
   <section class="block" id="set-about">
-    <h2 class="section-title">About</h2>
+    <h2 class="section-title">About <Ja text={JA.settings.about} class="ja-sub" /></h2>
     <div class="card about">
       <div class="about-hero">
         <img class="about-logo" src="/brand/logo.png" alt="Kura Logo" width="48" height="48" />
@@ -2285,7 +2276,7 @@
             Kura 蔵
             <span class="badge badge-accent">v{version || "0.4"}</span>
           </h3>
-          <p class="faint">A local-first, manga-styled desktop anime media library.</p>
+          <p class="faint">An anime streaming &amp; Japanese immersion suite.</p>
         </div>
       </div>
 
@@ -2391,6 +2382,7 @@
 <style>
   .settings-page {
     max-width: 1180px;
+    padding-top: calc(var(--nav-h) + var(--nav-inset) + 28px);
   }
   .layout {
     display: grid;
@@ -2408,7 +2400,7 @@
   /* Sidebar */
   .side {
     position: sticky;
-    top: 12px;
+    top: calc(var(--nav-h) + var(--nav-inset) + 12px);
     display: flex;
     flex-direction: column;
     gap: 14px;
@@ -2481,6 +2473,7 @@
     display: flex;
     align-items: center;
     gap: 11px;
+    min-height: 48px;
     padding: 8px 10px;
     border-radius: var(--r-md);
     border: var(--bw) solid transparent;
@@ -2822,11 +2815,21 @@
     animation: fade-up 220ms var(--ease);
   }
   .head {
-    margin: 12px 0 32px;
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+    margin: 0 0 32px;
+    padding-top: 12px;
+  }
+  .head > h1,
+  .head > p {
+    position: relative;
+    z-index: 1;
   }
   .head h1 {
     font-size: 34px;
-    font-weight: 600;
+    font-weight: 700;
+    letter-spacing: -0.02em;
   }
   .head p {
     margin-top: 6px;
@@ -2965,14 +2968,11 @@
     gap: 16px;
   }
   .about-logo {
-    width: 48px;
-    height: 48px;
-    border-radius: var(--r-md);
-    border: var(--bw) solid var(--line);
-    background: var(--bg-elev);
-    box-shadow: 2px 2px 0 var(--line);
+    width: 52px;
+    height: 52px;
     object-fit: contain;
     flex: none;
+    filter: drop-shadow(0 6px 18px rgba(139, 92, 246, 0.35));
   }
   .about-title-block h3 {
     font-size: 19px;
@@ -3033,83 +3033,6 @@
     height: 1.5px;
     background: var(--border);
     margin: 22px 0;
-  }
-  .theme-preview {
-    position: relative;
-    flex: none;
-    width: 62px;
-    height: 48px;
-    border-radius: 8px;
-    overflow: hidden;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .comic-preview {
-    background: #1d1415;
-    border: 2px solid #140c0d;
-    box-shadow: 2px 2px 0 #140c0d;
-  }
-  .manga-preview {
-    background: #f5f2eb;
-    border: 2px solid #12100e;
-    box-shadow: 2px 2px 0 #12100e;
-    background-image: radial-gradient(#dcd6c9 1px, transparent 1px);
-    background-size: 6px 6px;
-  }
-  .preview-shell {
-    width: 44px;
-    height: 32px;
-    border-radius: 5px;
-    padding: 5px;
-    display: flex;
-    flex-direction: column;
-    gap: 3.5px;
-  }
-  .comic-preview .preview-shell {
-    background: #2c1f21;
-    border: 1.5px solid #140c0d;
-  }
-  .manga-preview .preview-shell {
-    background: #ffffff;
-    border: 1.5px solid #12100e;
-  }
-  .preview-badge {
-    width: 14px;
-    height: 4px;
-    border-radius: 2px;
-  }
-  .comic-preview .preview-badge {
-    background: #f76d4d;
-  }
-  .manga-preview .preview-badge {
-    background: #e53935;
-  }
-  .preview-bar {
-    width: 28px;
-    height: 3px;
-    border-radius: 2px;
-  }
-  .comic-preview .preview-bar {
-    background: #f7ede2;
-  }
-  .manga-preview .preview-bar {
-    background: #141210;
-  }
-  .preview-sub {
-    width: 18px;
-    height: 2.5px;
-    border-radius: 2px;
-  }
-  .comic-preview .preview-sub {
-    background: #cdbab0;
-  }
-  .manga-preview .preview-sub {
-    background: #7c766d;
-  }
-  .manga-rec {
-    background: #e53935;
-    color: #ffffff;
   }
 
   /* Playback / updates ----------------------------------------------------- */
@@ -3445,8 +3368,8 @@
     width: 22px;
     height: 32px;
     border-radius: 5px;
-    border: 2px solid var(--line);
-    background: var(--surface-2);
+    border: 1.5px solid rgba(167, 139, 250, 0.38);
+    background: var(--surface-3);
   }
   .choice.on .illo i:last-child {
     background: var(--coral);
@@ -3924,5 +3847,158 @@
   .ext-empty p {
     margin: 0;
     font-size: 12.5px;
+  }
+
+  /* Tokyo Night pass ------------------------------------------------------- */
+  /* MASTER rule 1: no grey borders around cards — separation via elevation. */
+  .card,
+  .result,
+  .choice,
+  .search {
+    border-color: transparent;
+  }
+  .card {
+    background: var(--surface);
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-sm);
+  }
+  .search {
+    background: var(--surface);
+    border-radius: var(--r-pill);
+    box-shadow: none;
+    color: var(--text-2);
+  }
+  .search:focus-within {
+    color: var(--text);
+    transform: none;
+    box-shadow:
+      0 0 0 2px var(--neon-violet),
+      var(--neon-glow);
+  }
+  .search kbd {
+    border: 0;
+    background: var(--surface-3);
+    color: var(--text-2);
+  }
+  /* Label + small Japanese sub stacked, so long English labels never get truncated by the JP tag */
+  .cat-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    line-height: 1.25;
+  }
+  .cat :global(.cat-ja) {
+    font-size: 10.5px;
+    color: var(--text-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cat:hover {
+    background: var(--surface);
+    transform: none;
+  }
+  .cat.on {
+    background: var(--surface-2);
+    border-color: transparent;
+    box-shadow: inset 2px 0 0 var(--neon-violet);
+  }
+  .cat.on :global(.cat-ja) {
+    color: var(--text-2);
+  }
+  .cat.on .cat-icon {
+    background: var(--cta);
+    color: var(--on-cta);
+  }
+  .cat:focus-visible,
+  .result:focus-visible,
+  .choice:focus-visible,
+  .switch:focus-visible {
+    outline: 2px solid var(--neon-violet);
+    outline-offset: 2px;
+  }
+  .result {
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+  }
+  .result:hover,
+  .result:focus-visible {
+    background: var(--surface-2);
+    box-shadow: var(--neon-glow);
+    transform: none;
+  }
+  .row {
+    border-top: 1px solid var(--line);
+  }
+  .rows .row:first-child {
+    border-top: none;
+  }
+  .ja-rows {
+    margin-top: 0;
+  }
+  .row-text small,
+  .choice-text small {
+    color: var(--text-2);
+    font-weight: 500;
+  }
+  .row-text strong,
+  .choice-text strong {
+    font-family: var(--font);
+  }
+  .opt-divider {
+    height: 1px;
+    background: var(--line);
+  }
+  .switch {
+    border: 0;
+    background: var(--surface-3);
+  }
+  .switch span {
+    top: 4px;
+    left: 4px;
+    border: 0;
+    background: var(--text-2);
+  }
+  .switch.on {
+    background: var(--cta);
+    box-shadow: 0 0 14px rgba(139, 92, 246, 0.4);
+  }
+  .switch.on span {
+    background: #ffffff;
+  }
+  .choice {
+    background: var(--surface-2);
+  }
+  .choice:hover {
+    transform: none;
+    background: var(--surface-3);
+    box-shadow: none;
+  }
+  .choice.on {
+    transform: none;
+    background: color-mix(in srgb, var(--neon-violet) 12%, var(--surface-2));
+    box-shadow:
+      0 0 0 1.5px var(--neon-violet),
+      var(--neon-glow);
+  }
+  .rec {
+    border: 0;
+    background: var(--surface-3);
+    color: var(--text);
+  }
+  .slider {
+    border: 0;
+    height: 6px;
+    background: linear-gradient(to right, var(--neon-violet) 0%, var(--neon-pink) var(--fill), var(--surface-3) var(--fill));
+  }
+  .slider::-webkit-slider-thumb {
+    border: 0;
+    background: #ffffff;
+    box-shadow: var(--neon-glow);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pane {
+      animation: none;
+    }
   }
 </style>

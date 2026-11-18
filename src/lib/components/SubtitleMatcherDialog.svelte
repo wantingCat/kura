@@ -255,14 +255,14 @@
     background: var(--bg-elev);
     border: var(--bw) solid var(--line);
     border-radius: var(--r-xl);
-    box-shadow: 6px 6px 0 var(--coral);
+    box-shadow: var(--sticker-lg), var(--neon-glow);
   }
   header {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
     padding: 20px 24px 16px;
-    border-bottom: 1.5px solid var(--line-soft);
+    border-bottom: 1px solid var(--line);
   }
   .body {
     padding: 18px 24px;
@@ -279,7 +279,7 @@
     flex-wrap: wrap;
     padding: 12px 14px;
     background: var(--bg-card);
-    border: 1.5px solid var(--line-soft);
+    border: 1px solid transparent;
     border-radius: var(--r-md);
   }
   .ctrl-group {
@@ -297,7 +297,7 @@
   .segmented {
     display: inline-flex;
     background: var(--bg-soft);
-    border: 1.5px solid var(--line-soft);
+    border: 1px solid transparent;
     border-radius: var(--r-md);
     padding: 2px;
   }
@@ -352,7 +352,7 @@
     gap: 12px;
     padding: 10px 14px;
     background: var(--bg-card);
-    border: 1.5px solid var(--line-soft);
+    border: 1px solid transparent;
     border-radius: var(--r-md);
   }
   .ep-col {
@@ -413,7 +413,7 @@
     padding: 2px 8px;
     border-radius: var(--r-pill);
     background: var(--bg-soft);
-    border: 1px solid var(--line-soft);
+    border: 1px solid transparent;
   }
   .linked-pill {
     font-size: 10.5px;
@@ -425,7 +425,7 @@
     padding: 10px 14px;
     border-radius: var(--r-md);
     background: var(--bg-soft);
-    border: 1px solid var(--line-soft);
+    border: 1px solid transparent;
   }
   .skipped-box summary {
     cursor: pointer;
@@ -468,10 +468,24 @@
     align-items: center;
     gap: 10px;
     padding: 14px 24px;
-    border-top: 1.5px solid var(--line-soft);
+    border-top: 1px solid var(--line);
   }
   .spacer {
     flex: 1;
+  }
+
+  /* Tokyo Night pass: glass surface + neon focus ------------------------ */
+  .dialog {
+    background: var(--glass-tn-strong);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
+  }
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible {
+    outline: 2px solid var(--neon-violet);
+    outline-offset: 2px;
   }
 </style>
 

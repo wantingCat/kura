@@ -334,9 +334,20 @@ impl MpvInstance {
             inst.set_option_i64("wid", w)?;
         }
 
-        // Configure hardware decoding & clean embedded rendering
-        let _ = inst.set_option_string("vo", "gpu,gpu-next,direct3d,xv,x11");
-        let _ = inst.set_option_string("hwdec", "auto-safe");
+        // Configure hardware decoding & clean embedded rendering.
+        // On Windows, pin gpu-api=d3d11 + d3d11va so mpv skips slow OpenGL WGL driver
+        // probing (which can stall 400-900ms waking hybrid GPUs) and uses Direct3D 11 directly.
+        #[cfg(windows)]
+        {
+            let _ = inst.set_option_string("vo", "gpu,gpu-next,direct3d");
+            let _ = inst.set_option_string("gpu-api", "d3d11");
+            let _ = inst.set_option_string("hwdec", "d3d11va,auto-safe");
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = inst.set_option_string("vo", "gpu,gpu-next,xv,x11");
+            let _ = inst.set_option_string("hwdec", "auto-safe");
+        }
         let _ = inst.set_option_string("keep-open", "no");
         let _ = inst.set_option_string("idle", "yes");
         let _ = inst.set_option_string("osc", "no");
@@ -858,14 +869,45 @@ pub fn ensure_video_surface() -> Result<Option<i64>> {
     }
 }
 
+/// Keep the libmpv video surface glued behind Kura's main window.
+///
+/// IMPORTANT: this may be called from ANY thread (libmpv event loop, async commands,
+/// window events), but the actual Win32 work always runs on the main/UI thread.
+/// `WebviewWindow::hwnd()`, `SetWindowLongPtrW(main_hwnd, ...)` and
+/// `SetWindowPos(.., main_hwnd, ..)` all synchronously wait on the UI thread when called
+/// from a background thread. Doing that while holding a lock the UI thread also wants
+/// (the player runtime lock or `LAST_BOUNDS`) deadlocked the UI: the video kept playing
+/// in libmpv's own threads, but the window stopped responding.
+///
+/// Requests are coalesced: at most one job is queued on the main thread at a time, and
+/// it applies the most recently requested visibility.
 pub fn sync_surface_bounds(app: &tauri::AppHandle, active_and_visible: bool) {
     #[cfg(windows)]
     {
+        use std::sync::atomic::{AtomicBool, Ordering};
         use tauri::Manager;
-        if let Some(win) = app.get_webview_window("main") {
-            if let Ok(hwnd) = win.hwnd() {
-                win_surface::sync_surface_with_main(hwnd.0 as isize, active_and_visible);
+
+        static JOB_QUEUED: AtomicBool = AtomicBool::new(false);
+        static WANT_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+        WANT_ACTIVE.store(active_and_visible, Ordering::SeqCst);
+        if JOB_QUEUED.swap(true, Ordering::SeqCst) {
+            // A queued job will pick up the latest WANT_ACTIVE value.
+            return;
+        }
+
+        let app_main = app.clone();
+        let queued = app.run_on_main_thread(move || {
+            JOB_QUEUED.store(false, Ordering::SeqCst);
+            let active = WANT_ACTIVE.load(Ordering::SeqCst);
+            if let Some(win) = app_main.get_webview_window("main") {
+                if let Ok(hwnd) = win.hwnd() {
+                    win_surface::sync_surface_with_main(hwnd.0 as isize, active);
+                }
             }
+        });
+        if queued.is_err() {
+            JOB_QUEUED.store(false, Ordering::SeqCst);
         }
     }
     #[cfg(not(windows))]

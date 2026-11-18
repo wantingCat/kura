@@ -1849,6 +1849,13 @@ pub fn sync_discord_activity(st: &AppState, ep: &Ep, pos: f64, dur: f64, is_play
 
 /// Start playing an episode with the configured player. Returns immediately; tracking runs in the background.
 pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
+    {
+        let conn = st.db();
+        if prefs(&conn).kind == Kind::Builtin {
+            drop(conn);
+            return crate::embedded_player::start(app, st, ep);
+        }
+    }
     let (p, start, track_prefs, linked_subs) = {
         let conn = st.db();
         let p = prefs(&conn);
@@ -1862,9 +1869,6 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         );
         (p, start, track_prefs, linked_subs)
     };
-    if p.kind == Kind::Builtin {
-        return crate::embedded_player::start(app, st, ep);
-    }
     // Supersede any previous tracking session.
     let session = st.play_session.fetch_add(1, Ordering::SeqCst) + 1;
 

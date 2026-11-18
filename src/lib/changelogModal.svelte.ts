@@ -51,6 +51,11 @@ class ChangelogModalState {
   }
 
   async checkOnLaunch() {
+    // Browser-preview mode (vite dev outside Tauri) has no real app version or
+    // persisted prefs, so the popup would reopen on every load with a stale tab.
+    if (typeof window !== "undefined" && (window as unknown as { __KURA_PREVIEW__?: boolean }).__KURA_PREVIEW__) {
+      return;
+    }
     try {
       const currentVersion = await this.getAppVersion();
       const prefs = await api.getPrefs();

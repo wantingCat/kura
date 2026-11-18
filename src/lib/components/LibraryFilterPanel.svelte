@@ -163,7 +163,7 @@
   }
   .group {
     padding: 12px 0 14px;
-    border-top: 1.5px dashed var(--border);
+    border-top: 1px solid var(--line);
   }
   .group:first-of-type {
     border-top: 0;
@@ -229,7 +229,7 @@
     background: var(--coral);
     border-color: var(--line);
     color: var(--on-coral);
-    box-shadow: 2px 2px 0 var(--line);
+    box-shadow: var(--shadow-sm);
   }
   .n {
     font-size: 10.5px;
@@ -276,5 +276,12 @@
     color: var(--text);
     font: inherit;
     font-size: 12.5px;
+  }
+
+  /* Tokyo Night pass: glass surface + neon focus ------------------------ */
+  button:focus-visible,
+  input:focus-visible {
+    outline: 2px solid var(--neon-violet);
+    outline-offset: 2px;
   }
 </style>

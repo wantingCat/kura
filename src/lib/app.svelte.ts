@@ -39,8 +39,6 @@ export interface LaunchingEpisode {
   epKey: string;
 }
 
-export type AppTheme = "comic" | "manga";
-
 export interface Toast {
   id: number;
   kind: "info" | "warn" | "error";
@@ -71,8 +69,8 @@ class AppStore {
   version = $state(0);
   /** Show one card per franchise (seasons as tabs) instead of one per AniList entry. */
   groupSeasons = $state(true);
-  /** Current visual theme ("comic" = dark plum/coral, "manga" = light sumi/newsprint). */
-  theme = $state<AppTheme>("comic");
+  /** Tokyo Night Japanese accent layer (日本語アクセント): native titles, JP labels, kanji. */
+  japaneseAccents = $state(true);
   /** Library search, driven by the top bar. */
   query = $state("");
   playback = $state<PlaybackPrefs>({
@@ -135,12 +133,18 @@ class AppStore {
         }
       });
     }
+    if (typeof document !== "undefined") {
+      delete document.documentElement.dataset.theme;
+    }
     if (typeof localStorage !== "undefined") {
-      const localTheme = localStorage.getItem("kura-theme") as AppTheme | null;
-      if (localTheme === "manga" || localTheme === "comic") {
-        this.theme = localTheme;
-        this.applyTheme(this.theme);
+      try {
+        localStorage.removeItem("kura-theme");
+      } catch {}
+      const localJa = localStorage.getItem("kura-ja-accents");
+      if (localJa === "0" || localJa === "1") {
+        this.japaneseAccents = localJa === "1";
       }
+      this.#applyJapaneseAccents();
       try {
         const savedAlerts = localStorage.getItem("kura-alerts");
         if (savedAlerts) {
@@ -197,7 +201,7 @@ class AppStore {
         this.scheduleRefresh();
       }
     });
-    api.listTorrentSessions().then((list) => (this.torrentSessions = list)).catch(() => {});
+    api.listTorrentSessions().then((list) => (this.torrentSessions = Array.isArray(list) ? list : [])).catch(() => {});
     await events.onAnilistChanged((acct) => {
       const wasConnected = !!this.anilist?.connected;
       this.anilist = acct;
@@ -258,11 +262,11 @@ class AppStore {
   async loadPrefs() {
     try {
       const prefs = await api.getPrefs();
-      if (prefs.theme === "comic" || prefs.theme === "manga") {
-        this.theme = prefs.theme;
-        this.applyTheme(this.theme);
-      }
       this.groupSeasons = prefs.group_seasons !== "0";
+      if (prefs.ja_accents === "0" || prefs.ja_accents === "1") {
+        this.japaneseAccents = prefs.ja_accents === "1";
+        this.#applyJapaneseAccents();
+      }
       this.autoUpdate = prefs.auto_update !== "0";
       this.folderWatcher = prefs.folder_watcher !== "0";
       this.airingNotifications = prefs.airing_notifications !== "0";
@@ -334,38 +338,27 @@ class AppStore {
     await api.startScan(libraryId);
   }
 
-  async setTheme(t: AppTheme) {
-    this.theme = t;
-    this.applyTheme(t);
-    await api.setPref("theme", t);
-  }
-
-  applyTheme(t: AppTheme) {
-    if (typeof document !== "undefined") {
-      if (t === "manga") {
-        document.documentElement.dataset.theme = "manga";
-      } else {
-        delete document.documentElement.dataset.theme;
-      }
-      const metaTheme = document.querySelector('meta[name="theme-color"]');
-      if (metaTheme) {
-        metaTheme.setAttribute("content", t === "manga" ? "#f5f2eb" : "#1d1415");
-      }
-      const metaScheme = document.querySelector('meta[name="color-scheme"]');
-      if (metaScheme) {
-        metaScheme.setAttribute("content", t === "manga" ? "light" : "dark");
-      }
-    }
-    if (typeof localStorage !== "undefined") {
-      try {
-        localStorage.setItem("kura-theme", t);
-      } catch {}
-    }
-  }
-
   async setGroupSeasons(on: boolean) {
     this.groupSeasons = on;
     await api.setPref("group_seasons", on ? "1" : "0");
+  }
+
+  /** Toggle the Japanese accent layer (日本語アクセント). */
+  async setJapaneseAccents(on: boolean) {
+    this.japaneseAccents = on;
+    this.#applyJapaneseAccents();
+    await api.setPref("ja_accents", on ? "1" : "0");
+  }
+
+  #applyJapaneseAccents() {
+    if (typeof document !== "undefined") {
+      document.documentElement.classList.toggle("ja-off", !this.japaneseAccents);
+    }
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem("kura-ja-accents", this.japaneseAccents ? "1" : "0");
+      } catch {}
+    }
   }
 
   async setAutoUpdate(on: boolean) {

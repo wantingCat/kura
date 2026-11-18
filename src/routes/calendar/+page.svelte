@@ -4,6 +4,8 @@
   import { app } from "$lib/app.svelte";
   import { displayTitle, formatLabel, untilTime } from "$lib/format";
   import Icon from "$lib/components/Icon.svelte";
+  import Ja from "$lib/components/Ja.svelte";
+  import { JA, jaWeekday, jaWeekdayLong, enWeekdayShort, jaDate, jaTime, jaStatus, jaSeason } from "$lib/ja";
 
   const SEASONS = [
     { key: "WINTER", label: "Winter" },
@@ -139,12 +141,48 @@
     return d.getHours() * 60 + d.getMinutes();
   }
 
+  // Local time, 24-hour (Japanese TV-listing style), e.g. 23:30.
   function formatLocalTime(unixSec: number): string {
-    return new Date(unixSec * 1000).toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    return jaTime(new Date(unixSec * 1000));
   }
+
+  function startOfLocalDay(d: Date): Date {
+    const x = new Date(d);
+    x.setHours(0, 0, 0, 0);
+    return x;
+  }
+
+  /** Week columns start at TODAY and run for 7 days, each with its real date. */
+  const columns = $derived.by(() => {
+    void nowSec;
+    const t0 = startOfLocalDay(new Date());
+    return Array.from({ length: 7 }, (_, k) => {
+      const date = new Date(t0);
+      date.setDate(t0.getDate() + k);
+      const day = DAYS.find((d) => d.idx === date.getDay()) ?? DAYS[0];
+      return { ...day, date, offset: k };
+    });
+  });
+
+  /** Whole local days between today and the item's next airing (0 = today). */
+  function airingDayOffset(unixSec: number): number {
+    void nowSec;
+    const t0 = startOfLocalDay(new Date()).getTime();
+    const a = startOfLocalDay(new Date(unixSec * 1000)).getTime();
+    return Math.round((a - t0) / 86_400_000);
+  }
+
+  function enShortDate(d: Date): string {
+    return d.toLocaleDateString([], { month: "short", day: "numeric" });
+  }
+
+  const STATUS_EN: Record<string, string> = {
+    RELEASING: "Airing",
+    FINISHED: "Finished",
+    NOT_YET_RELEASED: "Not yet aired",
+    CANCELLED: "Cancelled",
+    HIATUS: "On hiatus",
+  };
 
   function itemDayOfWeek(item: SeasonalItem): number | null {
     if (item.nextAiringAt) {
@@ -193,6 +231,11 @@
   );
 
   const inLibraryCount = $derived((cal?.items ?? []).filter((i) => i.inLibrary).length);
+  const trackedCount = $derived(
+    (cal?.items ?? []).filter(
+      (i) => i.inLibrary || i.anilistStatus === "CURRENT" || i.anilistStatus === "PLANNING",
+    ).length,
+  );
   const airingCount = $derived(filteredItems.filter((i) => itemDayOfWeek(i) !== null).length);
   const timezoneName = Intl.DateTimeFormat().resolvedOptions().timeZone || "Local time";
 </script>
@@ -201,21 +244,22 @@
   <title>Seasonal Calendar · Kura</title>
 </svelte:head>
 
-<div class="page">
+<div class="page cal-page">
   <header class="cal-head">
+    <Ja text={JA.pages.calendar.ja} class="kanji-watermark" />
     <div class="title-block">
       <div class="kicker-row">
         <span class="badge badge-accent"><Icon name="calendar" size={11} /> Broadcast Schedule</span>
-        <span class="tz faint">{timezoneName}</span>
+        <span class="tz tn-label">{timezoneName}</span>
       </div>
-      <h1>Seasonal Airing Calendar</h1>
+      <h1>Seasonal Airing Calendar <Ja text={JA.pages.calendar.ja} class="ja-sub" /></h1>
       <p class="muted">
         Weekly broadcast schedule in your local timezone, with live episode countdowns and library highlights.
       </p>
     </div>
 
     <div class="controls">
-      <div class="season-picker card">
+      <div class="season-picker">
         <button class="btn btn-ghost btn-sm btn-icon" onclick={() => stepSeason(-1)} aria-label="Previous season" id="cal-prev">
           <Icon name="arrow-left" size={15} />
         </button>
@@ -227,7 +271,7 @@
               onclick={() => pickSeason(s.key)}
               id={`cal-season-${s.key.toLowerCase()}`}
             >
-              {s.label}
+              {s.label}<Ja text={jaSeason(s.key)} class="s-tab-ja" />
             </button>
           {/each}
         </div>
@@ -267,7 +311,7 @@
         In my library <span class="chip-count">{inLibraryCount}</span>
       </button>
       <button class="chip" class:active={scope === "tracked"} onclick={() => (scope = "tracked")} id="cal-scope-tracked">
-        Library & AniList
+        Library & AniList <span class="chip-count">{trackedCount}</span>
       </button>
     </div>
 
@@ -276,12 +320,12 @@
       <input
         class="input"
         bind:value={query}
-        placeholder="Filter calendar — title, studio, genre…"
-        aria-label="Filter calendar"
+        placeholder={app.japaneseAccents ? JA.placeholders.calendarFilter : "Filter calendar — title, studio, genre…"}
+        aria-label="Filter calendar by title, studio or genre"
         id="cal-filter-input"
       />
       {#if query}
-        <button class="clear-btn" onclick={() => (query = "")} aria-label="Clear"><Icon name="x" size={13} /></button>
+        <button class="clear-btn" onclick={() => (query = "")} aria-label="Clear filter"><Icon name="x" size={13} /></button>
       {/if}
     </label>
   </div>
@@ -293,11 +337,34 @@
     </div>
   {/if}
 
+  {#snippet dayHead(d: (typeof columns)[number], isToday: boolean, count: number | null)}
+    {@const date = d.date}
+    <header class="day-head">
+      <h3 class="day-mark" title={`${jaWeekdayLong(d.idx)} · ${d.name}`}>
+        <Ja text={jaWeekday(d.idx)} label={d.name} essential class="day-kanji" />
+        <span class="tn-label day-en ja-deco" aria-hidden="true">{enWeekdayShort(d.idx)}</span>
+      </h3>
+      <div class="day-meta">
+        {#if app.japaneseAccents}
+          <span class="day-long" lang="ja" aria-hidden="true">{jaWeekdayLong(d.idx)} <span lang="en">· {d.name}</span></span>
+        {/if}
+        <Ja text={jaDate(date)} label={enShortDate(date)} essential class="day-date" />
+      </div>
+      {#if isToday}
+        <span class="today-chip" title="Today">
+          <Ja text={JA.states.today} label="Today" essential />
+        </span>
+      {:else if count !== null}
+        <span class="day-count" title={`${count} shows`}>{count}</span>
+      {/if}
+    </header>
+  {/snippet}
+
   {#if loading}
-    <div class="week-grid">
-      {#each DAYS as d (d.idx)}
-        <div class="day-col card">
-          <div class="day-head"><h3>{d.name}</h3></div>
+    <div class="week-grid no-scrollbar">
+      {#each columns as d (d.idx)}
+        <div class="day-col" class:today={d.offset === 0}>
+          {@render dayHead(d, d.offset === 0, null)}
           <div class="skeleton item-skel"></div>
           <div class="skeleton item-skel"></div>
         </div>
@@ -305,40 +372,48 @@
     </div>
   {:else}
     {#if airingCount > 0}
-      <section class="week-grid" aria-label="Weekly broadcast schedule">
-        {#each DAYS as d (d.idx)}
+      <section class="week-grid no-scrollbar" aria-label="Weekly broadcast schedule, starting today">
+        {#each columns as d (d.idx)}
           {@const items = byDay.get(d.idx) ?? []}
-          {@const isToday = d.idx === todayJsDay}
-          <div class="day-col card" class:today={isToday} id={`cal-day-${d.short.toLowerCase()}`}>
-            <header class="day-head">
-              <h3>{d.name}</h3>
-              {#if isToday}
-                <span class="badge badge-accent">Today</span>
-              {:else}
-                <span class="day-count">{items.length}</span>
-              {/if}
-            </header>
+          {@const isToday = d.offset === 0}
+          <div
+            class="day-col"
+            class:today={isToday}
+            id={`cal-day-${d.short.toLowerCase()}`}
+            aria-current={isToday ? "date" : undefined}
+          >
+            {@render dayHead(d, isToday, items.length)}
 
             <div class="day-list">
               {#each items as item (item.anilistId)}
                 {@const cover = img(item.coverPath, item.coverUrl)}
                 {@const countdown = item.nextAiringAt ? untilTime(item.nextAiringAt) : null}
+                {@const nextWeek = item.nextAiringAt ? airingDayOffset(item.nextAiringAt) >= 7 : false}
                 {#snippet cardInner()}
                   <div class="thumb">
                     {#if cover}<img src={cover} alt="" loading="lazy" />{/if}
                     {#if item.nextAiringAt}
-                      <span class="time-pill">{formatLocalTime(item.nextAiringAt)}</span>
+                      <span class="time-pill" title="Local time">{formatLocalTime(item.nextAiringAt)}</span>
                     {/if}
                   </div>
                   <div class="body">
                     <div class="top-badges">
+                      {#if item.status === "RELEASING"}
+                        <span class="badge badge-air"><Ja text={jaStatus(item.status)} label="Airing" essential /></span>
+                      {/if}
                       {#if item.inLibrary}
                         <span class="badge badge-ok">In Library</span>
                       {:else if item.anilistStatus}
                         <span class="badge">{item.anilistStatus === "CURRENT" ? "Watching" : "Planning"}</span>
                       {/if}
+                      {#if nextWeek && item.nextAiringAt}
+                        <span class="badge badge-later" title={`Next airs ${enShortDate(new Date(item.nextAiringAt * 1000))}`}>
+                          <Ja text={`来週 ${jaDate(new Date(item.nextAiringAt * 1000))}`} label={`Next week, ${enShortDate(new Date(item.nextAiringAt * 1000))}`} essential />
+                        </span>
+                      {/if}
                       {#if item.nextAiringEpisode && countdown}
                         <span class="countdown">
+                          {#if item.nextAiringAt && item.nextAiringAt > nowSec}<Ja text={JA.states.next} class="next-chip" />{/if}
                           Ep {item.nextAiringEpisode}
                           {#if item.nextAiringAt && item.nextAiringAt > nowSec}
                             in {countdown}
@@ -349,9 +424,12 @@
                       {/if}
                     </div>
                     <h4 title={displayTitle(item)}>{displayTitle(item)}</h4>
+                    {#if item.titleNative && item.titleNative !== displayTitle(item)}
+                      <Ja text={item.titleNative} block class="native" />
+                    {/if}
                     <p class="sub faint">
                       {#if item.inLibrary}
-                        {item.ownedCount}{#if item.episodes}/{item.episodes}{/if} eps in library · {item.watchedCount} watched
+                        {item.ownedCount ?? 0}{#if item.episodes}/{item.episodes}{/if} eps in library · {item.watchedCount} watched
                       {:else}
                         {[formatLabel(item.format), item.studios[0], item.averageScore ? `★ ${item.averageScore}%` : null]
                           .filter(Boolean)
@@ -383,6 +461,7 @@
       <section class="unscheduled-block">
         <h2 class="section-title">
           {airingCount > 0 ? "Finished or TBA this season" : `${season} ${year} Lineup`}
+          <Ja text={jaSeason(season, year)} class="ja-sub" />
           <span class="count">{unscheduled.length}</span>
         </h2>
         <div class="unscheduled-grid">
@@ -400,11 +479,19 @@
                     <span class="badge">{item.anilistStatus === "CURRENT" ? "Watching" : item.anilistStatus}</span>
                   {/if}
                   {#if item.format}<span class="badge">{formatLabel(item.format)}</span>{/if}
+                  {#if item.status && jaStatus(item.status)}
+                    <span class="badge" class:badge-air={item.status === "RELEASING"}>
+                      <Ja text={jaStatus(item.status)} label={STATUS_EN[item.status] ?? item.status} essential />
+                    </span>
+                  {/if}
                 </div>
                 <h4 title={displayTitle(item)}>{displayTitle(item)}</h4>
+                {#if item.titleNative && item.titleNative !== displayTitle(item)}
+                  <Ja text={item.titleNative} block class="native" />
+                {/if}
                 <p class="faint">
                   {#if item.inLibrary}
-                    {item.ownedCount}{#if item.episodes}/{item.episodes}{/if} eps · {item.watchedCount} watched
+                    {item.ownedCount ?? 0}{#if item.episodes}/{item.episodes}{/if} eps · {item.watchedCount} watched
                   {:else}
                     {[item.studios[0], item.episodes ? `${item.episodes} eps` : null, item.averageScore ? `★ ${item.averageScore}%` : null]
                       .filter(Boolean)
@@ -415,7 +502,7 @@
             {/snippet}
 
             <a
-              class="cal-item card"
+              class="cal-item u-item"
               class:owned={item.inLibrary}
               class:external={!item.inLibrary}
               href={`/anime/${item.linkId}`}
@@ -436,13 +523,26 @@
 </div>
 
 <style>
+  /* Tokyo Night calendar — see design-system/kura-tokyo-night/pages/calendar.md */
+  .cal-page {
+    padding-top: calc(var(--nav-h) + var(--nav-inset) + 24px);
+  }
   .cal-head {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
     display: flex;
     align-items: flex-end;
     justify-content: space-between;
     gap: 20px;
     flex-wrap: wrap;
-    margin: 8px 0 22px;
+    margin: 0 0 26px;
+    padding-top: 12px;
+  }
+  .title-block,
+  .controls {
+    position: relative;
+    z-index: 1;
   }
   .kicker-row {
     display: flex;
@@ -451,12 +551,13 @@
     margin-bottom: 8px;
   }
   .tz {
-    font-size: 12px;
-    font-weight: 600;
+    color: var(--text-2);
   }
   .cal-head h1 {
+    font-family: var(--font);
     font-size: 34px;
-    font-weight: 600;
+    font-weight: 700;
+    letter-spacing: -0.02em;
   }
   .cal-head p {
     margin-top: 4px;
@@ -474,40 +575,54 @@
     align-items: center;
     gap: 6px;
     padding: 4px 6px;
-    border-radius: var(--r-md);
+    border-radius: var(--r-pill);
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
   }
   .season-tabs {
     display: inline-flex;
     gap: 3px;
   }
   .s-tab {
-    padding: 5px 10px;
-    border-radius: 8px;
-    border: 1.5px solid transparent;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 5px;
+    padding: 5px 12px;
+    border-radius: var(--r-pill);
+    border: 0;
     background: transparent;
     color: var(--text-2);
-    font-family: var(--font-display);
-    font-size: 13.5px;
+    font-family: var(--font);
+    font-size: 13px;
     font-weight: 600;
     cursor: pointer;
-    transition: all var(--t-fast) var(--ease);
+    transition:
+      color var(--t-fast) var(--ease),
+      background var(--t-fast) var(--ease);
+  }
+  .s-tab :global(.s-tab-ja) {
+    font-size: 11px;
+    opacity: 0.75;
   }
   .s-tab:hover {
     color: var(--text);
     background: var(--surface-2);
   }
   .s-tab.active {
-    background: var(--coral);
-    color: var(--on-coral);
-    border-color: var(--line);
-    box-shadow: 2px 2px 0 var(--line);
+    background: var(--primary);
+    color: var(--on-primary);
+  }
+  .s-tab:focus-visible {
+    outline: 2px solid var(--neon-violet);
+    outline-offset: 2px;
   }
   .year-label {
-    font-family: var(--font-display);
-    font-size: 15px;
+    font-family: var(--font-label);
+    font-size: 14px;
     font-weight: 700;
     padding: 0 6px;
     color: var(--text);
+    font-variant-numeric: tabular-nums;
   }
 
   .subbar {
@@ -524,10 +639,10 @@
     flex-wrap: wrap;
   }
   .chip-count {
-    font-family: var(--font);
+    font-family: var(--font-label);
     font-size: 11px;
     font-weight: 700;
-    color: var(--text-3);
+    color: var(--text-2);
   }
   .cal-search {
     position: relative;
@@ -537,97 +652,245 @@
   }
   .cal-search > :global(svg) {
     position: absolute;
-    left: 11px;
-    color: var(--text-3);
+    left: 12px;
+    color: var(--text-2);
     pointer-events: none;
   }
   .cal-search .input {
     width: 100%;
-    height: 34px;
-    padding-left: 32px;
-    padding-right: 28px;
+    height: 36px;
+    padding-left: 34px;
+    padding-right: 30px;
     font-size: 13px;
+    border: 0;
+    border-radius: var(--r-pill);
+    background: var(--surface);
+  }
+  .cal-search .input::placeholder {
+    font-family: var(--font-jp), var(--font);
+  }
+  .cal-search .input:focus {
+    background: var(--surface-2);
+    box-shadow:
+      0 0 0 2px var(--neon-violet),
+      var(--neon-glow);
   }
   .clear-btn {
     position: absolute;
-    right: 6px;
+    right: 7px;
     display: grid;
     place-items: center;
     width: 22px;
     height: 22px;
     border: 0;
-    border-radius: 5px;
+    border-radius: var(--r-pill);
     background: var(--surface-3);
     color: var(--text-2);
     cursor: pointer;
   }
 
+  /* Week grid ---------------------------------------------------------------- */
+  /* Below 1200px: one horizontally scrollable row of 7 days (snap). */
   .week-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-    gap: 16px;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(250px, 1fr);
+    gap: 14px;
     align-items: start;
     margin-bottom: 36px;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    padding-bottom: 6px;
+  }
+  .week-grid > .day-col {
+    scroll-snap-align: start;
+  }
+  /* Desktop: a single 7-column week. */
+  @media (min-width: 1200px) {
+    .week-grid {
+      grid-auto-flow: row;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      grid-auto-columns: auto;
+      gap: 10px;
+      overflow-x: visible;
+      scroll-snap-type: none;
+    }
+    .day-col {
+      padding: 10px;
+    }
+    .cal-item {
+      gap: 8px;
+      padding: 7px;
+    }
+    .thumb {
+      width: 44px;
+      height: 64px;
+    }
+    .day-mark :global(.day-kanji) {
+      font-size: 26px;
+    }
+    .day-head {
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    h4 {
+      font-size: 13px;
+    }
   }
   .day-col {
+    position: relative;
     padding: 14px;
     display: flex;
     flex-direction: column;
     gap: 10px;
+    border-radius: var(--r-md);
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+    transition: box-shadow var(--t-med) var(--ease);
   }
   .day-col.today {
-    border-color: var(--coral);
-    box-shadow: 5px 5px 0 var(--coral);
+    background: color-mix(in srgb, var(--neon-violet) 7%, var(--surface));
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--neon-violet) 45%, transparent),
+      var(--neon-glow);
   }
   .day-head {
+    position: relative;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding-bottom: 8px;
-    border-bottom: 1.5px dashed var(--border);
+    gap: 12px;
+    padding-bottom: 12px;
   }
-  .day-head h3 {
+  /* Thin divider (not a card border) — becomes a neon underline on today. */
+  .day-head::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 1px;
+    background: var(--line);
+    border-radius: 99px;
+  }
+  .day-col.today .day-head::after {
+    height: 2px;
+    background: var(--neon);
+    box-shadow: 0 0 10px rgba(244, 114, 182, 0.55);
+  }
+  .day-mark {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 44px;
+    margin: 0;
+    line-height: 1;
+  }
+  .day-mark :global(.day-kanji) {
+    font-size: 30px;
+    font-weight: 700;
+    line-height: 1.05;
+    color: var(--text);
+  }
+  /* English fallback when accents are off keeps a sane size. */
+  .day-mark :global(.day-kanji:not(.ja)) {
+    font-family: var(--font);
     font-size: 17px;
+    font-weight: 700;
+  }
+  .day-col.today .day-mark :global(.day-kanji) {
+    text-shadow: 0 0 18px rgba(139, 92, 246, 0.6);
+  }
+  .day-en {
+    margin-top: 4px;
+    font-size: 10px;
+  }
+  .day-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+  }
+  .day-long {
+    font-size: 13px;
     font-weight: 600;
+    color: var(--text);
+  }
+  .day-long span {
+    font-family: var(--font);
+    color: var(--text-2);
+    font-weight: 500;
+  }
+  .day-meta :global(.day-date) {
+    font-size: 12px;
+    color: var(--text-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .today-chip {
+    display: inline-flex;
+    align-items: center;
+    height: 22px;
+    padding: 0 9px;
+    border-radius: var(--r-pill);
+    background: var(--cta);
+    color: var(--on-cta);
+    font-size: 11.5px;
+    font-weight: 700;
+    box-shadow: 0 0 14px rgba(190, 24, 93, 0.35);
   }
   .day-count {
+    font-family: var(--font-label);
     font-size: 12px;
     font-weight: 700;
-    color: var(--text-3);
+    color: var(--text-2);
+    min-width: 22px;
+    text-align: center;
   }
 
   .day-list {
     display: flex;
     flex-direction: column;
-    gap: 9px;
+    gap: 8px;
   }
   .cal-item {
     display: flex;
     gap: 11px;
     padding: 9px;
     border-radius: var(--r-md);
-    border: 1.5px solid var(--border-strong);
-    background: var(--bg-elev);
+    border: 0;
+    background: var(--surface-2);
     color: var(--text);
     text-align: left;
     cursor: pointer;
     min-width: 0;
+    text-decoration: none;
     transition:
-      transform var(--t-fast) var(--ease),
-      border-color var(--t-fast) var(--ease),
-      box-shadow var(--t-fast) var(--ease);
+      transform var(--t-med) var(--ease),
+      background var(--t-med) var(--ease),
+      box-shadow var(--t-med) var(--ease);
   }
   .cal-item:hover {
-    transform: translate(-2px, -2px);
-    border-color: var(--line);
-    box-shadow: 3px 3px 0 var(--line);
+    transform: translateY(-2px);
+    background: var(--surface-3);
+    box-shadow: var(--neon-glow);
+  }
+  .cal-item:focus-visible {
+    outline: 2px solid var(--neon-violet);
+    outline-offset: 2px;
+    box-shadow: var(--neon-glow);
   }
   .cal-item.owned {
-    border-color: var(--ok);
-    background: color-mix(in srgb, var(--ok) 8%, var(--bg-elev));
+    background: color-mix(in srgb, var(--ok) 7%, var(--surface-2));
+    box-shadow: inset 3px 0 0 var(--ok);
   }
   .cal-item.owned:hover {
-    box-shadow: 3px 3px 0 var(--ok);
+    box-shadow:
+      inset 3px 0 0 var(--ok),
+      var(--neon-glow);
+  }
+  .u-item {
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
   }
 
   .thumb,
@@ -636,10 +899,9 @@
     width: 56px;
     height: 80px;
     flex: none;
-    border-radius: 7px;
-    border: 1.5px solid var(--line);
+    border-radius: 8px;
     overflow: hidden;
-    background: var(--surface-2);
+    background: var(--surface-3);
   }
   .thumb img,
   .u-cover img {
@@ -653,11 +915,12 @@
     right: 3px;
     bottom: 3px;
     padding: 1px 4px;
-    border-radius: 5px;
-    background: color-mix(in srgb, var(--line) 88%, transparent);
-    color: var(--cream);
-    font-size: 10px;
-    font-weight: 800;
+    border-radius: 6px;
+    background: rgba(8, 9, 16, 0.82);
+    color: #f4f2ff;
+    font-family: var(--font-label);
+    font-size: 11px;
+    font-weight: 700;
     text-align: center;
     font-variant-numeric: tabular-nums;
   }
@@ -676,13 +939,33 @@
     gap: 5px;
     flex-wrap: wrap;
   }
+  .badge-later {
+    background: var(--surface-3);
+    color: var(--text-2);
+    letter-spacing: 0.02em;
+    text-transform: none;
+  }
+  .badge-air {
+    background: color-mix(in srgb, var(--neon-pink) 16%, var(--surface-3));
+    color: var(--neon-pink);
+    letter-spacing: 0.02em;
+  }
   .countdown {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-size: 11px;
-    font-weight: 800;
-    color: var(--coral);
+    font-weight: 700;
+    color: var(--coral-hi);
+  }
+  .countdown :global(.next-chip) {
+    padding: 0 5px;
+    border-radius: var(--r-pill);
+    background: color-mix(in srgb, var(--neon-violet) 20%, transparent);
+    font-size: 10.5px;
   }
   h4 {
-    font-family: var(--font-display);
+    font-family: var(--font);
     font-size: 14px;
     font-weight: 600;
     line-height: 1.25;
@@ -693,9 +976,18 @@
     overflow: hidden;
     overflow-wrap: anywhere;
   }
+  .body :global(.native),
+  .u-body :global(.native) {
+    font-size: 11.5px;
+    color: var(--text-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .sub {
     font-size: 11.5px;
     line-height: 1.35;
+    color: var(--text-2);
     display: -webkit-box;
     -webkit-line-clamp: 2;
     line-clamp: 2;
@@ -706,6 +998,7 @@
     padding: 16px 6px;
     text-align: center;
     font-size: 12.5px;
+    color: var(--text-2);
   }
 
   .unscheduled-block {
@@ -727,8 +1020,7 @@
     padding: 12px 16px;
     margin-bottom: 18px;
     border-radius: var(--r-md);
-    border: var(--bw) solid var(--line);
-    border-left: 8px solid var(--danger);
+    box-shadow: inset 4px 0 0 var(--danger);
     background: var(--surface);
     color: var(--danger);
   }
@@ -740,5 +1032,12 @@
     padding: 50px 20px;
     text-align: center;
   }
-</style>
 
+  @media (prefers-reduced-motion: reduce) {
+    .cal-item,
+    .cal-item:hover {
+      transform: none;
+      transition: none;
+    }
+  }
+</style>

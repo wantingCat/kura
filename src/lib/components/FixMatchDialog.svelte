@@ -159,7 +159,7 @@
     background: var(--bg-elev);
     border: var(--bw) solid var(--line);
     border-radius: var(--r-xl);
-    box-shadow: 6px 6px 0 var(--coral);
+    box-shadow: var(--sticker-lg), var(--neon-glow);
     animation: pop 340ms var(--bounce);
   }
   @keyframes pop {
@@ -240,7 +240,7 @@
     height: 78px;
     flex: none;
     border-radius: 8px;
-    border: 1.5px solid var(--line);
+    border: 1px solid transparent;
     overflow: hidden;
     background: var(--surface-2);
   }
@@ -287,5 +287,18 @@
   .empty {
     padding: 30px;
     text-align: center;
+  }
+
+  /* Tokyo Night pass: glass surface + neon focus ------------------------ */
+  .dialog {
+    background: var(--glass-tn-strong);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
+  }
+  button:focus-visible,
+  input:focus-visible {
+    outline: 2px solid var(--neon-violet);
+    outline-offset: 2px;
   }
 </style>

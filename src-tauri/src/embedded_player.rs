@@ -171,6 +171,7 @@ struct RuntimeSession {
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static RUNTIME: OnceLock<Mutex<RuntimeSession>> = OnceLock::new();
 static MPV_EVENT_LOOP_STARTED: OnceLock<()> = OnceLock::new();
+static MPV_INIT_LOCK: Mutex<()> = Mutex::new(());
 
 fn runtime() -> &'static Mutex<RuntimeSession> {
     RUNTIME.get_or_init(|| {
@@ -221,6 +222,16 @@ fn ensure_mpv(app: &AppHandle, st: &Arc<AppState>) -> Result<MpvInstance> {
         }
     }
 
+    // Serialize cold libmpv + Win32 surface init so background warm-up and an immediate
+    // Play click coalesce into one initialization instead of racing.
+    let _init_guard = MPV_INIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    {
+        let g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mpv) = g.mpv {
+            return Ok(mpv);
+        }
+    }
+
     let wid = libmpv::ensure_video_surface()?;
     let mpv = MpvInstance::new(wid)?;
     {
@@ -238,6 +249,18 @@ fn ensure_mpv(app: &AppHandle, st: &Arc<AppState>) -> Result<MpvInstance> {
     });
 
     Ok(mpv)
+}
+
+/// Pre-warm `libmpv` and the hidden Win32 video surface in the background after app startup
+/// so the first episode Play opens immediately with zero DLL/GPU driver cold-start latency.
+pub fn warm_up(app: AppHandle, st: Arc<AppState>) {
+    let use_builtin = player::prefs(&st.db()).kind == Kind::Builtin;
+    if !use_builtin {
+        return;
+    }
+    if let Err(e) = ensure_mpv(&app, &st) {
+        klog!("[libmpv] background warm-up skipped: {e}");
+    }
 }
 
 fn clean_mpv_sub_text(raw: &str) -> String {
@@ -446,20 +469,27 @@ fn refresh_tracks_and_chapters_from_mpv(mpv: &MpvInstance, g: &mut RuntimeSessio
 }
 
 fn run_mpv_event_loop(app: AppHandle, st: Arc<AppState>, mpv: MpvInstance) {
+    let mut last_surface_sync: Option<Instant> = None;
     loop {
         let ev_ptr = mpv.wait_event(0.20);
+
+        // Periodically keep the video surface aligned with the main window.
+        // Read `active` and RELEASE the runtime lock before syncing (never hold it across
+        // anything that touches the UI thread), and throttle to ~4x/sec instead of every event.
+        if last_surface_sync
+            .map(|t| t.elapsed().as_millis() >= 250)
+            .unwrap_or(true)
+        {
+            last_surface_sync = Some(Instant::now());
+            let active = runtime().lock().unwrap_or_else(|e| e.into_inner()).state.active;
+            libmpv::sync_surface_bounds(&app, active);
+        }
+
         if ev_ptr.is_null() {
             continue;
         }
         let ev = unsafe { &*ev_ptr };
         let event_id = ev.event_id;
-
-        {
-            let g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-            if g.state.active {
-                libmpv::sync_surface_bounds(&app, true);
-            }
-        }
 
         if event_id == MPV_EVENT_NONE {
             continue;
@@ -796,6 +826,27 @@ pub fn reload_cues_if_active(anilist_id: i64, ep_key: &str, sub_path: &str) -> b
     if cues.is_empty() {
         return false;
     }
+
+    // Heavy MKV audio/sub scan must NOT run while holding the runtime lock (it would block
+    // the libmpv event loop and every UI call that reads player state for seconds).
+    let (is_target, user_adjusted, play_path) = {
+        let g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+        (
+            g.state.active && g.state.anilist_id == anilist_id && g.state.ep_key == ep_key,
+            g.user_adjusted_offset,
+            g.state.path.clone(),
+        )
+    };
+    if !is_target {
+        return false;
+    }
+    let precomputed_offset = if user_adjusted {
+        None
+    } else {
+        resolve_mkv_disk_path(anilist_id, ep_key, &play_path)
+            .and_then(|mkv_path| subtitles::compute_live_mkv_cue_offset_sec(&cues, &mkv_path))
+    };
+
     let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
     if g.state.active && g.state.anilist_id == anilist_id && g.state.ep_key == ep_key {
         g.state.external_sub_path = Some(sub_path.to_string());
@@ -849,15 +900,9 @@ pub fn reload_cues_if_active(anilist_id: i64, ep_key: &str, sub_path: &str) -> b
             }
             if !g.user_adjusted_offset {
                 g.auto_aligned_offset = false;
-                if let Some(mkv_path) =
-                    resolve_mkv_disk_path(anilist_id, ep_key, &g.state.path)
-                {
-                    if let Some(off_sec) =
-                        subtitles::compute_live_mkv_cue_offset_sec(&cues, &mkv_path)
-                    {
-                        g.auto_aligned_offset = true;
-                        g.state.sub_offset_sec = off_sec;
-                    }
+                if let Some(off_sec) = precomputed_offset {
+                    g.auto_aligned_offset = true;
+                    g.state.sub_offset_sec = off_sec;
                 }
             }
             let pos = g.state.position;
@@ -1072,8 +1117,7 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         show_title,
         episode_title,
         has_next,
-        ext_sub_path,
-        ext_cues,
+        candidate_sub_paths,
         track_prefs,
         today_immersion_sec,
         prev_volume,
@@ -1089,8 +1133,8 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         };
         let (show_title, episode_title) = resolve_titles(&conn, ep.anilist_id, &ep.ep_key);
         let has_next = player::next_episode(&conn, &ep).is_some();
-        let (ext_sub_path, ext_cues) =
-            subtitles::load_cues_for_episode(&conn, ep.anilist_id, &ep.ep_key, &ep.path);
+        let candidate_sub_paths =
+            subtitles::candidate_subtitle_paths_for_episode(&conn, ep.anilist_id, &ep.ep_key);
         let track_prefs = player::effective_track_prefs(&conn, ep.anilist_id);
         let today_sec: i64 = conn
             .query_row(
@@ -1110,57 +1154,13 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             show_title,
             episode_title,
             has_next,
-            ext_sub_path,
-            ext_cues,
+            candidate_sub_paths,
             track_prefs,
             today_sec,
             vol,
             muted,
         )
     };
-
-    // Seed starter Japanese dictionary in background so first hover is instant
-    let st_dict = st.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        if let Ok(conn) = crate::dictionary::open_dict_db(&st_dict.data_dir) {
-            let _ = crate::dictionary::ensure_starter_dictionary(&conn);
-        }
-    });
-
-    let mut sub_tracks = Vec::new();
-    let mut cues_by_track = HashMap::new();
-    let mut active_sid = None;
-    let mut initial_sub_text = String::new();
-    let mut initial_cues = Vec::new();
-
-    if !ext_cues.is_empty() {
-        let file_label = ext_sub_path
-            .as_deref()
-            .and_then(|p| Path::new(p).file_name())
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "External Subtitle".to_string());
-        let ext_lang =
-            subtitles::detect_sub_language(&file_label).unwrap_or_else(|| "ja".to_string());
-        let select_ext = match track_prefs.sub.as_deref() {
-            Some(pref) => player::lang_matches_code(&ext_lang, Some(&file_label), pref),
-            None => true,
-        };
-        sub_tracks.push(TrackItem {
-            id: EXTERNAL_SUB_TRACK_ID,
-            track_type: "sub".to_string(),
-            title: Some(file_label),
-            lang: Some(ext_lang),
-            codec: Some("external".to_string()),
-            selected: select_ext,
-            external: true,
-        });
-        cues_by_track.insert(EXTERNAL_SUB_TRACK_ID, ext_cues.clone());
-        if select_ext {
-            active_sid = Some(EXTERNAL_SUB_TRACK_ID);
-            initial_sub_text = find_cue_at(&ext_cues, start_pos, 0.0).unwrap_or_default();
-            initial_cues = ext_cues;
-        }
-    }
 
     let initial_state = BuiltinPlayerState {
         active: true,
@@ -1179,26 +1179,26 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         muted: prev_muted,
         speed: 1.0,
         aid: None,
-        sid: active_sid,
-        sub_text: initial_sub_text,
+        sid: None,
+        sub_text: String::new(),
         sub_offset_sec: 0.0,
         audio_tracks: Vec::new(),
-        sub_tracks,
+        sub_tracks: Vec::new(),
         chapters: Vec::new(),
         op_start: None,
         op_end: None,
         ed_start: None,
         ed_end: None,
         has_next_episode: has_next,
-        external_sub_path: ext_sub_path,
+        external_sub_path: None,
         today_immersion_sec,
     };
 
     {
         let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
         g.state = initial_state.clone();
-        g.cues = initial_cues;
-        g.cues_by_track = cues_by_track;
+        g.cues = Vec::new();
+        g.cues_by_track = HashMap::new();
         g.threshold = threshold;
         g.autoplay = autoplay;
         g.marked_watched = false;
@@ -1214,18 +1214,81 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         g.last_emit_at = None;
     }
 
-    // Attach and synchronize the Win32 hardware surface window behind Kura's main window
+    // Open the player HUD & reveal the Win32 hardware surface immediately before any
+    // filesystem subtitle parsing or Discord RPC work.
     libmpv::sync_surface_bounds(&app, true);
     emit_state(&app, &initial_state);
-    player::sync_discord_activity(&st, &ep, start_pos, 0.0, true);
 
-    // Load file into native libmpv
+    // Load file into native libmpv right away so demux + D3D11 decode start immediately.
     let _ = mpv.set_property_double("volume", prev_volume);
     let _ = mpv.set_property_bool("mute", prev_muted);
     let _ = mpv.set_property_double("speed", 1.0);
     let _ = mpv.set_property_double("sub-delay", 0.0);
     let _ = mpv.set_property_bool("pause", false);
     mpv.command(&["loadfile", &ep.path, "replace"])?;
+
+    // Parse external subtitle cues (.ass/.srt) & update Discord Rich Presence in parallel
+    // without blocking player open or video decode startup.
+    let app_bg = app.clone();
+    let st_bg = st.clone();
+    let ep_bg = ep.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (ext_sub_path, ext_cues) =
+            subtitles::load_cues_from_candidates(candidate_sub_paths, &ep_bg.path);
+        if !ext_cues.is_empty() && SESSION_COUNTER.load(Ordering::SeqCst) == session_id {
+            let file_label = ext_sub_path
+                .as_deref()
+                .and_then(|p| Path::new(p).file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "External Subtitle".to_string());
+            let ext_lang =
+                subtitles::detect_sub_language(&file_label).unwrap_or_else(|| "ja".to_string());
+
+            let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+            if g.state.active && SESSION_COUNTER.load(Ordering::SeqCst) == session_id {
+                g.state.external_sub_path = ext_sub_path;
+                g.cues_by_track
+                    .insert(EXTERNAL_SUB_TRACK_ID, ext_cues.clone());
+                if !g
+                    .state
+                    .sub_tracks
+                    .iter()
+                    .any(|t| t.id == EXTERNAL_SUB_TRACK_ID)
+                {
+                    g.state.sub_tracks.insert(
+                        0,
+                        TrackItem {
+                            id: EXTERNAL_SUB_TRACK_ID,
+                            track_type: "sub".to_string(),
+                            title: Some(file_label),
+                            lang: Some(ext_lang),
+                            codec: Some("external".to_string()),
+                            selected: false,
+                            external: true,
+                        },
+                    );
+                }
+                if !g.user_selected_sub_track {
+                    let chosen_sid = pick_best_sub_track_id(&g.state.sub_tracks, &g.track_prefs);
+                    for tr in &mut g.state.sub_tracks {
+                        tr.selected = Some(tr.id) == chosen_sid;
+                    }
+                    g.state.sid = chosen_sid;
+                    if let Some(ref mpv_inst) = g.mpv {
+                        apply_sub_track_to_mpv(mpv_inst, &g.state.sub_tracks, chosen_sid);
+                    }
+                    if chosen_sid == Some(EXTERNAL_SUB_TRACK_ID) {
+                        let pos = g.state.position;
+                        let off = g.state.sub_offset_sec;
+                        g.state.sub_text = find_cue_at(&ext_cues, pos, off).unwrap_or_default();
+                        g.cues = ext_cues;
+                    }
+                }
+                emit_state(&app_bg, &g.state);
+            }
+        }
+        player::sync_discord_activity(&st_bg, &ep_bg, start_pos, 0.0, true);
+    });
 
     // Query AniSkip in parallel
     let app_srv = app.clone();

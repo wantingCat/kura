@@ -4,6 +4,11 @@
   import { displayTitle, formatLabel } from "$lib/format";
   import Icon from "$lib/components/Icon.svelte";
   import FixMatchDialog from "$lib/components/FixMatchDialog.svelte";
+  import Ja from "$lib/components/Ja.svelte";
+  import { JA } from "$lib/ja";
+
+  // Local accent vocabulary for this page (not in $lib/ja.ts).
+  const JA_REVIEW = { unmatched: "未照合", lowConfidence: "要確認", allClear: "完了" } as const;
 
   let fixing = $state<{ query: string; groupId?: number; fromAnilistId?: number; subtitle: string } | null>(null);
   const uncertain = $derived(app.cards.filter((c) => c.needsReview));
@@ -11,26 +16,27 @@
 
 <svelte:head><title>Needs review · Kura</title></svelte:head>
 
-<div class="page">
+<div class="page review-page">
   <header class="head">
-    <h1>Needs review</h1>
+    <Ja text={JA.pages.review.ja} class="kanji-watermark" />
+    <h1>Needs review <Ja text={JA.pages.review.ja} class="ja-sub" /></h1>
     <p class="muted">Folders Kura couldn't identify, and matches it isn't sure about. Fix them once and Kura keeps your choice.</p>
   </header>
 
   {#if app.unmatched.length === 0 && uncertain.length === 0}
     <div class="empty">
       <img class="mascot" src="/brand/cat.png" alt="" width="150" />
-      <h2>All clear</h2>
+      <h2>All clear <Ja text={JA_REVIEW.allClear} class="ja-sub" /></h2>
       <p class="muted">Every folder has been matched.</p>
     </div>
   {/if}
 
   {#if app.unmatched.length > 0}
     <section class="block">
-      <h2 class="section-title">Unmatched <span class="count">{app.unmatched.length}</span></h2>
+      <h2 class="section-title">Unmatched <Ja text={JA_REVIEW.unmatched} class="ja-sub" /> <span class="count">{app.unmatched.length}</span></h2>
       <div class="list">
         {#each app.unmatched as g, i (g.id)}
-          <div class="item card" style:--i={i}>
+          <div class="item" style:--i={i}>
             <div class="icon warn"><Icon name="folder" size={20} /></div>
             <div class="info">
               <strong>{g.displayName}</strong>
@@ -57,14 +63,17 @@
 
   {#if uncertain.length > 0}
     <section class="block">
-      <h2 class="section-title">Low confidence <span class="count">{uncertain.length}</span></h2>
+      <h2 class="section-title">Low confidence <Ja text={JA_REVIEW.lowConfidence} class="ja-sub" /> <span class="count">{uncertain.length}</span></h2>
       <div class="list">
         {#each uncertain as m, i (m.anilistId)}
           {@const cover = img(m.coverPath, m.coverUrl)}
-          <div class="item card" style:--i={i}>
-            <a class="cover" href={`/anime/${m.anilistId}`}>{#if cover}<img src={cover} alt="" />{/if}</a>
+          <div class="item" style:--i={i}>
+            <a class="cover" href={`/anime/${m.anilistId}`} aria-label={displayTitle(m)} tabindex="-1">{#if cover}<img src={cover} alt="" loading="lazy" decoding="async" />{/if}</a>
             <div class="info">
               <a href={`/anime/${m.anilistId}`}><strong>{displayTitle(m)}</strong></a>
+              {#if m.titleNative && m.titleNative !== displayTitle(m)}
+                <Ja text={m.titleNative} block class="native" />
+              {/if}
               <span class="faint">{[formatLabel(m.format), m.seasonYear, `${m.ownedCount} files`].filter(Boolean).join(" · ")}</span>
             </div>
             <button
@@ -96,12 +105,25 @@
 {/if}
 
 <style>
+  .review-page {
+    padding-top: calc(var(--nav-h) + var(--nav-inset) + 24px);
+  }
   .head {
-    margin: 12px 0 32px;
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+    margin: 0 0 32px;
+    padding-top: 12px;
+  }
+  .head > h1,
+  .head > p {
+    position: relative;
+    z-index: 1;
   }
   .head h1 {
     font-size: 34px;
-    font-weight: 600;
+    font-weight: 700;
+    letter-spacing: -0.02em;
   }
   .head p {
     margin-top: 6px;
@@ -120,8 +142,16 @@
     align-items: center;
     gap: 16px;
     padding: 14px 16px;
+    border-radius: var(--r-md);
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
     animation: fade-up 360ms var(--ease) both;
     animation-delay: calc(var(--i) * 30ms);
+    transition: background var(--t-med) var(--ease), box-shadow var(--t-med) var(--ease);
+  }
+  .item:hover,
+  .item:focus-within {
+    background: var(--surface-2);
   }
   .icon {
     width: 44px;
@@ -132,17 +162,14 @@
     border-radius: var(--r-md);
   }
   .icon.warn {
-    border: var(--bw) solid var(--line);
-    background: var(--amber);
-    color: var(--on-coral);
-    box-shadow: 2px 2px 0 var(--line);
+    background: color-mix(in srgb, var(--amber) 16%, var(--surface-2));
+    color: var(--amber);
   }
   .cover {
     width: 44px;
     height: 64px;
     flex: none;
     border-radius: 8px;
-    border: 1.5px solid var(--line);
     overflow: hidden;
     background: var(--surface-2);
   }
@@ -163,10 +190,20 @@
     overflow-wrap: anywhere;
   }
   .info a:hover strong {
-    color: var(--coral);
+    color: var(--coral-hi);
+  }
+  .info a:focus-visible {
+    outline: 2px solid var(--neon-violet);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  .info :global(.native) {
+    font-size: 12px;
+    color: var(--text-2);
   }
   .info .faint {
     font-size: 12.5px;
+    color: var(--text-2);
     overflow-wrap: anywhere;
   }
   .samples {
@@ -197,5 +234,10 @@
   }
   .empty h2 {
     font-size: 24px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .item {
+      animation: none;
+    }
   }
 </style>

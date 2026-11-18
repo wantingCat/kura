@@ -337,24 +337,26 @@
     max-height: 340px;
     display: flex;
     flex-direction: column;
-    background: rgba(20, 12, 13, 0.96);
-    backdrop-filter: blur(18px);
-    border: 1px solid rgba(244, 162, 97, 0.35);
+    background: rgba(14, 16, 26, 0.94);
+    backdrop-filter: blur(20px) saturate(140%);
+    -webkit-backdrop-filter: blur(20px) saturate(140%);
+    font-family: var(--font-jp, "Noto Sans JP"), var(--font, system-ui), sans-serif;
+    border: 1px solid rgba(139, 92, 246, 0.35);
     border-radius: 12px;
     box-shadow:
       0 20px 50px rgba(0, 0, 0, 0.78),
-      0 0 0 1px rgba(255, 255, 255, 0.05);
-    color: #f7ede2;
+      0 0 24px rgba(139, 92, 246, 0.25);
+    color: #f4f2ff;
     overflow: hidden;
     user-select: text;
     animation: yt-pop 110ms cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .yomitan-popup.pinned {
-    border-color: rgba(231, 111, 81, 0.75);
+    border-color: rgba(139, 92, 246, 0.75);
     box-shadow:
       0 22px 56px rgba(0, 0, 0, 0.85),
-      0 0 0 1px rgba(231, 111, 81, 0.35);
+      0 0 0 1px rgba(139, 92, 246, 0.35);
   }
 
   @keyframes yt-pop {
@@ -386,7 +388,7 @@
   .yt-tab {
     background: transparent;
     border: none;
-    color: rgba(247, 237, 226, 0.6);
+    color: rgba(244, 242, 255, 0.6);
     font-size: 12px;
     font-weight: 600;
     padding: 4px 9px;
@@ -399,13 +401,13 @@
   }
 
   .yt-tab:hover {
-    color: #f7ede2;
+    color: #f4f2ff;
     background: rgba(255, 255, 255, 0.06);
   }
 
   .yt-tab.active {
     color: #140c0d;
-    background: #f4a261;
+    background: #f472b6;
   }
 
   .yt-tab .badge {
@@ -423,13 +425,13 @@
 
   .pin-hint {
     font-size: 11px;
-    color: rgba(247, 237, 226, 0.5);
+    color: rgba(244, 242, 255, 0.5);
   }
 
   .yt-close {
     background: rgba(255, 255, 255, 0.08);
     border: none;
-    color: #f7ede2;
+    color: #f4f2ff;
     width: 22px;
     height: 22px;
     border-radius: 6px;
@@ -440,7 +442,7 @@
   }
 
   .yt-close:hover {
-    background: rgba(231, 111, 81, 0.35);
+    background: rgba(139, 92, 246, 0.35);
   }
 
   .yt-body {
@@ -483,7 +485,7 @@
   .yt-headword rt {
     font-size: 11px;
     font-weight: 500;
-    color: #f4a261;
+    color: #f472b6;
   }
 
   .yt-actions {
@@ -501,20 +503,20 @@
     padding: 2px 6px;
     border-radius: 99px;
     background: rgba(255, 255, 255, 0.08);
-    color: rgba(247, 237, 226, 0.78);
+    color: rgba(244, 242, 255, 0.78);
     border: 1px solid rgba(255, 255, 255, 0.12);
   }
 
   .yt-lookup-badge.hot {
-    background: rgba(244, 162, 97, 0.22);
-    color: #f4a261;
-    border-color: rgba(244, 162, 97, 0.48);
+    background: rgba(244, 114, 182, 0.22);
+    color: #f472b6;
+    border-color: rgba(244, 114, 182, 0.48);
   }
 
   .yt-status-pill {
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid rgba(255, 255, 255, 0.12);
-    color: rgba(247, 237, 226, 0.72);
+    color: rgba(244, 242, 255, 0.72);
     font-size: 11px;
     font-weight: 700;
     padding: 3px 8px;
@@ -530,9 +532,9 @@
   }
 
   .yt-status-pill.learning.active {
-    background: rgba(231, 111, 81, 0.24);
-    border-color: rgba(231, 111, 81, 0.65);
-    color: #ff9b82;
+    background: rgba(139, 92, 246, 0.24);
+    border-color: rgba(139, 92, 246, 0.65);
+    color: #c4b5fd;
   }
 
   .yt-status-pill.known.active {
@@ -544,13 +546,13 @@
   .yt-status-pill.ignored.active {
     background: rgba(255, 255, 255, 0.16);
     border-color: rgba(255, 255, 255, 0.35);
-    color: rgba(247, 237, 226, 0.9);
+    color: rgba(244, 242, 255, 0.9);
   }
 
   .yt-icon-btn {
     background: rgba(255, 255, 255, 0.07);
     border: 1px solid rgba(255, 255, 255, 0.1);
-    color: #f7ede2;
+    color: #f4f2ff;
     width: 28px;
     height: 26px;
     border-radius: 6px;
@@ -572,17 +574,17 @@
   }
 
   .matched-surface {
-    color: rgba(247, 237, 226, 0.65);
+    color: rgba(244, 242, 255, 0.65);
   }
 
   .reason-arrow {
-    color: rgba(247, 237, 226, 0.4);
+    color: rgba(244, 242, 255, 0.4);
   }
 
   .reason-pill {
-    background: rgba(244, 162, 97, 0.16);
-    border: 1px solid rgba(244, 162, 97, 0.35);
-    color: #f4a261;
+    background: rgba(244, 114, 182, 0.16);
+    border: 1px solid rgba(244, 114, 182, 0.35);
+    color: #f472b6;
     padding: 1px 6px;
     border-radius: 4px;
     font-weight: 600;
@@ -606,8 +608,8 @@
   }
 
   .yt-tag.pos {
-    background: rgba(231, 111, 81, 0.2);
-    color: #f4a261;
+    background: rgba(139, 92, 246, 0.2);
+    color: #f472b6;
   }
 
   .yt-tag.freq {
@@ -617,7 +619,7 @@
 
   .yt-tag.dict {
     background: rgba(255, 255, 255, 0.07);
-    color: rgba(247, 237, 226, 0.6);
+    color: rgba(244, 242, 255, 0.6);
   }
 
   .yt-pitch {
@@ -635,20 +637,20 @@
   }
 
   .yt-pitch .mora.high {
-    border-top: 2px solid #f4a261;
+    border-top: 2px solid #f472b6;
   }
 
   .yt-pitch .mora.low {
-    border-bottom: 1px solid rgba(247, 237, 226, 0.35);
+    border-bottom: 1px solid rgba(244, 242, 255, 0.35);
   }
 
   .yt-pitch .mora.drop {
-    border-right: 2px solid #f4a261;
+    border-right: 2px solid #f472b6;
   }
 
   .pitch-num {
     font-size: 9px;
-    color: #f4a261;
+    color: #f472b6;
     margin-left: 3px;
   }
 
@@ -657,7 +659,7 @@
     padding-left: 18px;
     font-size: 13px;
     line-height: 1.48;
-    color: rgba(247, 237, 226, 0.92);
+    color: rgba(244, 242, 255, 0.92);
   }
 
   .yt-glossary li + li {
@@ -717,19 +719,25 @@
     font-size: 10px;
     font-weight: 700;
     text-transform: uppercase;
-    color: #f4a261;
+    color: #f472b6;
     min-width: 28px;
   }
 
   .r-val {
-    color: rgba(247, 237, 226, 0.85);
+    color: rgba(244, 242, 255, 0.85);
   }
 
   .yt-empty {
     font-size: 13px;
-    color: rgba(247, 237, 226, 0.65);
+    color: rgba(244, 242, 255, 0.65);
     padding: 12px 0;
     text-align: center;
+  }
+
+  /* Tokyo Night pass: glass surface + neon focus ------------------------ */
+  button:focus-visible {
+    outline: 2px solid var(--neon-violet);
+    outline-offset: 2px;
   }
 </style>
 

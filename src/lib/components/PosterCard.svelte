@@ -1,15 +1,18 @@
 <script lang="ts">
   import type { MediaCard } from "$lib/api";
   import { img } from "$lib/api";
-  import { app } from "$lib/app.svelte";
+  import { detailsModal } from "$lib/detailsModal.svelte";
   import { displayTitle, formatLabel, franchiseBadge, totalEpisodes, type LibraryItem } from "$lib/format";
   import Icon from "./Icon.svelte";
+  import Ja from "./Ja.svelte";
 
   let { m, index = 0 }: { m: MediaCard | LibraryItem; index?: number } = $props();
 
   const item = $derived("members" in m ? m : null);
   const badge = $derived(item ? franchiseBadge(item) : null);
-  const href = $derived(`/anime/${item?.linkId ?? m.anilistId}`);
+  const targetId = $derived(item?.linkId ?? m.anilistId);
+  const href = $derived(`/anime/${targetId}`);
+  const title = $derived(displayTitle(m));
   const years = $derived(
     item?.yearEnd && m.seasonYear && item.yearEnd !== m.seasonYear ? `${m.seasonYear}–${item.yearEnd}` : m.seasonYear,
   );
@@ -27,24 +30,25 @@
   }
 </script>
 
-<a
+<article
   class="poster-card"
   class:stack={!!badge}
-  {href}
   style:--i={Math.min(index, 24)}
-  style:--cover-accent={m.coverColor || "var(--coral)"}
+  style:--glow={m.coverColor || "var(--neon-violet)"}
   id={`card-${m.anilistId}`}
 >
   <div class="art">
-    {#if src}
-      <img {src} alt="" loading="lazy" decoding="async" class:loaded onload={() => (loaded = true)} use:imgAction />
-    {:else}
-      <img
-        class="kanji-fallback"
-        src={app.theme === "manga" ? "/brand/kanji.png" : "/brand/kanji-white.png"}
-        alt=""
-      />
-    {/if}
+    <button class="hit" onclick={() => detailsModal.open(targetId)} aria-label={`${title} — more info`}>
+      {#if src}
+        <img {src} alt="" loading="lazy" decoding="async" class:loaded onload={() => (loaded = true)} use:imgAction />
+      {:else}
+        <img
+          class="kanji-fallback"
+          src="/brand/kanji-white.png"
+          alt=""
+        />
+      {/if}
+    </button>
 
     <div class="top">
       {#if badge}
@@ -55,10 +59,13 @@
       {#if m.needsReview}
         <span class="badge badge-warn" title="Match may be wrong — check it">
           <Icon name="alert" size={10} stroke={2.5} />
+          <span class="sr-only">Match may be wrong</span>
         </span>
       {/if}
       {#if m.status === "RELEASING"}
-        <span class="badge airing-pill" title="Currently airing"><span class="airing-dot"></span></span>
+        <span class="badge airing-pill" title="Currently airing"
+          ><span class="airing-dot"></span><span class="sr-only">Currently airing</span></span
+        >
       {/if}
     </div>
 
@@ -67,33 +74,38 @@
     {/if}
 
     {#if m.watchedCount > 0 && !complete}
-      <div class="progress"><div style:width={`${watchedPct}%`}></div></div>
+      <div class="neon-progress progress" aria-hidden="true"><span style:width={`${watchedPct}%`}></span></div>
     {/if}
   </div>
   <div class="meta">
-    <h3 title={displayTitle(m)}>{displayTitle(m)}</h3>
-    <p class:warn={missing}>
+    <h3 {title}><a {href}>{title}</a></h3>
+    {#if m.titleNative && m.titleNative !== title}
+      <Ja text={m.titleNative} block class="native" />
+    {/if}
+    <p class:warn={missing} title={missing ? `${m.ownedCount} of ${total} episodes in local library` : undefined}>
       {#if complete}
         Completed
       {:else if m.watchedCount > 0}
         {m.watchedCount} / {total ?? m.ownedCount} {m.format === "MOVIE" ? "" : "eps"}
+      {:else if missing}
+        {m.ownedCount} / {total} {m.format === "MOVIE" ? "film" : "eps"}
       {:else}
         {total ?? m.ownedCount} {m.format === "MOVIE" ? "film" : "eps"}
       {/if}
       {#if years} · {years}{/if}
     </p>
   </div>
-</a>
+</article>
 
 <style>
   .poster-card {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 8px;
     min-width: 0;
     content-visibility: auto;
-    contain-intrinsic-size: 160px 280px;
-    outline: none;
+    contain-intrinsic-size: 160px 300px;
   }
 
   .art {
@@ -104,24 +116,32 @@
     border-radius: var(--r-md);
     overflow: hidden;
     background: var(--surface-2);
+    box-shadow: var(--shadow-sm);
     transition:
-      transform 240ms var(--ease),
-      box-shadow 240ms var(--ease);
+      transform var(--t-med) var(--ease),
+      box-shadow var(--t-med) var(--ease);
   }
 
   .poster-card:hover .art,
-  .poster-card:focus-visible .art {
-    transform: translateY(-4px) scale(1.02);
-    box-shadow: 0 18px 36px -12px rgba(0, 0, 0, 0.8);
+  .poster-card:focus-within .art {
+    transform: translateY(-6px) scale(1.03);
+    box-shadow:
+      0 18px 40px -14px color-mix(in srgb, var(--glow) 70%, transparent),
+      0 0 26px -4px color-mix(in srgb, var(--glow) 45%, transparent);
   }
 
-  .poster-card:focus-visible .art {
-    outline: 2px solid var(--text);
-    outline-offset: 2px;
+  .hit {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: pointer;
+    border-radius: inherit;
   }
-
-  .poster-card.stack {
-    position: relative;
+  .hit:focus-visible {
+    outline-offset: -2px;
   }
 
   .poster-card.stack::before {
@@ -135,11 +155,11 @@
     border-radius: var(--r-md);
     background: var(--surface-3);
     opacity: 0.6;
-    transition: transform 240ms var(--ease);
+    transition: transform var(--t-med) var(--ease);
   }
 
   .poster-card.stack:hover::before {
-    transform: translateY(-7px);
+    transform: translateY(-9px);
   }
 
   img {
@@ -172,30 +192,27 @@
     flex-wrap: wrap;
     align-items: center;
     z-index: 2;
+    pointer-events: none;
   }
 
   .top .badge {
     height: 20px;
     padding: 0 7px;
     font-size: 10px;
-    border-radius: 6px;
+    border-radius: var(--r-pill);
   }
 
-  .seasons {
-    background: rgba(10, 10, 14, 0.84);
-    color: #fff;
-  }
-
+  .seasons,
   .tag {
-    background: rgba(10, 10, 14, 0.84);
-    color: #f3f3f5;
+    background: rgba(8, 9, 16, 0.78);
+    color: #f4f2ff;
   }
 
   .airing-pill {
     width: 20px;
     padding: 0 !important;
     justify-content: center;
-    background: rgba(10, 10, 14, 0.84);
+    background: rgba(8, 9, 16, 0.78);
     margin-left: auto;
   }
 
@@ -203,8 +220,8 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: #34d399;
-    box-shadow: 0 0 8px #34d399;
+    background: var(--ok);
+    box-shadow: 0 0 8px var(--ok);
   }
 
   .done-badge {
@@ -217,8 +234,9 @@
     border-radius: 50%;
     display: grid;
     place-items: center;
-    background: rgba(0, 0, 0, 0.65);
-    color: #34d399;
+    background: rgba(8, 9, 16, 0.7);
+    color: var(--ok);
+    pointer-events: none;
   }
 
   .progress {
@@ -227,17 +245,12 @@
     right: 0;
     bottom: 0;
     z-index: 3;
-    height: 3px;
-    background: rgba(0, 0, 0, 0.45);
-  }
-
-  .progress div {
-    height: 100%;
-    background: var(--coral);
+    border-radius: 0;
+    pointer-events: none;
   }
 
   .meta {
-    padding: 0 1px;
+    padding: 0 2px;
     min-width: 0;
   }
 
@@ -251,12 +264,24 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  h3 a:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .meta :global(.native) {
+    font-size: 11.5px;
+    color: var(--text-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 
   .meta p {
     margin-top: 2px;
     font-size: 12px;
     font-weight: 500;
-    color: var(--text-3);
+    color: var(--text-2);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -264,6 +289,14 @@
   }
 
   .meta p.warn {
-    color: color-mix(in srgb, var(--amber) 75%, var(--text-3));
+    color: color-mix(in srgb, var(--amber) 80%, var(--text-2));
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .poster-card:hover .art,
+    .poster-card:focus-within .art,
+    .poster-card.stack:hover::before {
+      transform: none;
+    }
   }
 </style>

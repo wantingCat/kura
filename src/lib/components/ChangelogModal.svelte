@@ -110,12 +110,12 @@
     width: min(640px, calc(100vw - 32px));
     max-height: calc(100vh - 64px);
     background: var(--surface, #1e1416);
-    border: 1px solid rgba(247, 109, 77, 0.3);
+    border: 1px solid rgba(139, 92, 246, 0.3);
     border-radius: 20px;
     box-shadow:
       0 24px 70px rgba(0, 0, 0, 0.75),
       0 0 0 1px rgba(255, 255, 255, 0.05),
-      0 0 40px rgba(247, 109, 77, 0.15);
+      0 0 40px rgba(139, 92, 246, 0.15);
     z-index: 9999;
     display: flex;
     flex-direction: column;
@@ -146,7 +146,7 @@
     justify-content: space-between;
     padding: 20px 24px 14px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    background: linear-gradient(180deg, rgba(247, 109, 77, 0.08) 0%, transparent 100%);
+    background: linear-gradient(180deg, rgba(139, 92, 246, 0.08) 0%, transparent 100%);
   }
 
   .header-left {
@@ -162,7 +162,7 @@
     font-size: 11px;
     font-weight: 800;
     letter-spacing: 0.08em;
-    color: var(--accent, #f76d4d);
+    color: var(--accent, #8b5cf6);
     text-transform: uppercase;
   }
 
@@ -240,10 +240,10 @@
   }
 
   .version-tab.active {
-    background: var(--accent, #f76d4d);
+    background: var(--accent, #8b5cf6);
     color: #fff;
-    border-color: var(--accent, #f76d4d);
-    box-shadow: 0 4px 14px rgba(247, 109, 77, 0.35);
+    border-color: var(--accent, #8b5cf6);
+    box-shadow: 0 4px 14px rgba(139, 92, 246, 0.35);
   }
 
   .tab-badge {
@@ -267,8 +267,8 @@
   }
 
   .summary-card {
-    background: rgba(247, 109, 77, 0.08);
-    border: 1px solid rgba(247, 109, 77, 0.2);
+    background: rgba(139, 92, 246, 0.08);
+    border: 1px solid rgba(139, 92, 246, 0.2);
     border-radius: 14px;
     padding: 14px 18px;
   }
@@ -325,15 +325,15 @@
   }
 
   .badge-new {
-    background: rgba(247, 109, 77, 0.25);
-    color: #f76d4d;
-    border: 1px solid rgba(247, 109, 77, 0.4);
+    background: rgba(139, 92, 246, 0.25);
+    color: #8b5cf6;
+    border: 1px solid rgba(139, 92, 246, 0.4);
   }
 
   .badge-imp {
-    background: rgba(247, 178, 103, 0.2);
+    background: rgba(244, 114, 182, 0.2);
     color: #f7b267;
-    border: 1px solid rgba(247, 178, 103, 0.35);
+    border: 1px solid rgba(244, 114, 182, 0.35);
   }
 
   .badge-fix {
@@ -369,7 +369,7 @@
   }
 
   .btn-cta {
-    background: var(--accent, #f76d4d);
+    background: var(--accent, #8b5cf6);
     color: #fff;
     border: none;
     font-weight: 700;
@@ -377,16 +377,29 @@
     padding: 9px 20px;
     border-radius: 12px;
     cursor: pointer;
-    box-shadow: 0 4px 16px rgba(247, 109, 77, 0.4);
+    box-shadow: 0 4px 16px rgba(139, 92, 246, 0.4);
     transition: transform 0.15s, box-shadow 0.15s;
   }
 
   .btn-cta:hover {
     transform: translateY(-1px);
-    box-shadow: 0 6px 20px rgba(247, 109, 77, 0.5);
+    box-shadow: 0 6px 20px rgba(139, 92, 246, 0.5);
   }
 
   .btn-cta:active {
     transform: translateY(0);
+  }
+
+  /* Tokyo Night pass: glass surface + neon focus ------------------------ */
+  .dialog {
+    background: var(--glass-tn-strong);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
+    border-radius: var(--r-xl);
+  }
+  button:focus-visible {
+    outline: 2px solid var(--neon-violet);
+    outline-offset: 2px;
   }
 </style>

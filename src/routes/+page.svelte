@@ -1,14 +1,16 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { page } from "$app/state";
   import type { MediaCard } from "$lib/api";
   import { app } from "$lib/app.svelte";
   import { displayTitle, groupCards, norm, searchHaystack, type LibraryItem } from "$lib/format";
+  import { JA, jaWatchStatus } from "$lib/ja";
   import HomePanels from "$lib/components/HomePanels.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import Ja from "$lib/components/Ja.svelte";
   import LibraryFilterPanel from "$lib/components/LibraryFilterPanel.svelte";
   import NewLibraryForm from "$lib/components/NewLibraryForm.svelte";
   import PosterCard from "$lib/components/PosterCard.svelte";
-  import Rail from "$lib/components/Rail.svelte";
   import {
     AIRING,
     filters,
@@ -23,8 +25,33 @@
   const libId = $derived(page.url.searchParams.get("lib"));
   const library = $derived(libId ? app.libraries.find((l) => String(l.id) === libId) : null);
 
+  /** Navbar sections: `?format=series`, `?format=movie`, `?watch=planning` (My List). */
+  const formatParam = $derived(page.url.searchParams.get("format"));
+  const watchParam = $derived(page.url.searchParams.get("watch"));
+  const SERIES_FORMATS = ["TV", "TV_SHORT", "ONA", "OVA", "SPECIAL"];
+  const urlFormatOk = (c: MediaCard) =>
+    formatParam === "series"
+      ? SERIES_FORMATS.includes(c.format ?? "")
+      : formatParam === "movie"
+        ? c.format === "MOVIE"
+        : true;
+  const modeHead = $derived(
+    formatParam === "series"
+      ? JA.pages.series
+      : formatParam === "movie"
+        ? JA.pages.movies
+        : watchParam === "planning"
+          ? JA.pages.myList
+          : null,
+  );
+
+  // `?watch=planning` selects the Planning tab when the URL changes (user can still switch tabs).
+  $effect(() => {
+    if (watchParam === "planning") untrack(() => filters.setWatch("planning"));
+  });
+
   const scoped = $derived(
-    library ? app.cards.filter((c) => c.libraryIds.includes(library.id)) : app.cards,
+    (library ? app.cards.filter((c) => c.libraryIds.includes(library.id)) : app.cards).filter(urlFormatOk),
   );
 
   const haystacks = $derived(new Map(scoped.map((c) => [c.anilistId, searchHaystack(c)])));
@@ -43,7 +70,6 @@
   };
   /** Seasons of one show become a single item unless the user turned grouping off. */
   const present = (list: MediaCard[]) => groupCards(list, app.groupSeasons);
-  const all = $derived(present(scoped));
 
   const baseEntries = $derived.by(() => {
     const q = norm(app.query);
@@ -58,13 +84,28 @@
     });
   });
 
-  const watchCounts = $derived({
-    watching: present(baseEntries.filter((c) => watchBucket(c) === "watching")).length,
-    planning: present(baseEntries.filter((c) => watchBucket(c) === "planning")).length,
-    completed: present(baseEntries.filter((c) => watchBucket(c) === "completed")).length,
-    paused: present(baseEntries.filter((c) => watchBucket(c) === "paused")).length,
-    dropped: present(baseEntries.filter((c) => watchBucket(c) === "dropped")).length,
-    all: present(baseEntries).length,
+  const groupedBase = $derived(present(baseEntries));
+
+  const watchCounts = $derived.by(() => {
+    const out = { watching: 0, planning: 0, completed: 0, paused: 0, dropped: 0, all: groupedBase.length };
+    if (!app.groupSeasons) {
+      for (const c of baseEntries) out[watchBucket(c)]++;
+      return out;
+    }
+    const buckets: Record<Exclude<WatchFilter, "all">, MediaCard[]> = {
+      watching: [],
+      planning: [],
+      completed: [],
+      paused: [],
+      dropped: [],
+    };
+    for (const c of baseEntries) buckets[watchBucket(c)].push(c);
+    out.watching = present(buckets.watching).length;
+    out.planning = present(buckets.planning).length;
+    out.completed = present(buckets.completed).length;
+    out.paused = buckets.paused.length ? present(buckets.paused).length : 0;
+    out.dropped = buckets.dropped.length ? present(buckets.dropped).length : 0;
+    return out;
   });
 
   $effect(() => {
@@ -77,11 +118,10 @@
   });
 
   const filtered = $derived.by(() => {
-    const entries =
+    const list =
       filters.watch === "all"
-        ? baseEntries
-        : baseEntries.filter((c) => watchBucket(c) === filters.watch);
-    const list = present(entries);
+        ? [...groupedBase]
+        : present(baseEntries.filter((c) => watchBucket(c) === filters.watch));
     const dir = filters.desc ? -1 : 1;
     const tie = (a: LibraryItem, b: LibraryItem) => displayTitle(a).localeCompare(displayTitle(b));
     const by: Record<SortKey, (a: LibraryItem, b: LibraryItem) => number> = {
@@ -96,18 +136,20 @@
   });
 
   const browsing = $derived(!app.query && !filters.active && (filters.watch === "watching" || filters.watch === "all"));
-  const recentlyAdded = $derived([...all].sort((a, b) => b.addedAt - a.addedAt).slice(0, 12));
+  /** Hero + rows only on the plain Home view (not Series / Movies / My List). */
+  const showHome = $derived(browsing && !modeHead);
 
-  const panelScoped = $derived(
-    scoped.filter(
+  const counts = $derived.by(() => {
+    if (!filters.panelOpen) return { all: 0, tv: 0, movie: 0, extra: 0 };
+    const panelScoped = scoped.filter(
       (c) => filters.matches(c) && (filters.watch === "all" || watchBucket(c) === filters.watch),
-    ),
-  );
-  const counts = $derived({
-    all: present(panelScoped).length,
-    tv: present(panelScoped.filter((c) => formatOk(c, "tv"))).length,
-    movie: present(panelScoped.filter((c) => formatOk(c, "movie"))).length,
-    extra: present(panelScoped.filter((c) => formatOk(c, "extra"))).length,
+    );
+    return {
+      all: present(panelScoped).length,
+      tv: present(panelScoped.filter((c) => formatOk(c, "tv"))).length,
+      movie: present(panelScoped.filter((c) => formatOk(c, "movie"))).length,
+      extra: present(panelScoped.filter((c) => formatOk(c, "extra"))).length,
+    };
   });
 
   const activeWatchLabel = $derived(
@@ -122,7 +164,7 @@
 </svelte:head>
 
 {#if !app.loaded}
-  <div class="page">
+  <div class="page top-pad">
     <div class="skeleton hero-skel"></div>
     <div class="grid">
       {#each Array(12) as _, i (i)}<div class="skeleton poster-skel"></div>{/each}
@@ -157,19 +199,19 @@
     </div>
   </section>
 {:else}
-  {#if browsing}
+  {#if showHome}
     <HomePanels {scoped} />
-    {#if recentlyAdded.length > 0 && all.length > 8}
-      <div class="recent">
-        <Rail title="Recently Added">
-          {#each recentlyAdded as m, i (m.anilistId)}<div class="rail-poster"><PosterCard {m} index={i} /></div>{/each}
-        </Rail>
-      </div>
-    {/if}
   {/if}
 
-  <div class="page" class:after-hero={browsing}>
-    <h1 class="sr-only">{library?.name ?? "Your anime library"}</h1>
+  <div class="page" class:after-hero={showHome} class:top-pad={!showHome}>
+    {#if modeHead}
+      <header class="page-head">
+        <Ja text={modeHead.ja} class="kanji-watermark" />
+        <h1>{library ? `${modeHead.en} · ${library.name}` : modeHead.en}</h1>
+      </header>
+    {:else}
+      <h1 class="sr-only">{library?.name ?? "Your anime library"}</h1>
+    {/if}
 
     {#if app.libraries.length > 1}
       <nav class="libs" aria-label="Libraries">
@@ -182,18 +224,27 @@
       </nav>
     {/if}
 
-    {#if app.unmatched.length > 0 && browsing}
+    {#if app.reviewCount > 0 && browsing}
       <a class="review-banner" href="/review" id="review-banner">
         <Icon name="alert" size={18} />
         <span>
-          <strong>{app.unmatched.length} folder{app.unmatched.length === 1 ? "" : "s"}</strong>
-          couldn't be identified automatically.
+          {#if app.unmatched.length > 0 && app.reviewCount > app.unmatched.length}
+            <strong>{app.reviewCount} folders</strong> need review ({app.unmatched.length} unmatched, {app.reviewCount - app.unmatched.length} low-confidence).
+          {:else if app.unmatched.length > 0}
+            <strong>{app.unmatched.length} folder{app.unmatched.length === 1 ? "" : "s"}</strong>
+            couldn't be identified automatically.
+          {:else}
+            <strong>{app.reviewCount} match{app.reviewCount === 1 ? "" : "es"}</strong> may need verification.
+          {/if}
         </span>
         <span class="link">Review <Icon name="chevron-right" size={14} /></span>
       </a>
     {/if}
 
-    <section class="row">
+    <section class="row" aria-labelledby={modeHead ? undefined : "library-heading"}>
+      {#if !modeHead}
+        <h2 class="lib-heading" id="library-heading">Your Library<Ja text={JA.rows.library} class="ja-sub" /></h2>
+      {/if}
       <nav class="status-tabs" aria-label="Watch status">
         {#each WATCH_TABS as tab (tab.key)}
           {@const cnt = watchCounts[tab.key]}
@@ -201,10 +252,12 @@
             <button
               class="status-tab"
               class:active={filters.watch === tab.key}
+              aria-pressed={filters.watch === tab.key}
               onclick={() => filters.setWatch(tab.key as WatchFilter)}
               id={`tab-watch-${tab.key}`}
             >
               <span>{tab.label}</span>
+              <Ja text={jaWatchStatus(tab.key)} class="tab-ja" />
               <span class="tab-badge">{cnt}</span>
             </button>
           {/if}
@@ -212,13 +265,13 @@
       </nav>
 
       <div class="toolbar">
-        <h2 class="section-title">
+        <h3 class="section-title">
           {#if app.query}
             Results for “{app.query}” · {activeWatchLabel} <span class="count">{filtered.length}</span>
           {:else}
             {library ? `${library.name} · ${activeWatchLabel}` : activeWatchLabel} <span class="count">{filtered.length}</span>
           {/if}
-        </h2>
+        </h3>
         <div class="right">
           <button
             class="btn btn-sm filter-btn"
@@ -258,18 +311,20 @@
         </div>
       </div>
 
-      <div class="chips">
-        {#each [["all", "All"], ["tv", "Series"], ["movie", "Movies"], ["extra", "OVA & Specials"]] as [k, label] (k)}
-          <button
-            class="chip"
-            class:active={filters.format === k}
-            onclick={() => (filters.format = k as FormatFilter)}
-            id={`filter-format-${k}`}
-          >
-            {label}<span class="chip-count">{counts[k as FormatFilter]}</span>
-          </button>
-        {/each}
-      </div>
+      {#if !formatParam}
+        <div class="chips">
+          {#each [["all", "All"], ["tv", "Series"], ["movie", "Movies"], ["extra", "OVA & Specials"]] as [k, label] (k)}
+            <button
+              class="chip"
+              class:active={filters.format === k}
+              onclick={() => (filters.format = k as FormatFilter)}
+              id={`filter-format-${k}`}
+            >
+              {label}<span class="chip-count">{counts[k as FormatFilter]}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
 
       {#if filters.panelOpen}
         <LibraryFilterPanel entries={scoped} />
@@ -373,7 +428,7 @@
   .status-tabs {
     display: flex;
     flex-wrap: wrap;
-    gap: 4px;
+    gap: 6px;
     margin-bottom: 18px;
   }
   .status-tab {
@@ -384,7 +439,7 @@
     padding: 0 14px;
     border-radius: 99px;
     border: none;
-    background: transparent;
+    background: rgba(255, 255, 255, 0.04);
     color: var(--text-2);
     font-family: var(--font-display);
     font-size: 13.5px;
@@ -574,15 +629,42 @@
   .row {
     margin-bottom: 36px;
   }
-  .recent {
-    margin-top: 34px;
-  }
-  .rail-poster {
-    width: 158px;
-    flex: none;
+  .page {
+    padding-left: var(--gutter);
+    padding-right: var(--gutter);
+    max-width: none;
   }
   .page.after-hero {
-    padding-top: 40px;
+    padding-top: 28px;
+  }
+  /* No hero → clear the floating glass navbar. */
+  .page.top-pad {
+    padding-top: calc(var(--nav-h) + var(--nav-inset) + 28px);
+  }
+  .page-head {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+    padding: 36px 0 28px;
+    margin-bottom: 8px;
+  }
+  .page-head h1 {
+    position: relative;
+    z-index: 1;
+    font-size: clamp(32px, 3.4vw, 48px);
+    font-weight: 800;
+    letter-spacing: -0.03em;
+  }
+  .lib-heading {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 14px;
+  }
+  .status-tab :global(.tab-ja) {
+    font-size: 11px;
+    font-weight: 500;
+    opacity: 0.75;
   }
   .grid {
     display: grid;
@@ -640,14 +722,12 @@
     animation: fade-up 700ms var(--ease) both;
   }
   .onboard-logo {
-    border-radius: 26px;
-    border: var(--bw) solid var(--line);
-    box-shadow: var(--sticker-lg);
-    transform: rotate(-4deg);
-    transition: transform var(--t-med) var(--bounce);
+    display: block;
+    filter: drop-shadow(0 18px 36px rgba(3, 4, 10, 0.75)) drop-shadow(0 0 28px rgba(139, 92, 246, 0.35));
+    transition: transform var(--t-med) var(--ease);
   }
   .onboard-logo:hover {
-    transform: rotate(3deg) scale(1.04);
+    transform: translateY(-2px) scale(1.03);
   }
   .onboarding h1 {
     margin-top: 28px;

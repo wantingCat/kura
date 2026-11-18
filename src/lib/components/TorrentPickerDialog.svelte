@@ -635,7 +635,7 @@
     background: var(--coral);
     color: var(--on-coral);
     border-color: var(--line);
-    box-shadow: 2px 2px 0 var(--line);
+    box-shadow: var(--shadow-sm);
   }
   .search-row {
     display: flex;
@@ -710,7 +710,7 @@
     display: flex;
     gap: 8px;
     padding-top: 8px;
-    border-top: 1.5px solid var(--border);
+    border-top: 1px solid var(--line);
   }
   .manual-foot .input {
     flex: 1;
@@ -722,7 +722,7 @@
     padding: 16px;
     border-radius: var(--r-md);
     background: var(--bg-elev);
-    border: 1.5px solid var(--line);
+    border: 1px solid transparent;
   }
   .live-status-row {
     display: flex;
@@ -743,7 +743,7 @@
     height: 10px;
     border-radius: 999px;
     background: var(--surface-2);
-    border: 1.5px solid var(--line);
+    border: 1px solid transparent;
     overflow: hidden;
   }
   .prog-fill {
@@ -827,5 +827,18 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* Tokyo Night pass: glass surface + neon focus ------------------------ */
+  .modal {
+    background: var(--glass-tn-strong);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
+  }
+  button:focus-visible,
+  input:focus-visible {
+    outline: 2px solid var(--neon-violet);
+    outline-offset: 2px;
   }
 </style>

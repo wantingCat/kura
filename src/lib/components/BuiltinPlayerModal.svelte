@@ -563,6 +563,13 @@
       </div>
     </header>
 
+    {#if playerState.duration <= 0 && playerState.position <= 0}
+      <div class="player-loading-indicator" aria-live="polite">
+        <span class="player-loading-spinner"></span>
+        <span>Opening episode…</span>
+      </div>
+    {/if}
+
     <!-- Skip OP / ED Floating Button -->
     {#if activeSkip}
       <div class="skip-btn-wrap" onclick={(e) => e.stopPropagation()}>
@@ -878,7 +885,7 @@
     flex-direction: column;
     justify-content: space-between;
     user-select: none;
-    font-family: var(--font-body, "Plus Jakarta Sans", system-ui, sans-serif);
+    font-family: var(--font, "Inter", system-ui, sans-serif);
   }
 
   .kura-player-root.controls-hidden {
@@ -891,7 +898,7 @@
     justify-content: space-between;
     gap: 16px;
     padding: 20px 28px 34px;
-    background: linear-gradient(180deg, rgba(8, 8, 12, 0.88) 0%, rgba(8, 8, 12, 0.42) 60%, transparent 100%);
+    background: linear-gradient(180deg, rgba(8, 9, 16, 0.88) 0%, rgba(8, 9, 16, 0.42) 60%, transparent 100%);
     opacity: 0;
     transform: translateY(-6px);
     transition: opacity 180ms ease, transform 180ms ease;
@@ -916,10 +923,9 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    background: rgba(15, 15, 20, 0.78);
-    backdrop-filter: blur(14px);
+    background: rgba(14, 16, 26, 0.88);
     border: 1px solid rgba(255, 255, 255, 0.1);
-    color: #f4f4f6;
+    color: #f4f2ff;
     font-size: 12.5px;
     font-weight: 600;
     padding: 7px 13px;
@@ -930,8 +936,8 @@
   }
 
   .hud-btn:hover {
-    background: rgba(249, 115, 22, 0.22);
-    border-color: rgba(249, 115, 22, 0.55);
+    background: rgba(139, 92, 246, 0.22);
+    border-color: rgba(139, 92, 246, 0.55);
     color: #fff;
   }
 
@@ -987,10 +993,9 @@
     font-variant-numeric: tabular-nums;
     padding: 6px 12px;
     border-radius: 99px;
-    background: rgba(12, 12, 16, 0.84);
-    backdrop-filter: blur(12px);
-    border: 1px solid rgba(244, 162, 97, 0.35);
-    color: #f7ede2;
+    background: rgba(14, 16, 26, 0.9);
+    border: 1px solid rgba(244, 114, 182, 0.35);
+    color: #f4f2ff;
     white-space: nowrap;
   }
 
@@ -998,8 +1003,8 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: #f4a261;
-    box-shadow: 0 0 8px rgba(244, 162, 97, 0.8);
+    background: #f472b6;
+    box-shadow: 0 0 8px rgba(244, 114, 182, 0.8);
   }
 
   .torrent-hud-pill {
@@ -1011,15 +1016,14 @@
     font-variant-numeric: tabular-nums;
     padding: 6px 12px;
     border-radius: 99px;
-    background: rgba(12, 12, 16, 0.84);
-    backdrop-filter: blur(12px);
+    background: rgba(14, 16, 26, 0.9);
     border: 1px solid rgba(255, 255, 255, 0.1);
-    color: #f4f4f6;
+    color: #f4f2ff;
     white-space: nowrap;
   }
 
   .th-prog {
-    color: #ff7a59;
+    color: #f472b6;
     font-weight: 700;
   }
 
@@ -1057,9 +1061,8 @@
     display: inline-flex;
     align-items: center;
     gap: 10px;
-    background: rgba(14, 14, 18, 0.92);
-    backdrop-filter: blur(16px);
-    border: 1px solid rgba(249, 115, 22, 0.65);
+    background: rgba(14, 16, 26, 0.94);
+    border: 1px solid rgba(139, 92, 246, 0.65);
     color: #fff;
     font-size: 13.5px;
     font-weight: 700;
@@ -1071,8 +1074,8 @@
   }
 
   .skip-op-ed-btn:hover {
-    background: #f97316;
-    border-color: #f97316;
+    background: #8b5cf6;
+    border-color: #8b5cf6;
     transform: translateY(-1px);
   }
 
@@ -1081,7 +1084,7 @@
     padding: 2px 6px;
     border-radius: 4px;
     background: rgba(255, 255, 255, 0.14);
-    color: #ff9c85;
+    color: #f9a8d4;
   }
 
   /* Interactive Subtitle Stage */
@@ -1130,23 +1133,23 @@
   }
 
   .subtitle-stage.interactive .sub-char:hover {
-    background: rgba(249, 115, 22, 0.28);
+    background: rgba(139, 92, 246, 0.28);
   }
 
   .sub-char.tracked {
-    border-bottom: 2.5px dotted rgba(244, 162, 97, 0.92);
+    border-bottom: 2.5px dotted rgba(244, 114, 182, 0.92);
   }
 
   .sub-char.highlighted {
-    background: rgba(249, 115, 22, 0.42);
-    color: #ffe0d6;
-    border-bottom: 2px solid #f97316;
+    background: rgba(139, 92, 246, 0.42);
+    color: #fce7f3;
+    border-bottom: 2px solid #8b5cf6;
   }
 
   /* Bottom Bar */
   .player-bottom-bar {
     padding: 28px 28px 20px;
-    background: linear-gradient(0deg, rgba(8, 8, 12, 0.94) 0%, rgba(8, 8, 12, 0.55) 65%, transparent 100%);
+    background: linear-gradient(0deg, rgba(8, 9, 16, 0.94) 0%, rgba(8, 9, 16, 0.55) 65%, transparent 100%);
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -1172,7 +1175,7 @@
     position: absolute;
     bottom: 22px;
     transform: translateX(-50%);
-    background: rgba(14, 14, 18, 0.94);
+    background: rgba(14, 16, 26, 0.94);
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 6px;
     padding: 4px 8px;
@@ -1181,7 +1184,7 @@
     gap: 6px;
     font-size: 11px;
     font-weight: 600;
-    color: #f4f4f6;
+    color: #f4f2ff;
     white-space: nowrap;
     pointer-events: none;
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.65);
@@ -1189,7 +1192,7 @@
 
   .tt-time {
     font-variant-numeric: tabular-nums;
-    color: #ff7a59;
+    color: #f472b6;
   }
 
   .tt-chapter {
@@ -1216,7 +1219,7 @@
     left: 0;
     top: 0;
     bottom: 0;
-    background: linear-gradient(90deg, #f97316, #ff8566);
+    background: linear-gradient(90deg, #8b5cf6, #f472b6);
     border-radius: 99px;
     pointer-events: none;
   }
@@ -1230,7 +1233,7 @@
     height: 13px;
     border-radius: 50%;
     background: #fff;
-    box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.55);
+    box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.55);
     transition: transform 120ms ease;
   }
 
@@ -1294,7 +1297,7 @@
     gap: 6px;
     background: rgba(255, 255, 255, 0.07);
     border: 1px solid rgba(255, 255, 255, 0.1);
-    color: #f4f4f6;
+    color: #f4f2ff;
     font-size: 12px;
     font-weight: 600;
     height: 34px;
@@ -1310,21 +1313,21 @@
 
   .ctrl-btn:hover,
   .ctrl-btn.active {
-    background: rgba(249, 115, 22, 0.2);
-    border-color: rgba(249, 115, 22, 0.55);
+    background: rgba(139, 92, 246, 0.2);
+    border-color: rgba(139, 92, 246, 0.55);
     color: #fff;
   }
 
   .ctrl-btn.primary {
-    background: #f97316;
-    border-color: #f97316;
+    background: #8b5cf6;
+    border-color: #8b5cf6;
     color: #fff;
     padding: 0 14px;
   }
 
   .ctrl-btn.primary:hover {
-    background: #ff6b4d;
-    border-color: #ff6b4d;
+    background: #9b6cf8;
+    border-color: #9b6cf8;
   }
 
   .volume-group {
@@ -1335,7 +1338,7 @@
 
   .vol-slider {
     width: 72px;
-    accent-color: #f97316;
+    accent-color: #8b5cf6;
     cursor: pointer;
   }
 
@@ -1346,7 +1349,7 @@
     font-size: 12.5px;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
-    color: #f4f4f6;
+    color: #f4f2ff;
     margin-left: 6px;
   }
 
@@ -1371,7 +1374,7 @@
   .sub-delay-pill button {
     background: transparent;
     border: none;
-    color: #ff7a59;
+    color: #f472b6;
     font-weight: 700;
     height: 100%;
     padding: 0 9px;
@@ -1399,8 +1402,7 @@
     position: absolute;
     right: 0;
     bottom: calc(100% + 10px);
-    background: rgba(14, 14, 19, 0.96);
-    backdrop-filter: blur(20px);
+    background: rgba(14, 16, 26, 0.97);
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 10px;
     padding: 8px;
@@ -1436,9 +1438,9 @@
   }
 
   .mini-action {
-    background: rgba(249, 115, 22, 0.16);
-    border: 1px solid rgba(249, 115, 22, 0.4);
-    color: #ff8566;
+    background: rgba(139, 92, 246, 0.16);
+    border: 1px solid rgba(139, 92, 246, 0.4);
+    color: #f472b6;
     font-size: 10px;
     font-weight: 600;
     padding: 2px 7px;
@@ -1453,7 +1455,7 @@
     gap: 8px;
     background: transparent;
     border: none;
-    color: #f4f4f6;
+    color: #f4f2ff;
     font-size: 12px;
     padding: 7px 10px;
     border-radius: 6px;
@@ -1466,8 +1468,8 @@
   }
 
   .menu-item.selected {
-    background: rgba(249, 115, 22, 0.22);
-    color: #ff8566;
+    background: rgba(139, 92, 246, 0.22);
+    color: #f472b6;
     font-weight: 600;
   }
 
@@ -1478,5 +1480,114 @@
     border-radius: 4px;
     background: rgba(255, 255, 255, 0.1);
     color: rgba(244, 244, 246, 0.72);
+  }
+
+  /* Tokyo Night skin (CSS only — player logic untouched) ------------------ */
+  .scrubber-fill {
+    background: var(--neon, linear-gradient(90deg, #8b5cf6, #f472b6));
+    box-shadow: 0 0 10px rgba(244, 114, 182, 0.55);
+  }
+  .scrubber-thumb {
+    box-shadow:
+      0 0 0 3px rgba(139, 92, 246, 0.55),
+      0 0 14px rgba(244, 114, 182, 0.7);
+  }
+  .player-loading-indicator {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 9200;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 18px;
+    border-radius: 999px;
+    background: rgba(12, 14, 24, 0.9);
+    border: 1px solid rgba(139, 92, 246, 0.35);
+    color: #f4f2ff;
+    font-size: 13px;
+    font-weight: 600;
+    pointer-events: none;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65);
+  }
+  .player-loading-spinner {
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    border: 2px solid rgba(139, 92, 246, 0.3);
+    border-top-color: #f472b6;
+    animation: kura-player-spin 650ms linear infinite;
+  }
+  @keyframes kura-player-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .controls-row {
+    padding: 8px 10px;
+    border-radius: 14px;
+    background: rgba(14, 16, 26, 0.9);
+    border: 1px solid var(--glass-hairline, rgba(255, 255, 255, 0.08));
+  }
+  .ctrl-btn {
+    border-color: transparent;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 10px;
+  }
+  .ctrl-btn:hover,
+  .ctrl-btn.active {
+    background: rgba(139, 92, 246, 0.2);
+    border-color: transparent;
+    box-shadow: 0 0 16px rgba(139, 92, 246, 0.35);
+  }
+  .ctrl-btn.primary {
+    background: var(--cta, linear-gradient(90deg, #7c3aed, #be185d));
+    border-color: transparent;
+    color: var(--on-cta, #fff);
+    border-radius: 999px;
+    min-width: 42px;
+  }
+  .ctrl-btn.primary:hover {
+    background: var(--cta-hover, linear-gradient(90deg, #8b4cf0, #cc2a6c));
+    border-color: transparent;
+    box-shadow: 0 0 24px rgba(139, 92, 246, 0.5);
+  }
+  .ctrl-btn:focus-visible,
+  .hud-btn:focus-visible,
+  .skip-op-ed-btn:focus-visible {
+    outline: 2px solid #8b5cf6;
+    outline-offset: 2px;
+  }
+  .hud-btn,
+  .immersion-hud-pill,
+  .torrent-hud-pill,
+  .skip-op-ed-btn,
+  .timeline-tooltip {
+    border-color: var(--glass-hairline, rgba(255, 255, 255, 0.06));
+  }
+  .hud-btn {
+    background: rgba(14, 16, 26, 0.88);
+  }
+  .hud-btn:hover {
+    background: rgba(139, 92, 246, 0.22);
+    border-color: rgba(139, 92, 246, 0.5);
+  }
+  .skip-op-ed-btn:hover {
+    background: var(--cta, linear-gradient(90deg, #7c3aed, #be185d));
+    border-color: transparent;
+  }
+  .vol-slider {
+    accent-color: #8b5cf6;
+  }
+  .tt-time {
+    font-family: var(--font-label, inherit);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .player-top-bar,
+    .player-bottom-bar {
+      transform: none !important;
+    }
   }
 </style>

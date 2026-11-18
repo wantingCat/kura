@@ -238,7 +238,7 @@
     background: var(--bg-elev);
     border: var(--bw) solid var(--line);
     border-radius: var(--r-xl);
-    box-shadow: 6px 6px 0 var(--coral);
+    box-shadow: var(--sticker-lg), var(--neon-glow);
     animation: pop 340ms var(--bounce);
   }
   @keyframes pop {
@@ -252,7 +252,7 @@
     justify-content: space-between;
     align-items: flex-start;
     padding: 22px 24px 14px;
-    border-bottom: 1.5px solid var(--border);
+    border-bottom: 1px solid var(--line);
   }
   h2 {
     font-size: 20px;
@@ -295,12 +295,12 @@
   .mode-btn:hover {
     border-color: var(--coral);
     transform: translate(-1px, -1px);
-    box-shadow: 2px 2px 0 var(--line);
+    box-shadow: var(--shadow-sm);
   }
   .mode-btn.active {
     background: var(--surface-3);
     border-color: var(--line);
-    box-shadow: 3px 3px 0 var(--coral);
+    box-shadow: var(--neon-glow);
     transform: translate(-2px, -2px);
   }
   .mode-info {
@@ -365,7 +365,7 @@
     background: var(--coral);
     color: var(--on-coral);
     border-color: var(--line);
-    box-shadow: 2px 2px 0 var(--line);
+    box-shadow: var(--shadow-sm);
   }
   .fields-grid {
     display: grid;
@@ -400,7 +400,7 @@
     padding: 10px 14px;
     border-radius: var(--r-md);
     background: var(--surface);
-    border: 1.5px solid var(--border);
+    border: 1px solid transparent;
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -429,12 +429,25 @@
     align-items: center;
     gap: 10px;
     padding: 16px 24px;
-    border-top: 1.5px solid var(--border);
+    border-top: 1px solid var(--line);
     background: var(--bg);
     border-bottom-left-radius: var(--r-xl);
     border-bottom-right-radius: var(--r-xl);
   }
   .footer-spacer {
     flex: 1;
+  }
+
+  /* Tokyo Night pass: glass surface + neon focus ------------------------ */
+  .dialog {
+    background: var(--glass-tn-strong);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
+  }
+  button:focus-visible,
+  select:focus-visible {
+    outline: 2px solid var(--neon-violet);
+    outline-offset: 2px;
   }
 </style>

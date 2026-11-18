@@ -170,7 +170,7 @@
     background: var(--bg-elev);
     border: var(--bw) solid var(--line);
     border-radius: var(--r-xl);
-    box-shadow: 6px 6px 0 var(--coral);
+    box-shadow: var(--sticker-lg), var(--neon-glow);
     animation: pop 320ms var(--bounce);
     overflow: hidden;
   }
@@ -191,7 +191,7 @@
     justify-content: space-between;
     align-items: flex-start;
     padding: 24px 24px 16px;
-    border-bottom: var(--bw) solid var(--border);
+    border-bottom: 1px solid var(--line);
     position: relative;
   }
 
@@ -282,7 +282,7 @@
     gap: 10px;
     padding: 10px 12px;
     background: var(--surface);
-    border: var(--bw) solid var(--border);
+    border: 1px solid transparent;
     border-radius: var(--r-md);
   }
 
@@ -318,7 +318,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border-strong);
     border-radius: 4px;
-    box-shadow: 1px 1px 0 var(--line);
+    box-shadow: var(--shadow-sm);
   }
 
   .install-box {
@@ -395,7 +395,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 16px 24px;
-    border-top: var(--bw) solid var(--border);
+    border-top: 1px solid var(--line);
     background: var(--surface);
   }
 
@@ -417,5 +417,17 @@
 
   .btn-link:hover {
     color: var(--text-2);
+  }
+
+  /* Tokyo Night pass: glass surface + neon focus ------------------------ */
+  .dialog {
+    background: var(--glass-tn-strong);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
+  }
+  button:focus-visible {
+    outline: 2px solid var(--neon-violet);
+    outline-offset: 2px;
   }
 </style>

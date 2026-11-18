@@ -9,6 +9,8 @@
   } from "$lib/api";
   import { app } from "$lib/app.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import Ja from "$lib/components/Ja.svelte";
+  import { JA, jaStreak, jaDuration } from "$lib/ja";
 
   let overview = $state<ImmersionOverview | null>(null);
   let loading = $state(true);
@@ -322,12 +324,13 @@
 <div class="immersion-page">
   <!-- Header -->
   <header class="im-header">
+    <Ja text={JA.pages.immersion.ja} class="kanji-watermark" />
     <div class="im-title-group">
       <div class="im-eyebrow">
         <Icon name="book-open" size={15} />
         <span>JAPANESE IMMERSION SUITE</span>
       </div>
-      <h1>Immersion & Vocabulary Bank</h1>
+      <h1>Immersion & Vocabulary Bank <Ja text={JA.pages.immersion.ja} class="ja-sub" /></h1>
       <p class="im-subtitle">
         Track your active anime immersion hours and master the words you look up most frequently with Yomitan.
       </p>
@@ -394,8 +397,9 @@
           <div class="ring-pct">{goalProgressPct}%</div>
         </div>
         <div class="metric-info">
-          <span class="metric-label">TODAY'S IMMERSION</span>
+          <span class="metric-label">TODAY'S IMMERSION <Ja text={JA.stats.today} class="metric-ja" /></span>
           <div class="metric-val">{formatDuration(overview.todayImmersionSec)}</div>
+          {#if overview.todayImmersionSec > 0}<Ja text={jaDuration(overview.todayImmersionSec)} block class="metric-dur" />{/if}
           <div class="metric-sub">
             Daily target: <strong>{overview.dailyGoalMinutes}m</strong>
             <button type="button" class="inline-link" onclick={() => (goalModalOpen = true)}>Edit</button>
@@ -406,10 +410,10 @@
       <!-- Card 2: Weekly & Monthly Immersion -->
       <div class="im-metric-card">
         <div class="metric-info">
-          <span class="metric-label">IMMERSION VELOCITY</span>
+          <span class="metric-label">IMMERSION VELOCITY <Ja text={JA.stats.week} class="metric-ja" /></span>
           <div class="metric-val">{formatDuration(overview.weekImmersionSec)} <small>this week</small></div>
           <div class="metric-sub">
-            Last 30 days: <strong>{formatDuration(overview.monthImmersionSec)}</strong>
+            Last 30 days <Ja text={JA.stats.month} class="metric-ja" />: <strong>{formatDuration(overview.monthImmersionSec)}</strong>
           </div>
         </div>
       </div>
@@ -417,13 +421,14 @@
       <!-- Card 3: All-Time Immersion & Streak -->
       <div class="im-metric-card">
         <div class="metric-info">
-          <span class="metric-label">ALL-TIME IMMERSION</span>
+          <span class="metric-label">ALL-TIME IMMERSION <Ja text={JA.stats.total} class="metric-ja" /></span>
           <div class="metric-val">
             {formatHoursDecimal(overview.totalImmersionSec)} <small>hrs</small>
           </div>
           <div class="metric-sub">
             <span class="streak-pill" class:lit={overview.currentStreakDays > 0}>
-              🔥 {overview.currentStreakDays}d streak
+              <Icon name="flame" size={12} /> {overview.currentStreakDays}d streak
+              <Ja text={jaStreak(overview.currentStreakDays)} class="streak-ja" />
             </span>
             <span>· {overview.totalEpisodesCompleted} eps</span>
             <button
@@ -448,9 +453,9 @@
       <!-- Card 4: Vocabulary Bank Breakdown -->
       <div class="im-metric-card">
         <div class="metric-info">
-          <span class="metric-label">VOCABULARY BANK</span>
+          <span class="metric-label">VOCABULARY BANK <Ja text={JA.stats.words} class="metric-ja" /></span>
           <div class="metric-val">
-            {overview.totalLookups} <small>lookups</small>
+            {overview.totalLookups} <small>lookups <Ja text={JA.stats.lookups} class="metric-ja" /></small>
           </div>
           <div class="metric-sub vocab-pills">
             <span class="v-dot learning">● {overview.learningWordsCount} Tracked</span>
@@ -466,7 +471,7 @@
       <div class="im-panel chart-panel">
         <div class="panel-head">
           <div>
-            <h2>Daily Immersion Activity</h2>
+            <h2>Daily Immersion Activity <Ja text={JA.stats.hours} class="ja-sub" /></h2>
             <p class="panel-sub">Active watch time & dictionary lookups per day</p>
           </div>
           <div class="seg-toggle">
@@ -521,7 +526,7 @@
       <div class="im-panel anime-panel">
         <div class="panel-head">
           <div>
-            <h2>Immersion by Anime</h2>
+            <h2>Immersion by Anime <Ja text="作品別" class="ja-sub" /></h2>
             <p class="panel-sub">Time spent & words looked up per series</p>
           </div>
         </div>
@@ -567,7 +572,7 @@
     <section class="im-vocab-section">
       <div class="vocab-toolbar">
         <div class="vt-left">
-          <h2>Looked-Up Words & Revision Bank</h2>
+          <h2>Looked-Up Words & Revision Bank <Ja text={JA.stats.words} class="ja-sub" /></h2>
           <div class="status-tabs">
             <button
               type="button"
@@ -612,10 +617,11 @@
             <input
               type="text"
               placeholder="Search kanji, reading, or meaning..."
+              aria-label="Search words by kanji, reading or meaning"
               bind:value={searchQuery}
             />
             {#if searchQuery}
-              <button type="button" class="clear-btn" onclick={() => (searchQuery = "")}>✕</button>
+              <button type="button" class="clear-btn" onclick={() => (searchQuery = "")} aria-label="Clear search"><Icon name="x" size={12} /></button>
             {/if}
           </div>
 
@@ -1075,7 +1081,14 @@
 
 <style>
   .immersion-page {
-    padding: 28px 34px 64px;
+    /* Local aliases → Tokyo Night tokens (this page predates the token set). */
+    --fg: var(--text);
+    --fg-muted: var(--text-2);
+    --fg-subtle: var(--text-2);
+    --bg-card: var(--surface);
+    --bg-hover: var(--surface-2);
+    --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+    padding: calc(var(--nav-h) + var(--nav-inset) + 24px) 34px 64px;
     max-width: 1480px;
     margin: 0 auto;
     display: flex;
@@ -1084,6 +1097,10 @@
   }
 
   .im-header {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+    padding-top: 12px;
     display: flex;
     align-items: flex-end;
     justify-content: space-between;
@@ -1102,8 +1119,13 @@
     margin-bottom: 4px;
   }
 
+  .im-title-group,
+  .im-header-actions {
+    position: relative;
+    z-index: 1;
+  }
   .im-title-group h1 {
-    font-size: 28px;
+    font-size: 34px;
     font-weight: 800;
     letter-spacing: -0.02em;
     margin: 0;
@@ -1213,7 +1235,8 @@
 
   .ring-fg {
     fill: none;
-    stroke: var(--accent);
+    stroke: var(--neon-pink);
+    filter: drop-shadow(0 0 4px rgba(244, 114, 182, 0.6));
     stroke-width: 6.5;
     stroke-linecap: round;
     transition: stroke-dashoffset 300ms ease;
@@ -1283,7 +1306,7 @@
   }
 
   .streak-pill.lit {
-    color: #f4a261;
+    color: var(--neon-pink);
   }
 
   .vocab-pills {
@@ -1291,7 +1314,7 @@
   }
 
   .v-dot.learning {
-    color: #f4a261;
+    color: var(--neon-pink);
     font-weight: 700;
   }
 
@@ -1382,7 +1405,7 @@
     position: absolute;
     left: 0;
     right: 0;
-    border-top: 1px dashed rgba(244, 162, 97, 0.45);
+    border-top: 1px dashed rgba(244, 114, 182, 0.45);
     pointer-events: none;
     z-index: 2;
   }
@@ -1393,7 +1416,7 @@
     top: -16px;
     font-size: 10px;
     font-weight: 700;
-    color: #f4a261;
+    color: var(--neon-pink);
     background: var(--bg-card);
     padding: 1px 5px;
     border-radius: 4px;
@@ -1438,12 +1461,13 @@
   .bar-fill {
     width: 100%;
     border-radius: 5px;
-    background: rgba(244, 162, 97, 0.55);
+    background: linear-gradient(180deg, rgba(244, 114, 182, 0.55), rgba(139, 92, 246, 0.45));
     transition: height 220ms ease;
   }
 
   .bar-fill.met-goal {
-    background: var(--accent);
+    background: linear-gradient(180deg, var(--neon-pink), var(--neon-violet));
+    box-shadow: 0 0 12px rgba(244, 114, 182, 0.45);
   }
 
   .bar-lookup-pip {
@@ -1766,15 +1790,15 @@
   }
 
   .vr-count-badge.warm {
-    background: rgba(244, 162, 97, 0.16);
-    border-color: rgba(244, 162, 97, 0.45);
-    color: #f4a261;
+    background: rgba(244, 114, 182, 0.16);
+    border-color: rgba(244, 114, 182, 0.45);
+    color: var(--neon-pink);
   }
 
   .vr-count-badge.leeches {
-    background: rgba(231, 111, 81, 0.22);
-    border-color: rgba(231, 111, 81, 0.65);
-    color: #ff8a6d;
+    background: rgba(139, 92, 246, 0.22);
+    border-color: rgba(139, 92, 246, 0.65);
+    color: #c4b5fd;
   }
 
   .vr-main-col {
@@ -1806,7 +1830,7 @@
   .vr-headword rt {
     font-size: 10.5px;
     font-weight: 600;
-    color: #f4a261;
+    color: var(--neon-pink);
   }
 
   .vr-surface-forms {
@@ -1820,8 +1844,8 @@
     font-weight: 600;
     padding: 1px 7px;
     border-radius: 6px;
-    background: rgba(244, 162, 97, 0.12);
-    color: #f4a261;
+    background: rgba(244, 114, 182, 0.12);
+    color: var(--neon-pink);
   }
 
   .vr-freq-pill {
@@ -1896,9 +1920,9 @@
   }
 
   .vr-status-btn.learning.active {
-    background: rgba(231, 111, 81, 0.2);
-    border-color: rgba(231, 111, 81, 0.65);
-    color: #ff9b82;
+    background: rgba(139, 92, 246, 0.2);
+    border-color: rgba(139, 92, 246, 0.65);
+    color: #c4b5fd;
   }
 
   .vr-status-btn.known.active {
@@ -1939,15 +1963,15 @@
     font-weight: 800;
     padding: 4px 10px;
     border-radius: 99px;
-    background: rgba(244, 162, 97, 0.18);
-    color: #f4a261;
-    border: 1px solid rgba(244, 162, 97, 0.45);
+    background: rgba(244, 114, 182, 0.18);
+    color: var(--neon-pink);
+    border: 1px solid rgba(244, 114, 182, 0.45);
   }
 
   .vi-lookup-pill.leeches {
-    background: rgba(231, 111, 81, 0.24);
-    color: #ff9b82;
-    border-color: rgba(231, 111, 81, 0.6);
+    background: rgba(139, 92, 246, 0.24);
+    color: #c4b5fd;
+    border-color: rgba(139, 92, 246, 0.6);
   }
 
   .vi-seen-meta {
@@ -2006,7 +2030,7 @@
   .vi-headword rt {
     font-size: 13px;
     font-weight: 600;
-    color: #f4a261;
+    color: var(--neon-pink);
   }
 
   .vi-kana-sub {
@@ -2034,9 +2058,9 @@
   }
 
   .vis-btn.learning.active {
-    background: rgba(231, 111, 81, 0.22);
-    border-color: rgba(231, 111, 81, 0.7);
-    color: #ff9b82;
+    background: rgba(139, 92, 246, 0.22);
+    border-color: rgba(139, 92, 246, 0.7);
+    color: #c4b5fd;
   }
 
   .vis-btn.known.active {
@@ -2071,8 +2095,8 @@
   }
 
   .vi-tag.pos {
-    background: rgba(244, 162, 97, 0.16);
-    color: #f4a261;
+    background: rgba(244, 114, 182, 0.16);
+    color: var(--neon-pink);
   }
 
   .vi-pitch {
@@ -2092,7 +2116,7 @@
   }
 
   .vi-pitch .mora.high {
-    border-top: 2px solid #f4a261;
+    border-top: 2px solid var(--neon-pink);
   }
 
   .vi-pitch .mora.low {
@@ -2100,12 +2124,12 @@
   }
 
   .vi-pitch .mora.drop {
-    border-right: 2px solid #f4a261;
+    border-right: 2px solid var(--neon-pink);
   }
 
   .pitch-num {
     font-size: 9.5px;
-    color: #f4a261;
+    color: var(--neon-pink);
     margin-left: 3px;
   }
 
@@ -2198,8 +2222,8 @@
   }
 
   .vic-sentence mark {
-    background: rgba(244, 162, 97, 0.25);
-    color: #f4a261;
+    background: rgba(244, 114, 182, 0.25);
+    color: var(--neon-pink);
     padding: 0 3px;
     border-radius: 4px;
   }
@@ -2333,6 +2357,99 @@
     justify-content: flex-end;
     gap: 8px;
     margin-top: 4px;
+  }
+
+  /* Tokyo Night pass ------------------------------------------------------- */
+  .im-metric-card,
+  .im-panel {
+    border-color: transparent;
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-sm);
+  }
+  .top-anime-row {
+    border-color: transparent;
+    background: var(--surface-2);
+    transition: background var(--t-med) var(--ease), box-shadow var(--t-med) var(--ease);
+  }
+  .top-anime-row:hover {
+    background: var(--surface-3);
+    box-shadow: var(--neon-glow);
+  }
+  .im-btn {
+    border-color: transparent;
+    background: var(--surface);
+    border-radius: var(--r-pill);
+  }
+  .im-btn:hover {
+    border-color: transparent;
+    background: var(--surface-2);
+  }
+  .im-btn.primary {
+    background: var(--cta);
+    border-color: transparent;
+    color: var(--on-cta);
+  }
+  .im-btn.primary:hover {
+    background: var(--cta-hover);
+    filter: none;
+    box-shadow: var(--neon-glow);
+  }
+  .im-btn:focus-visible,
+  .top-anime-row:focus-visible,
+  .seg-toggle button:focus-visible,
+  .inline-link:focus-visible {
+    outline: 2px solid var(--neon-violet);
+    outline-offset: 2px;
+  }
+  .seg-toggle {
+    border-color: transparent;
+    background: var(--surface-2);
+    border-radius: var(--r-pill);
+  }
+  .seg-toggle button {
+    border-radius: var(--r-pill);
+  }
+  .seg-toggle button.active {
+    background: var(--primary);
+    color: var(--on-primary);
+  }
+  .im-eyebrow {
+    font-family: var(--font-label);
+    letter-spacing: 0.12em;
+    color: var(--text-2);
+  }
+  .metric-label {
+    font-family: var(--font-label);
+    letter-spacing: 0.12em;
+  }
+  .metric-label :global(.metric-ja),
+  .metric-val :global(.metric-ja),
+  .metric-sub :global(.metric-ja) {
+    margin-left: 4px;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--text-2);
+    font-weight: 500;
+  }
+  .metric-info :global(.metric-dur) {
+    font-size: 11.5px;
+    color: var(--text-2);
+  }
+  .streak-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .streak-pill :global(.streak-ja) {
+    font-size: 11px;
+    font-weight: 500;
+    opacity: 0.85;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bar-fill,
+    .ring-fg {
+      transition: none;
+    }
   }
 </style>
 

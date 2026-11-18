@@ -62,7 +62,7 @@
       <div>
         <h2 id="person-modal-title">{person?.nameFull || initialName}</h2>
         {#if person?.nameNative}
-          <p class="native">{person.nameNative}</p>
+          <p class="native" lang="ja">{person.nameNative}</p>
         {/if}
         {#if person?.occupations.length}
           <div class="occ-pills">
@@ -180,7 +180,7 @@
     background: var(--bg-elev);
     border: var(--bw) solid var(--line);
     border-radius: var(--r-xl);
-    box-shadow: 6px 6px 0 var(--coral);
+    box-shadow: var(--sticker-lg), var(--neon-glow);
   }
   header {
     display: flex;
@@ -188,7 +188,7 @@
     justify-content: space-between;
     gap: 16px;
     padding: 20px 24px 16px;
-    border-bottom: 1.5px solid var(--line-soft);
+    border-bottom: 1px solid var(--line);
   }
   .person-head {
     display: flex;
@@ -200,7 +200,7 @@
     height: 60px;
     border-radius: 50%;
     object-fit: cover;
-    border: 2px solid var(--line);
+    border: 1px solid transparent;
   }
   .native {
     font-size: 13px;
@@ -240,7 +240,7 @@
     padding: 4px 10px;
     border-radius: var(--r-pill);
     background: var(--bg-soft);
-    border: 1.5px solid var(--line-soft);
+    border: 1px solid transparent;
     cursor: pointer;
   }
   .works-grid {
@@ -255,7 +255,7 @@
     padding: 9px 11px;
     text-align: left;
     background: var(--bg-card);
-    border: 1.5px solid var(--line-soft);
+    border: 1px solid transparent;
     border-radius: var(--r-md);
     color: var(--fg);
     cursor: pointer;
@@ -342,10 +342,23 @@
     align-items: center;
     gap: 10px;
     padding: 14px 24px;
-    border-top: 1.5px solid var(--line-soft);
+    border-top: 1px solid var(--line);
   }
   .spacer {
     flex: 1;
+  }
+
+  /* Tokyo Night pass: glass surface + neon focus ------------------------ */
+  .dialog {
+    background: var(--glass-tn-strong);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
+  }
+  button:focus-visible,
+  input:focus-visible {
+    outline: 2px solid var(--neon-violet);
+    outline-offset: 2px;
   }
 </style>
 

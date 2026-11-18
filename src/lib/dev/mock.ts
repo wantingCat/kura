@@ -500,8 +500,10 @@ export function installMock() {
             })),
           };
         }
+        case "list_torrent_sessions":
+          return [];
         case "plugin:app|version":
-          return "0.4";
+          return "0.8.1";
         default:
           console.info("[preview] ignored command", cmd, a);
           return null;

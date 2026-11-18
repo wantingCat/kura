@@ -177,6 +177,20 @@ pub fn run() {
             backup::start_auto(state.clone());
             anilist_sync::start_worker(app.handle().clone(), state.clone());
 
+            // Pre-warm the built-in libmpv engine & hidden Win32 video surface shortly after
+            // launch so the first click on Play opens instantaneously.
+            {
+                let warm_app = app.handle().clone();
+                let warm_state = state.clone();
+                std::thread::Builder::new()
+                    .name("kura-mpv-warmup".to_string())
+                    .spawn(move || {
+                        std::thread::sleep(Duration::from_millis(900));
+                        embedded_player::warm_up(warm_app, warm_state);
+                    })
+                    .ok();
+            }
+
             // System tray icon & context menu for background episode + Jimaku monitoring
             #[cfg(desktop)]
             {

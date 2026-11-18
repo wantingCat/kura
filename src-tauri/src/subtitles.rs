@@ -2843,14 +2843,19 @@ fn heal_linked_subtitles_for_episode(conn: &Connection, anilist_id: i64, ep_key:
 }
 
 /// Load external subtitle cues for an episode (either from linked subtitles in DB or sibling `.srt`/`.ass` files).
-pub fn load_cues_for_episode(
+pub fn candidate_subtitle_paths_for_episode(
     conn: &Connection,
     anilist_id: i64,
     ep_key: &str,
+) -> Vec<String> {
+    heal_linked_subtitles_for_episode(conn, anilist_id, ep_key);
+    episode_subtitle_paths(conn, anilist_id, ep_key)
+}
+
+pub fn load_cues_from_candidates(
+    mut candidate_paths: Vec<String>,
     video_path: &str,
 ) -> (Option<String>, Vec<SubtitleCue>) {
-    heal_linked_subtitles_for_episode(conn, anilist_id, ep_key);
-    let mut candidate_paths = episode_subtitle_paths(conn, anilist_id, ep_key);
     let vpath = Path::new(video_path);
     if let (Some(parent), Some(stem)) = (vpath.parent(), vpath.file_stem().and_then(|s| s.to_str()))
     {
@@ -2889,6 +2894,16 @@ pub fn load_cues_for_episode(
         }
     }
     (None, Vec::new())
+}
+
+pub fn load_cues_for_episode(
+    conn: &Connection,
+    anilist_id: i64,
+    ep_key: &str,
+    video_path: &str,
+) -> (Option<String>, Vec<SubtitleCue>) {
+    let candidate_paths = candidate_subtitle_paths_for_episode(conn, anilist_id, ep_key);
+    load_cues_from_candidates(candidate_paths, video_path)
 }
 
 #[derive(Debug, Clone)]

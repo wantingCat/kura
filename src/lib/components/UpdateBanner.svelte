@@ -1,32 +1,49 @@
 <script lang="ts">
   import { updater } from "$lib/updater.svelte";
   import Icon from "./Icon.svelte";
+  import Ja from "./Ja.svelte";
+
+  /** Local accent vocabulary (not in ja.ts): 更新 = "update". */
+  const JA_UPDATE = "更新";
 </script>
 
 {#if updater.visible}
-  <div class="update" role="status" id="update-banner">
-    <span class="burst" aria-hidden="true"><span>NEW!</span></span>
+  <div class="update glass" class:error={updater.status === "error"} role="status" id="update-banner">
+    <span class="mark" aria-hidden="true">
+      <Icon name={updater.status === "error" ? "alert" : "sparkles"} size={16} />
+    </span>
     <div class="text">
       {#if updater.status === "error"}
-        <strong>Update failed.</strong>
+        <strong>Update failed. <Ja text={JA_UPDATE} class="ja-sub" /></strong>
         <span class="muted">{updater.error ?? "Something went wrong."} You can grab it from GitHub instead.</span>
       {:else if updater.status === "downloading"}
         <strong>Downloading Kura v{updater.version}…</strong>
-        <span class="bar"><span class="fill" style:width={updater.percent === null ? "40%" : `${updater.percent}%`} class:indeterminate={updater.percent === null}></span></span>
+        <span class="neon-progress bar">
+          <span
+            class="fill"
+            style:width={updater.percent === null ? "40%" : `${updater.percent}%`}
+            class:indeterminate={updater.percent === null}
+          ></span>
+        </span>
       {:else if updater.status === "installing"}
         <strong>Installing — Kura will restart in a moment.</strong>
       {:else}
-        <strong>Kura v{updater.version} is available!</strong>
+        <strong>Kura v{updater.version} is available! <Ja text={JA_UPDATE} class="ja-sub" /></strong>
         <span class="muted">Your library and settings stay as they are.</span>
       {/if}
     </div>
     <div class="buttons">
       {#if updater.status === "available"}
-        <button class="btn btn-sm btn-ink" onclick={() => updater.install()} id="update-install">
+        <button class="btn btn-sm btn-cta" onclick={() => updater.install()} id="update-install">
           <Icon name="refresh" size={14} /> Update &amp; restart
         </button>
       {:else if updater.status === "error"}
-        <a class="btn btn-sm btn-ink" href="https://github.com/wantingCat/kura/releases/latest" target="_blank" rel="noreferrer">
+        <a
+          class="btn btn-sm btn-ghost-glass"
+          href="https://github.com/wantingCat/kura/releases/latest"
+          target="_blank"
+          rel="noreferrer"
+        >
           <Icon name="external" size={14} /> Open GitHub
         </a>
       {/if}
@@ -40,43 +57,50 @@
 {/if}
 
 <style>
+  /* Floats just below the fixed navbar so it is never hidden underneath it. */
   .update {
-    position: relative;
+    position: fixed;
+    top: calc(var(--nav-h) + var(--nav-inset) + 10px);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 790;
     display: flex;
     align-items: center;
-    gap: 16px;
-    margin: 18px 36px 0;
-    padding: 12px 14px 12px 74px;
+    gap: 14px;
+    width: min(720px, calc(100vw - 2 * var(--nav-inset)));
+    padding: 10px 10px 10px 12px;
     border-radius: var(--r-lg);
-    border: var(--bw) solid var(--line);
-    background: var(--coral);
-    color: var(--on-coral);
-    box-shadow: var(--sticker);
+    color: var(--text);
+    box-shadow: var(--shadow-lg), var(--neon-glow);
     animation: fade-in var(--t-med) var(--ease);
   }
-  .burst {
+  .update::before {
+    /* thin neon accent edge */
+    content: "";
     position: absolute;
-    left: -10px;
-    top: 50%;
-    width: 74px;
-    height: 74px;
-    margin-top: -37px;
+    left: 14px;
+    right: 14px;
+    top: 0;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--neon);
+  }
+  .update.error::before {
+    background: var(--danger);
+  }
+  .mark {
+    flex: none;
     display: grid;
     place-items: center;
-    background: var(--amber);
-    /* 12-point comic starburst */
-    clip-path: polygon(
-      50% 0%, 61% 15%, 79% 7%, 80% 26%, 98% 30%, 88% 46%, 100% 61%, 82% 69%, 85% 88%, 66% 85%, 55% 100%, 44% 86%,
-      26% 94%, 23% 75%, 4% 72%, 13% 55%, 0% 40%, 17% 31%, 13% 12%, 33% 14%
-    );
-    transform: rotate(-10deg);
-    filter: drop-shadow(2px 2px 0 var(--line));
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--neon-violet) 22%, transparent);
+    color: var(--neon-pink);
   }
-  .burst span {
-    font-family: var(--font-display);
-    font-weight: 700;
-    font-size: 15px;
-    color: var(--on-coral);
+  .update.error .mark {
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
+    color: var(--danger);
   }
   .text {
     flex: 1;
@@ -87,24 +111,26 @@
   }
   strong {
     font-family: var(--font-display);
-    font-size: 16px;
+    font-size: 14px;
     font-weight: 600;
   }
   .muted {
-    color: color-mix(in srgb, var(--on-coral) 75%, transparent);
-    font-size: 13px;
+    color: var(--text-2);
+    font-size: 12.5px;
   }
   .buttons {
     display: flex;
     align-items: center;
     gap: 6px;
   }
-  .btn-ink {
-    background: var(--plum);
-    color: var(--cream);
+  .btn-ghost-glass {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: var(--glass-hairline);
+    border-radius: var(--r-pill);
+    color: var(--text);
   }
-  .btn-ink:hover {
-    background: var(--surface-3);
+  .btn-ghost-glass:hover {
+    background: rgba(255, 255, 255, 0.12);
   }
   .close {
     display: grid;
@@ -112,28 +138,22 @@
     width: 32px;
     height: 32px;
     border: none;
-    border-radius: var(--r-sm);
+    border-radius: var(--r-pill);
     background: transparent;
-    color: var(--on-coral);
+    color: var(--text-2);
     cursor: pointer;
+    transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
   }
   .close:hover {
-    background: color-mix(in srgb, var(--on-coral) 14%, transparent);
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text);
   }
   .bar {
     display: block;
-    margin-top: 4px;
-    height: 8px;
+    margin-top: 6px;
     max-width: 360px;
-    border-radius: 99px;
-    background: color-mix(in srgb, var(--on-coral) 18%, transparent);
-    border: 1.5px solid var(--line);
-    overflow: hidden;
   }
   .fill {
-    display: block;
-    height: 100%;
-    background: var(--cream);
     transition: width var(--t-med) var(--ease);
   }
   .fill.indeterminate {
@@ -145,6 +165,14 @@
     }
     to {
       transform: translateX(260%);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .update {
+      animation: none;
+    }
+    .fill.indeterminate {
+      animation: none;
     }
   }
 </style>

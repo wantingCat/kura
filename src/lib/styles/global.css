@@ -1,75 +1,98 @@
-/* Kura Design System ------------------------------------------------------
- * Cinematic dark: near-black canvas, blurred key-art backdrops, white primary
- * actions, and a single warm orange accent for progress, badges & focus.
+/* Kura Design System — Tokyo Night (蔵 · 東京ナイト) ------------------------
+ * A late-night Shinjuku cinema: indigo-black canvas, frosted glass panels,
+ * a violet→pink neon used sparingly (progress, primary play, focus, active
+ * nav), and a Japanese accent layer sprinkled through an English UI.
+ * Source of truth: design-system/kura-tokyo-night/MASTER.md
  * ------------------------------------------------------------------------ */
 
 :root {
-  /* Brand accent */
-  --coral: #f97316;
-  --coral-hi: #fb8a3c;
-  --coral-lo: #ea580c;
-  --plum: #121218;
-  --pink: #fb923c;
-  --cream: #f3f3f5;
+  /* Neon accent (violet → pink). Non-text use: glows, progress, focus. */
+  --neon-violet: #8b5cf6;
+  --neon-pink: #f472b6;
+  --neon: linear-gradient(90deg, #8b5cf6 0%, #f472b6 100%);
+  --neon-glow: 0 0 24px rgba(139, 92, 246, 0.45);
+  --neon-glow-strong: 0 0 32px rgba(139, 92, 246, 0.55), 0 0 64px rgba(244, 114, 182, 0.18);
+  /* Primary CTA fill — darkened so a white label stays ≥ 4.5:1. */
+  --cta: linear-gradient(90deg, #7c3aed 0%, #be185d 100%);
+  --cta-hover: linear-gradient(90deg, #8b4cf0 0%, #cc2a6c 100%);
+  --on-cta: #ffffff;
+
+  /* Legacy brand names now map onto the neon violet so existing pages follow. */
+  --coral: #8b5cf6;
+  --coral-hi: #a78bfa;
+  --coral-lo: #7c3aed;
+  --plum: #12141f;
+  --pink: #f472b6;
+  --cream: #f4f2ff;
 
   /* Surfaces (darkest → lightest) */
-  --line: rgba(255, 255, 255, 0.07);
-  --ink: rgba(255, 255, 255, 0.12);
-  --shadow-color: rgba(0, 0, 0, 0.6);
-  --bg: #08080b;
-  --bg-elev: #0d0d12;
-  --bg-2: #101016;
-  --surface: #121218;
-  --surface-2: #1a1a22;
-  --surface-3: #24242e;
-  --border: rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.14);
+  --line: rgba(255, 255, 255, 0.06);
+  --ink: rgba(255, 255, 255, 0.1);
+  --shadow-color: rgba(3, 4, 10, 0.7);
+  --bg: #0b0d14;
+  --bg-deep: #080910;
+  --bg-elev: #0f111a;
+  --bg-2: #10121c;
+  --surface: #12141f;
+  --surface-2: #181b29;
+  --surface-3: #222537;
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.12);
 
-  /* Text */
-  --text: #f3f3f5;
-  --text-2: #a3a3ae;
-  --text-3: #6b6b78;
+  /* Glass (navbar & small overlays only — keep blur radius lean for 120fps scrolling) */
+  --glass-tn: rgba(18, 20, 31, 0.78);
+  --glass-tn-strong: rgba(14, 16, 26, 0.92);
+  --glass-hairline: rgba(255, 255, 255, 0.07);
+  --blur-tn: blur(12px) saturate(135%);
+
+  /* Text (contrast on --bg: text ≈ 17:1, text-2 ≈ 7:1, text-3 ≈ 3:1 large/decorative only) */
+  --text: #f4f2ff;
+  --text-2: #9a9cb8;
+  --text-3: #5c5f7a;
   --on-coral: #ffffff;
 
-  /* Primary action (white, like a player's main button) */
-  --primary: #f3f3f5;
+  /* Primary action (white pill, used for in-card play buttons) */
+  --primary: #f4f2ff;
   --primary-hi: #ffffff;
-  --on-primary: #08080b;
+  --on-primary: #0b0d14;
 
   /* Status */
   --ok: #34d399;
   --amber: #fbbf24;
   --danger: #f87171;
+  --sat-blue: #60a5fa;
 
   /* Legacy aliases */
-  --sakura: var(--coral);
-  --violet: var(--coral);
+  --sakura: var(--neon-pink);
+  --violet: var(--neon-violet);
   --sky: #38bdf8;
   --mint: var(--ok);
-  --accent: var(--coral);
-  --grad: linear-gradient(135deg, #f97316 0%, #fb923c 100%);
-  --grad-soft: color-mix(in srgb, var(--coral) 14%, transparent);
-  --coral-soft: color-mix(in srgb, var(--coral) 14%, transparent);
-  --glass: rgba(255, 255, 255, 0.08);
+  --accent: var(--neon-violet);
+  --grad: var(--cta);
+  --grad-soft: color-mix(in srgb, var(--neon-violet) 14%, transparent);
+  --coral-soft: color-mix(in srgb, var(--neon-violet) 14%, transparent);
+  --glass: rgba(255, 255, 255, 0.07);
   --glass-border: rgba(255, 255, 255, 0.1);
   --blur: blur(14px);
 
   /* Shape & depth */
   --r-sm: 8px;
-  --r-md: 10px;
+  --r-md: 12px;
   --r-lg: 14px;
-  --r-xl: 18px;
+  --r-xl: 16px;
+  --r-pill: 999px;
   --bw: 1px;
-  --sticker: 0 10px 28px -10px rgba(0, 0, 0, 0.7);
-  --sticker-lg: 0 24px 56px -16px rgba(0, 0, 0, 0.85);
-  --shadow-sm: 0 4px 14px -4px rgba(0, 0, 0, 0.5);
+  --sticker: 0 10px 28px -10px rgba(3, 4, 10, 0.8);
+  --sticker-lg: 0 24px 56px -16px rgba(3, 4, 10, 0.9);
+  --shadow-sm: 0 4px 14px -4px rgba(3, 4, 10, 0.6);
   --shadow-md: var(--sticker);
   --shadow-lg: var(--sticker-lg);
 
   /* Typography */
-  --font: "Inter Variable", "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", "Noto Sans CJK JP", sans-serif;
-  --font-display: "Inter Variable", "Inter", "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif;
-  --font-jp: "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif CJK JP", "Hiragino Sans", "Yu Gothic UI", "Meiryo", serif;
+  --font: "Inter Variable", "Inter", "Noto Sans JP Variable", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", sans-serif;
+  --font-display: "Inter Variable", "Inter", "Noto Sans JP Variable", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --font-jp: "Noto Sans JP Variable", "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+  --font-label: "Space Grotesk Variable", "Space Grotesk", "Inter Variable", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, SFMono-Regular, Consolas, monospace;
 
   /* Motion */
@@ -77,72 +100,15 @@
   --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
   --bounce: cubic-bezier(0.22, 1, 0.36, 1);
   --t-fast: 140ms;
-  --t-med: 240ms;
+  --t-med: 250ms;
+  --hover-intent: 300ms;
 
-  --sidebar-w: 64px;
+  --nav-h: 60px;
+  --nav-inset: 16px;
+  --sidebar-w: 0px;
   --page-x: 48px;
+  --gutter: 4vw;
   color-scheme: dark;
-}
-
-/* Manga Editorial Mode (Light Theme — Printed Tankōbon & Sumi Hairlines) -- */
-:root[data-theme="manga"],
-[data-theme="manga"] {
-  --coral: #d93829;
-  --coral-hi: #e54839;
-  --coral-lo: #b82b1e;
-  --plum: #24201d;
-  --pink: #e57373;
-  --cream: #141210;
-
-  --line: rgba(20, 18, 16, 0.12);
-  --ink: rgba(20, 18, 16, 0.22);
-  --shadow-color: rgba(20, 18, 16, 0.08);
-  --bg: #f6f4ef;
-  --bg-elev: #ffffff;
-  --bg-2: #efece4;
-  --surface: #ffffff;
-  --surface-2: #f0ede5;
-  --surface-3: #e4e0d5;
-  --border: rgba(20, 18, 16, 0.11);
-  --border-strong: rgba(20, 18, 16, 0.24);
-
-  --text: #141210;
-  --text-2: #4c4741;
-  --text-3: #7d766d;
-  --on-coral: #ffffff;
-  --primary: #141210;
-  --primary-hi: #2a2622;
-  --on-primary: #ffffff;
-  --glass-border: rgba(20, 18, 16, 0.12);
-  --coral-soft: color-mix(in srgb, var(--coral) 11%, transparent);
-
-  --ok: #15803d;
-  --amber: #d97706;
-  --danger: #dc2626;
-
-  --sakura: var(--coral);
-  --violet: var(--coral);
-  --sky: #0284c7;
-  --mint: var(--ok);
-  --accent: var(--coral);
-  --grad: linear-gradient(135deg, #d93829 0%, #ef5350 100%);
-  --grad-soft: color-mix(in srgb, var(--coral) 11%, transparent);
-  --glass: rgba(255, 255, 255, 0.85);
-  --blur: blur(16px);
-
-  --sticker: 0 6px 20px -6px rgba(20, 18, 16, 0.09);
-  --sticker-lg: 0 16px 38px -10px rgba(20, 18, 16, 0.14);
-
-  color-scheme: light;
-}
-
-[data-theme="manga"] ::-webkit-scrollbar-thumb {
-  background: var(--surface-3);
-  border-color: var(--bg);
-}
-
-[data-theme="manga"] ::-webkit-scrollbar-thumb:hover {
-  background-color: var(--text-3);
 }
 
 *,
@@ -156,6 +122,8 @@ body {
   margin: 0;
   height: 100%;
   background: var(--bg);
+  background-image: radial-gradient(1200px 600px at 70% -10%, rgba(139, 92, 246, 0.08), transparent 60%),
+    linear-gradient(180deg, var(--bg) 0%, var(--bg-deep, var(--bg)) 100%);
   color: var(--text);
   font-family: var(--font);
   font-size: 14px;
@@ -204,7 +172,8 @@ img {
   max-width: 100%;
 }
 
-.jp {
+.jp,
+:lang(ja) {
   font-family: var(--font-jp);
 }
 
@@ -215,14 +184,114 @@ img {
   letter-spacing: 0.14em;
 }
 
+/* Japanese accent layer --------------------------------------------------- */
+/* Secondary Japanese label sitting next to English (e.g. "Recently Added · 新着"). */
+.ja-sub {
+  font-family: var(--font-jp);
+  font-size: 0.72em;
+  font-weight: 500;
+  color: var(--text-2);
+  letter-spacing: 0.04em;
+  margin-left: 0.5em;
+}
+/* Huge faint kanji behind page headers (decorative, aria-hidden).
+   Anchored to the RIGHT of the header so its strokes never cross the title or
+   description text (QA: left-anchored watermark hurt readability). */
+.kanji-watermark {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  left: auto;
+  transform: translateY(-50%);
+  font-family: var(--font-jp);
+  font-weight: 900;
+  font-size: clamp(96px, 11vw, 168px);
+  line-height: 1;
+  letter-spacing: 0.02em;
+  color: transparent;
+  -webkit-text-stroke: 1px rgba(139, 92, 246, 0.18);
+  background: linear-gradient(180deg, rgba(139, 92, 246, 0.08), transparent 85%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+  z-index: 0;
+}
+/* Gradient text for native titles. */
+.neon-text {
+  background: var(--neon);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+/* Uppercase letter-spaced label: "EP 07 · 12M LEFT" */
+.tn-label {
+  font-family: var(--font-label);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+/* When the user turns Japanese accents off, decorative Japanese disappears. */
+html.ja-off .ja-deco {
+  display: none !important;
+}
+
+/* Glass surface utility */
+.glass {
+  background: var(--glass-tn);
+  backdrop-filter: var(--blur-tn);
+  -webkit-backdrop-filter: var(--blur-tn);
+  border: 1px solid var(--glass-hairline);
+}
+
+/* Neon progress bar: <div class="neon-progress"><span style="width:40%"></span></div> */
+.neon-progress {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.neon-progress > span {
+  display: block;
+  height: 100%;
+  background: var(--neon);
+  border-radius: inherit;
+  box-shadow: 0 0 10px rgba(244, 114, 182, 0.55);
+}
+
+/* Hide scrollbars on horizontal rails while keeping them scrollable */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Screen-reader-only text */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 ::selection {
   background: var(--coral);
   color: var(--on-coral);
 }
 
 :focus-visible {
-  outline: 2px solid var(--coral);
+  outline: 2px solid var(--neon-violet, var(--coral));
   outline-offset: 2px;
+  box-shadow: var(--neon-glow, none);
 }
 
 /* Scrollbars */
@@ -298,13 +367,31 @@ img {
   box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.6);
 }
 .btn-accent {
-  background: var(--coral);
-  border-color: var(--coral);
-  color: var(--on-coral);
+  background: var(--cta);
+  border-color: transparent;
+  color: var(--on-cta);
+  box-shadow: var(--neon-glow);
 }
 .btn-accent:hover {
-  background: var(--coral-hi);
-  border-color: var(--coral-hi);
+  background: var(--cta-hover);
+  border-color: transparent;
+  box-shadow: var(--neon-glow-strong);
+}
+/* Tokyo Night primary play pill (gradient fill + neon glow behind) */
+.btn-cta {
+  background: var(--cta);
+  border-color: transparent;
+  color: var(--on-cta);
+  border-radius: var(--r-pill);
+  box-shadow: var(--neon-glow);
+}
+.btn-cta:hover {
+  background: var(--cta-hover);
+  border-color: transparent;
+  box-shadow: var(--neon-glow-strong);
+}
+.btn-pill {
+  border-radius: var(--r-pill);
 }
 .btn-glass {
   background: var(--glass);
