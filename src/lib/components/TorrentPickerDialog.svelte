@@ -2,12 +2,17 @@
   import { onMount } from "svelte";
   import {
     api,
+    type MediaDetail,
+    type RememberedBatch,
     type TorrentCandidate,
     type TorrentExtension,
+    type TorrentFileEntry,
     type TorrentSessionStatus,
   } from "$lib/api";
   import { app } from "$lib/app.svelte";
+  import { searchInstalledTorrentExtensions } from "$lib/extensions/host";
   import { formatBytes } from "$lib/format";
+  import { getCachedOrLoadMediaDetail } from "$lib/onlinestream.svelte";
   import Icon from "./Icon.svelte";
 
   let {
@@ -15,15 +20,19 @@
     title,
     epKey,
     episodeNumber,
+    detail = null,
     autoStart = false,
     onclose,
+    onswitchtoweb,
   }: {
     anilistId: number;
     title: string;
     epKey: string;
     episodeNumber: number;
+    detail?: MediaDetail | null;
     autoStart?: boolean;
     onclose: () => void;
+    onswitchtoweb?: () => void;
   } = $props();
 
   let loading = $state(true);
@@ -42,6 +51,20 @@
   let showExtensions = $state(false);
   let extInput = $state("");
   let importingExt = $state(false);
+
+  // Batch memory & explicit batch file picker state
+  let rememberedBatch = $state<RememberedBatch | null>(null);
+  let expandedBatchKey = $state<string | null>(null);
+  let loadingBatchFiles = $state(false);
+  let batchFilesByKey = $state<Record<string, TorrentFileEntry[]>>({});
+
+  const enabledJsTorrentCount = $derived(
+    app.installedExtensions.filter((e) => e.enabled && e.extType === "anime-torrent-provider")
+      .length,
+  );
+  const totalEnabledTorrentSources = $derived(
+    extensions.filter((e) => e.enabled).length + enabledJsTorrentCount,
+  );
 
   function candidateKey(c: TorrentCandidate): string {
     return (c.infoHash || c.torrentUrl || c.magnetUri || c.title).toLowerCase();
@@ -89,16 +112,68 @@
     triedKeys = [];
     failoverCount = 0;
     try {
-      candidates = await api.searchEpisodeTorrents(
-        anilistId,
-        episodeNumber,
-        q || null,
-      );
+      const [nativeRes, jsRes, remRes] = await Promise.allSettled([
+        api.searchEpisodeTorrents(anilistId, episodeNumber, q || null),
+        (async () => {
+          const d = detail ?? (await getCachedOrLoadMediaDetail(anilistId));
+          return searchInstalledTorrentExtensions(
+            d,
+            episodeNumber,
+            app.torrentQuality,
+            q || undefined,
+          );
+        })(),
+        api.getRememberedBatch(anilistId),
+      ]);
+
+      if (remRes.status === "fulfilled") {
+        rememberedBatch = remRes.value;
+      }
+
+      const mergedMap = new Map<string, TorrentCandidate>();
+      const pushList = (items: TorrentCandidate[]) => {
+        for (const item of items) {
+          const k = candidateKey(item);
+          const prev = mergedMap.get(k);
+          if (!prev || item.score > prev.score) {
+            mergedMap.set(k, item);
+          }
+        }
+      };
+
+      let nativeErr: string | null = null;
+      if (nativeRes.status === "fulfilled") {
+        pushList(nativeRes.value);
+      } else {
+        nativeErr = String(nativeRes.reason);
+      }
+      if (jsRes.status === "fulfilled") {
+        pushList(jsRes.value);
+      }
+
+      const merged = Array.from(mergedMap.values()).sort((a, b) => b.score - a.score);
+      // Mark best release if none marked yet
+      if (merged.length > 0 && !merged.some((c) => c.isBestRelease)) {
+        const top = merged.find((c) => c.seeders > 0) ?? merged[0];
+        top.isBestRelease = true;
+      }
+      candidates = merged;
+
+      if (merged.length === 0 && nativeErr) {
+        if (nativeErr.includes("NO_TORRENT_EXTENSIONS") && enabledJsTorrentCount === 0) {
+          showExtensions = true;
+          error = null;
+        } else if (!nativeErr.includes("NO_TORRENT_EXTENSIONS")) {
+          error = nativeErr;
+        }
+      }
+
       if (!q && !customQuery) {
         customQuery = `${title} ${String(episodeNumber).padStart(2, "0")}`;
       }
-      if (autoStart && !q && app.torrentQuality !== "ask") {
+      if (autoStart && !q && app.torrentQuality !== "ask" && candidates.length > 0) {
         const best =
+          candidates.find((c) => c.isBestRelease && c.seeders > 0) ??
           candidates.find((c) => c.seeders >= 3 && c.score > 400) ??
           candidates.find((c) => c.seeders > 0 && c.score > 400) ??
           candidates.find((c) => c.seeders > 0) ??
@@ -109,7 +184,7 @@
       }
     } catch (e) {
       const msg = String(e);
-      if (msg.includes("NO_TORRENT_EXTENSIONS")) {
+      if (msg.includes("NO_TORRENT_EXTENSIONS") && enabledJsTorrentCount === 0) {
         showExtensions = true;
         error = null;
       } else {
@@ -122,8 +197,12 @@
 
   async function loadExtensions() {
     try {
-      extensions = await api.listTorrentExtensions();
-      if (extensions.filter((e) => e.enabled).length === 0) {
+      const [nativeList] = await Promise.all([
+        api.listTorrentExtensions(),
+        app.refreshExtensions(),
+      ]);
+      extensions = nativeList;
+      if (nativeList.filter((e) => e.enabled).length === 0 && enabledJsTorrentCount === 0) {
         showExtensions = true;
       }
     } catch {
@@ -137,6 +216,22 @@
     importingExt = true;
     error = null;
     try {
+      if (val.startsWith("{") || val.endsWith(".json") || val.includes("manifest") || val.includes("/blob/")) {
+        try {
+          const installed = await api.installExtension(val);
+          await app.refreshExtensions();
+          extInput = "";
+          showExtensions = false;
+          app.toast(`Installed "${installed.name}" (${installed.extType})`, "info", 4500);
+          await search(customQuery || undefined);
+          return;
+        } catch (seErr) {
+          const s = String(seErr);
+          if (s.includes("UNSUPPORTED_SEANIME_TYPE") || s.includes("SEANIME_MANIFEST_ERR")) {
+            throw new Error(s.replace(/^[A-Z_]+:\s*/, ""));
+          }
+        }
+      }
       extensions = await api.importTorrentExtension(val);
       extInput = "";
       showExtensions = false;
@@ -146,7 +241,7 @@
       );
       await search(customQuery || undefined);
     } catch (e) {
-      error = String(e);
+      error = e instanceof Error ? e.message : String(e);
     } finally {
       importingExt = false;
     }
@@ -173,7 +268,7 @@
     void search();
   });
 
-  async function startCandidate(c: TorrentCandidate) {
+  async function startCandidate(c: TorrentCandidate, explicitFileIndex?: number | null) {
     if (starting) return;
     starting = true;
     error = null;
@@ -192,6 +287,7 @@
         episodeNum: episodeNumber,
         candidate: c,
         modeOverride: chosenMode,
+        fileIndex: explicitFileIndex ?? null,
       });
       activeSessionId = status.sessionId;
       if (chosenMode === "download") {
@@ -200,13 +296,44 @@
     } catch (e) {
       error = String(e);
       starting = false;
-      if (failoverCount < 4 && nextUntriedCandidate) {
+      if (explicitFileIndex == null && failoverCount < 4 && nextUntriedCandidate) {
         failoverCount += 1;
         await startCandidate(nextUntriedCandidate);
         return;
       }
     } finally {
       starting = false;
+    }
+  }
+
+  async function toggleBatchFiles(c: TorrentCandidate) {
+    const key = candidateKey(c);
+    if (expandedBatchKey === key) {
+      expandedBatchKey = null;
+      return;
+    }
+    expandedBatchKey = key;
+    if (batchFilesByKey[key]) return;
+    loadingBatchFiles = true;
+    error = null;
+    try {
+      const files = await api.listTorrentFiles(c);
+      batchFilesByKey = { ...batchFilesByKey, [key]: files };
+    } catch (e) {
+      error = String(e);
+    } finally {
+      loadingBatchFiles = false;
+    }
+  }
+
+  async function forgetRememberedBatch() {
+    try {
+      await api.clearRememberedBatch(anilistId);
+      rememberedBatch = null;
+      app.toast("Cleared remembered batch torrent for this series", "info", 3500);
+      await search(customQuery || undefined);
+    } catch (e) {
+      error = String(e);
     }
   }
 
@@ -278,12 +405,25 @@
         <h2>{title}</h2>
       </div>
       <div class="head-actions">
+        {#if onswitchtoweb}
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            onclick={() => {
+              onswitchtoweb();
+              onclose();
+            }}
+            title="Switch to Direct Soft-Sub Web Stream for this episode"
+          >
+            Web Stream
+          </button>
+        {/if}
         <button
           class="btn btn-ghost btn-sm"
           onclick={() => (showExtensions = !showExtensions)}
           title="Manage modular torrent extensions & indexers"
         >
-          🧩 Extensions ({extensions.filter((e) => e.enabled).length})
+          🧩 Extensions ({totalEnabledTorrentSources})
         </button>
         <button
           class="btn btn-ghost btn-icon"
@@ -485,6 +625,16 @@
         </form>
       </div>
 
+      {#if rememberedBatch}
+        <div class="remembered-batch-bar">
+          <span class="faint">Remembered Batch:</span>
+          <strong class="rem-batch-title" title={rememberedBatch.title}>{rememberedBatch.title}</strong>
+          <button type="button" class="btn btn-ghost btn-sm" onclick={forgetRememberedBatch}>
+            Forget Batch
+          </button>
+        </div>
+      {/if}
+
       {#if error}
         <div class="err-box">{error}</div>
       {/if}
@@ -497,12 +647,12 @@
               >Searching enabled extensions for Episode {episodeNumber}…</span
             >
           </div>
-        {:else if extensions.filter((e) => e.enabled).length === 0}
+        {:else if totalEnabledTorrentSources === 0}
           <div class="center-box">
             <strong>No torrent extensions enabled yet.</strong>
             <p class="faint">
               Paste an extension manifest or RSS/API source URL in the
-              Extensions box above to enable searching.
+              Extensions box above (or install a Seanime torrent extension in Settings) to enable searching.
             </p>
           </div>
         {:else if candidates.length === 0}
@@ -514,38 +664,94 @@
           </div>
         {:else}
           {#each candidates as c, i (c.infoHash ?? c.title + i)}
-            <div class="cand-row" class:best={i === 0}>
-              <div class="cand-info">
-                <div class="cand-badges">
-                  {#if i === 0}<span class="badge badge-ok">Best Match</span
-                    >{/if}
-                  {#if c.resolution}<span class="badge badge-accent"
-                      >{c.resolution}</span
-                    >{/if}
-                  {#if c.group}<span class="badge">{c.group}</span>{/if}
-                  {#if c.isBatch}<span class="badge badge-warn">Batch Pack</span
-                    >{/if}
-                  <span class="faint">{c.source}</span>
+            {@const cKey = candidateKey(c)}
+            <div class="cand-card" class:best={Boolean(c.isBestRelease || i === 0)}>
+              <div class="cand-row-inner">
+                <div class="cand-info">
+                  <div class="cand-badges">
+                    {#if c.isBestRelease || i === 0}<span class="badge badge-ok">★ Best</span
+                      >{/if}
+                    {#if c.source === "Remembered Batch"}<span class="badge badge-ok"
+                        >Remembered Batch</span
+                      >{/if}
+                    {#if c.resolution}<span class="badge badge-accent"
+                        >{c.resolution}</span
+                      >{/if}
+                    {#if c.codec}<span class="badge">{c.codec}</span>{/if}
+                    {#if c.bitDepth}<span class="badge">{c.bitDepth}</span>{/if}
+                    {#if c.isDualAudio}<span class="badge badge-accent">Dual Audio</span>{/if}
+                    {#if c.refSubtitleUrl}<span class="badge badge-ok" title="Direct subtitle reference track for instant Jimaku alignment">Fast Sub Sync</span>{/if}
+                    {#if c.group}<span class="badge">{c.group}</span>{/if}
+                    {#if c.isBatch}<span class="badge badge-warn">Batch Pack</span
+                      >{/if}
+                    <span class="faint">{c.source}</span>
+                  </div>
+                  <strong class="cand-title" title={c.title}>{c.title}</strong>
+                  <div class="cand-meta">
+                    {#if c.size > 0}<span>{formatBytes(c.size)}</span>{/if}
+                    <span class="seeders">▲ {c.seeders} seeders</span>
+                    <span>▼ {c.leechers} leechers</span>
+                  </div>
                 </div>
-                <strong class="cand-title" title={c.title}>{c.title}</strong>
-                <div class="cand-meta">
-                  {#if c.size > 0}<span>{formatBytes(c.size)}</span>{/if}
-                  <span class="seeders">▲ {c.seeders} seeders</span>
-                  <span>▼ {c.leechers} leechers</span>
+                <div class="cand-actions">
+                  {#if c.isBatch && (c.torrentUrl || c.magnetUri)}
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-sm"
+                      disabled={starting}
+                      onclick={() => void toggleBatchFiles(c)}
+                      title="Inspect files inside this batch torrent and choose a specific file"
+                    >
+                      {expandedBatchKey === cKey ? "Hide Files" : "Files…"}
+                    </button>
+                  {/if}
+                  <button
+                    class="btn btn-primary btn-sm"
+                    disabled={starting}
+                    onclick={() => void startCandidate(c)}
+                  >
+                    <Icon
+                      name={chosenMode === "download" ? "download" : "play"}
+                      size={13}
+                      fill={chosenMode !== "download"}
+                    />
+                    {chosenMode === "download" ? "Download" : "Stream"}
+                  </button>
                 </div>
               </div>
-              <button
-                class="btn btn-primary btn-sm"
-                disabled={starting}
-                onclick={() => startCandidate(c)}
-              >
-                <Icon
-                  name={chosenMode === "download" ? "download" : "play"}
-                  size={13}
-                  fill={chosenMode !== "download"}
-                />
-                {chosenMode === "download" ? "Download" : "Stream"}
-              </button>
+
+              {#if expandedBatchKey === cKey}
+                <div class="batch-files-panel">
+                  {#if loadingBatchFiles && !batchFilesByKey[cKey]}
+                    <div class="batch-files-loading">
+                      <span class="spinner"></span>
+                      <span class="faint">Fetching torrent file index…</span>
+                    </div>
+                  {:else if (batchFilesByKey[cKey] ?? []).filter((f) => f.isVideo).length === 0}
+                    <small class="faint">Could not inspect individual video files (magnet-only metadata will resolve automatically on start).</small>
+                  {:else}
+                    {#each (batchFilesByKey[cKey] ?? []).filter((f) => f.isVideo) as f (f.index)}
+                      <button
+                        type="button"
+                        class="batch-file-row"
+                        class:matched={f.detectedEpisode === episodeNumber}
+                        disabled={starting}
+                        onclick={() => void startCandidate(c, f.index)}
+                      >
+                        <div class="batch-file-meta">
+                          {#if f.detectedEpisode !== null}
+                            <span class="badge" class:badge-ok={f.detectedEpisode === episodeNumber}>
+                              Ep {f.detectedEpisode}
+                            </span>
+                          {/if}
+                          <span class="batch-file-name" title={f.name}>{f.name.split(/[\\/]/).pop() ?? f.name}</span>
+                        </div>
+                        <span class="faint">{formatBytes(f.length)}</span>
+                      </button>
+                    {/each}
+                  {/if}
+                </div>
+              {/if}
             </div>
           {/each}
         {/if}
@@ -573,7 +779,7 @@
   .backdrop {
     position: fixed;
     inset: 0;
-    z-index: 120;
+    z-index: 950;
     background: rgba(10, 6, 8, 0.76);
     backdrop-filter: blur(4px);
     display: flex;
@@ -654,18 +860,92 @@
     gap: 8px;
     padding-right: 4px;
   }
-  .cand-row {
+  .cand-card {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+    flex-direction: column;
+    gap: 8px;
     padding: 10px 12px;
     border-radius: var(--r-md);
     background: var(--bg-elev);
     border: 1.5px solid var(--border-strong);
   }
-  .cand-row.best {
+  .cand-card.best {
     border-color: var(--coral);
+  }
+  .cand-row-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .cand-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .remembered-batch-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border-strong);
+    font-size: 12px;
+  }
+  .rem-batch-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .batch-files-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-top: 8px;
+    border-top: 1px solid var(--line);
+    max-height: 170px;
+    overflow-y: auto;
+  }
+  .batch-files-loading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 4px;
+    font-size: 12px;
+  }
+  .batch-file-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    color: var(--text);
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .batch-file-row:hover,
+  .batch-file-row.matched {
+    border-color: var(--coral);
+  }
+  .batch-file-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+  }
+  .batch-file-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .cand-info {
     display: flex;

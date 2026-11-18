@@ -985,6 +985,7 @@ pub struct EpisodeMeta {
     pub tvdb_season: Option<i64>,
     pub tvdb_episode: Option<i64>,
     pub absolute_number: Option<i64>,
+    pub anidb_eid: Option<i64>,
     pub filler: bool,
     pub recap: bool,
 }
@@ -1016,6 +1017,7 @@ pub struct AniZipData {
     pub episodes: Vec<EpisodeMeta>,
     pub images: AniZipImages,
     pub thetvdb_id: Option<i64>,
+    pub anidb_id: Option<i64>,
 }
 
 impl Providers {
@@ -1059,6 +1061,9 @@ impl Providers {
                 tvdb_season: e.get("seasonNumber").and_then(|x| x.as_i64()),
                 tvdb_episode: e.get("episodeNumber").and_then(|x| x.as_i64()),
                 absolute_number: e.get("absoluteEpisodeNumber").and_then(|x| x.as_i64()),
+                anidb_eid: e.get("anidbEid").and_then(|x| {
+                    x.as_i64().or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+                }),
                 filler: false,
                 recap: false,
             });
@@ -1082,8 +1087,47 @@ impl Providers {
         let thetvdb_id = v.get("mappings")
             .and_then(|m| m.get("thetvdb_id"))
             .and_then(|x| x.as_i64().or_else(|| x.as_str().and_then(|s| s.parse().ok())));
+        let anidb_id = v.get("mappings")
+            .and_then(|m| m.get("anidb_id"))
+            .and_then(|x| x.as_i64().or_else(|| x.as_str().and_then(|s| s.parse().ok())));
 
-        Ok(AniZipData { episodes, images, thetvdb_id })
+        Ok(AniZipData { episodes, images, thetvdb_id, anidb_id })
+    }
+
+    /// Cached AniDB series ID (`aid`) and episode ID (`eid`) lookup for exact AnimeTosho & Seanime smartSearch queries.
+    pub async fn anizip_anidb_lookup(&self, anilist_id: i64, ep_num: i64) -> (Option<i64>, Option<i64>) {
+        use std::collections::HashMap;
+        use std::sync::OnceLock;
+        type CacheEntry = (Instant, Option<i64>, HashMap<i64, i64>);
+        static CACHE: OnceLock<std::sync::Mutex<HashMap<i64, CacheEntry>>> = OnceLock::new();
+        let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+
+        if let Ok(guard) = cache.lock() {
+            if let Some((fetched_at, aid, ep_map)) = guard.get(&anilist_id) {
+                if fetched_at.elapsed() < Duration::from_secs(3600) {
+                    return (*aid, ep_map.get(&ep_num).copied());
+                }
+            }
+        }
+
+        match self.anizip_data(anilist_id).await {
+            Ok(data) => {
+                let mut ep_map = HashMap::new();
+                for ep in &data.episodes {
+                    if !ep.is_special {
+                        if let Some(eid) = ep.anidb_eid {
+                            ep_map.insert(ep.number, eid);
+                        }
+                    }
+                }
+                let eid = ep_map.get(&ep_num).copied();
+                if let Ok(mut guard) = cache.lock() {
+                    guard.insert(anilist_id, (Instant::now(), data.anidb_id, ep_map));
+                }
+                (data.anidb_id, eid)
+            }
+            Err(_) => (None, None),
+        }
     }
 
     /// Episodes from ani.zip, keyed to the AniList entry's own numbering.
