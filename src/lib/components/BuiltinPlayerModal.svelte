@@ -1,6 +1,6 @@
 <script lang="ts">
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import { api, type BuiltinPlayerState, type LookupResult } from "$lib/api";
+  import { api, type Anime4kPreset, type BuiltinPlayerState, type LookupResult } from "$lib/api";
   import { app } from "$lib/app.svelte";
   import YomitanPopup from "./YomitanPopup.svelte";
 
@@ -12,7 +12,19 @@
 
   let controlsVisible = $state(true);
   let hideTimer: ReturnType<typeof setTimeout> | null = null;
-  let activeMenu = $state<"none" | "tracks" | "speed">("none");
+  let activeMenu = $state<"none" | "tracks" | "speed" | "shaders">("none");
+
+  const ANIME4K_PRESETS: { id: Anime4kPreset; label: string; hint: string }[] = [
+    { id: "off", label: "Off", hint: "Original video output" },
+    { id: "a_fast", label: "Mode A · Crisp (Fast)", hint: "Deblur + fast CNN upscale" },
+    { id: "a_hq", label: "Mode A · High Quality", hint: "Restore CNN VL + Upscale VL" },
+    { id: "b_soft", label: "Mode B · Soft Restore", hint: "Gentle de-ringing for clean 1080p" },
+    { id: "c_upscale", label: "Mode C · Clean Upscale", hint: "Denoise + Upscale without over-sharpening" },
+  ];
+
+  const currentShaderPreset = $derived(
+    (playerState.shaderPreset as Anime4kPreset | undefined) ?? app.anime4kPreset ?? "off",
+  );
 
   // Yomitan lookup state (active while paused)
   let lookupResult = $state<LookupResult | null>(null);
@@ -371,6 +383,12 @@
 
   async function setSpeed(speed: number) {
     await api.builtinPlayerCommand({ type: "set_speed", speed });
+    activeMenu = "none";
+  }
+
+  async function selectShaderPreset(preset: Anime4kPreset) {
+    await app.setAnime4kPreset(preset);
+    await api.builtinPlayerCommand({ type: "set_shader_preset", preset });
     activeMenu = "none";
   }
 
@@ -814,7 +832,7 @@
                         activeMenu = "none";
                       }}
                     >
-                      <span>#{tr.id} {tr.title || tr.lang || "Subtitle"}</span>
+                      <span>{tr.id >= 1000 ? (tr.title || tr.lang || "External Sub") : `#${tr.id} ${tr.title || tr.lang || "Subtitle"}`}</span>
                       {#if tr.lang}<span class="lang-tag">{tr.lang}</span>{/if}
                     </button>
                   {/each}
@@ -839,6 +857,41 @@
               </div>
             {/if}
           </div>
+
+          <!-- Anime4K Real-Time GPU Shaders Menu -->
+          {#if playerState.backend === "mpv"}
+            <div class="menu-anchor">
+              <button
+                type="button"
+                class="ctrl-btn"
+                class:active={activeMenu === "shaders" || currentShaderPreset !== "off"}
+                onclick={() => (activeMenu = activeMenu === "shaders" ? "none" : "shaders")}
+                title="Anime4K Real-Time GPU Upscaling & Restore Shaders"
+              >
+                <span>A4K{currentShaderPreset !== "off" ? " · ON" : ""}</span>
+              </button>
+              {#if activeMenu === "shaders"}
+                <div class="popover-menu shader-menu">
+                  <div class="menu-section">
+                    <div class="menu-heading">Anime4K v4 GPU Shaders</div>
+                    {#each ANIME4K_PRESETS as sp (sp.id)}
+                      <button
+                        type="button"
+                        class="menu-item shader-item"
+                        class:selected={currentShaderPreset === sp.id}
+                        onclick={() => void selectShaderPreset(sp.id)}
+                      >
+                        <div class="shader-item-text">
+                          <span>{sp.label}</span>
+                          <small class="shader-hint">{sp.hint}</small>
+                        </div>
+                      </button>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {/if}
 
           <!-- Playback Speed Menu -->
           <div class="menu-anchor">
@@ -1417,6 +1470,22 @@
 
   .speed-menu {
     min-width: 110px;
+  }
+
+  .shader-menu {
+    min-width: 250px;
+  }
+
+  .shader-item-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .shader-hint {
+    font-size: 10px;
+    font-weight: 400;
+    color: rgba(244, 244, 246, 0.52);
   }
 
   .menu-section {

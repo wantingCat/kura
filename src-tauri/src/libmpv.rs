@@ -211,6 +211,80 @@ fn candidate_libmpv_paths() -> Vec<PathBuf> {
     out
 }
 
+fn find_shaders_dir() -> Option<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            dirs.push(exe_dir.join("resources").join("shaders"));
+            dirs.push(exe_dir.join("shaders"));
+            if let Some(p1) = exe_dir.parent() {
+                dirs.push(p1.join("Resources").join("resources").join("shaders"));
+                dirs.push(p1.join("lib").join("kura").join("resources").join("shaders"));
+                dirs.push(p1.join("resources").join("shaders"));
+                if let Some(p2) = p1.parent() {
+                    dirs.push(p2.join("resources").join("shaders"));
+                }
+            }
+        }
+    }
+    #[cfg(debug_assertions)]
+    {
+        dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join("shaders"));
+    }
+
+    dirs.into_iter()
+        .find(|d| d.join("Anime4K_Clamp_Highlights.glsl").is_file())
+}
+
+/// Resolve a named Anime4K v4 preset (`"off"`, `"a_fast"`, `"a_hq"`, `"b_soft"`, `"c_upscale"`)
+/// into a platform-joined `glsl-shaders` string (`;` on Windows, `:` on Unix) for `libmpv`.
+pub fn resolve_shader_preset_paths(preset: &str) -> String {
+    let files: &[&str] = match preset.trim().to_ascii_lowercase().as_str() {
+        "a_fast" => &[
+            "Anime4K_Clamp_Highlights.glsl",
+            "Anime4K_Restore_CNN_M.glsl",
+            "Anime4K_Upscale_CNN_x2_M.glsl",
+            "Anime4K_AutoDownscalePre_x2.glsl",
+            "Anime4K_AutoDownscalePre_x4.glsl",
+        ],
+        "a_hq" => &[
+            "Anime4K_Clamp_Highlights.glsl",
+            "Anime4K_Restore_CNN_VL.glsl",
+            "Anime4K_Upscale_CNN_x2_VL.glsl",
+            "Anime4K_AutoDownscalePre_x2.glsl",
+            "Anime4K_AutoDownscalePre_x4.glsl",
+        ],
+        "b_soft" => &[
+            "Anime4K_Clamp_Highlights.glsl",
+            "Anime4K_Restore_CNN_Soft_M.glsl",
+            "Anime4K_Upscale_CNN_x2_M.glsl",
+            "Anime4K_AutoDownscalePre_x2.glsl",
+            "Anime4K_AutoDownscalePre_x4.glsl",
+        ],
+        "c_upscale" => &[
+            "Anime4K_Clamp_Highlights.glsl",
+            "Anime4K_Upscale_CNN_x2_M.glsl",
+            "Anime4K_AutoDownscalePre_x2.glsl",
+            "Anime4K_AutoDownscalePre_x4.glsl",
+        ],
+        _ => return String::new(),
+    };
+
+    let Some(dir) = find_shaders_dir() else {
+        klog!("[libmpv] Anime4K shaders directory not found for preset '{preset}'");
+        return String::new();
+    };
+
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let resolved: Vec<String> = files
+        .iter()
+        .map(|f| dir.join(f))
+        .filter(|p| p.is_file())
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    resolved.join(sep)
+}
+
 #[cfg(windows)]
 fn set_dll_directory(dir: &Path) {
     use std::os::windows::ffi::OsStrExt;
