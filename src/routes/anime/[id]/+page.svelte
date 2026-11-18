@@ -24,6 +24,7 @@
   import SubtitleMatcherDialog from "$lib/components/SubtitleMatcherDialog.svelte";
   import PersonModal from "$lib/components/PersonModal.svelte";
   import TorrentPickerDialog from "$lib/components/TorrentPickerDialog.svelte";
+  import WebStreamDialog from "$lib/components/WebStreamDialog.svelte";
   import Ja from "$lib/components/Ja.svelte";
   import { JA, jaCour, jaEpisode, jaFormat, jaSeason, jaStatus } from "$lib/ja";
   import type { FranchiseEntry } from "$lib/api";
@@ -75,7 +76,32 @@
   let showMatcher = $state(false);
   let jimakuTarget = $state<{ epKey: string | null; epNumber: number | null } | null>(null);
   let torrentTarget = $state<{ epKey: string; epNumber: number; autoStart: boolean } | null>(null);
+  let webTarget = $state<{ epKey: string; epNumber: number } | null>(null);
+  let availableEps = $state<Record<string, boolean>>({});
+  let availCheckedFor = 0;
   let togglingStreamLib = $state(false);
+
+  // Live episode availability check on airing anime in streaming mode
+  $effect(() => {
+    const aid = d?.anilistId;
+    if (!aid || app.appMode !== "streaming" || d?.status !== "RELEASING" || availCheckedFor === aid) {
+      return;
+    }
+    const maxAired = d.nextAiringEpisode ? Math.max(1, d.nextAiringEpisode - 1) : (d.episodes ?? 0);
+    const unownedRecent = (d.episodeList ?? [])
+      .filter((e) => !e.isSpecial && e.files.length === 0 && e.number <= maxAired)
+      .map((e) => e.number)
+      .slice(-3);
+    if (unownedRecent.length === 0) return;
+    availCheckedFor = aid;
+    availableEps = {};
+    api
+      .checkEpisodeAvailability(aid, unownedRecent)
+      .then((map) => {
+        if (availCheckedFor === aid) availableEps = map;
+      })
+      .catch(() => {});
+  });
   let selectedPerson = $state<{ id: number; name: string } | null>(null);
   let retimingSubId = $state<number | null>(null);
   let showAllChars = $state(false);
@@ -286,11 +312,16 @@
     if (f) {
       await app.play(d.anilistId, e.epKey, f.path);
     } else if (app.appMode === "streaming") {
-      torrentTarget = {
-        epKey: e.epKey,
-        epNumber: e.number,
-        autoStart: app.torrentQuality !== "ask",
-      };
+      const action = await app.playStreamEpisode(d, e.number);
+      if (action === "open_web_picker") {
+        webTarget = { epKey: e.epKey, epNumber: e.number };
+      } else if (action === "open_torrent_picker") {
+        torrentTarget = {
+          epKey: e.epKey,
+          epNumber: e.number,
+          autoStart: app.torrentQuality !== "ask",
+        };
+      }
     }
   }
 
@@ -546,6 +577,17 @@
                 </button>
               {/if}
               {#if app.appMode === "streaming" && (nextUp || regular[0])}
+                <button
+                  class="btn btn-glass"
+                  onclick={() => {
+                    const target = nextUp ?? regular[0];
+                    if (target) webTarget = { epKey: target.epKey, epNumber: target.number };
+                  }}
+                  id="detail-pick-web"
+                  title="Choose a soft-sub web streaming server or rematch anime"
+                >
+                  <Icon name="sparkles" size={15} /> Web Sources
+                </button>
                 <button
                   class="btn btn-glass"
                   onclick={() => {
@@ -818,6 +860,9 @@
                         {/if}
                         {#if e.filler}<span class="badge">Filler</span>{/if}
                         {#if e.recap}<span class="badge">Recap</span>{/if}
+                        {#if !has && availableEps[String(e.number)]}
+                          <span class="badge badge-ok" title="Verified available on streaming/torrent indexers">Available</span>
+                        {/if}
                         {#if !e.isSpecial && !e.subtitles?.some((s) => s.lang === "ja") && (jimakuEps.has(e.number) || jimakuPack)}
                           <button
                             class="jp-sub-badge"
@@ -852,10 +897,11 @@
                         {:else if app.appMode === "streaming"}
                           <button
                             class="file-chip"
-                            onclick={() => (torrentTarget = { epKey: e.epKey, epNumber: e.number, autoStart: false })}
-                            title="Stream or download via BitTorrent"
+                            onclick={() => void play(e)}
+                            title={app.streamSource === "web" ? "Stream soft-sub web video + Jimaku subs" : "Stream or download via BitTorrent"}
                           >
-                            <Icon name="sparkles" size={12} /> Stream ready
+                            <Icon name="sparkles" size={12} />
+                            {app.streamSource === "web" ? "Web stream ready" : "Torrent ready"}
                           </button>
                         {:else}
                           <span class="no-file"><Icon name="file-missing" size={12} /> Not in library</span>
@@ -898,6 +944,13 @@
 
                     <div class="ep-actions">
                       {#if app.appMode === "streaming"}
+                        <button
+                          class="btn btn-ghost btn-sm upto"
+                          onclick={() => (webTarget = { epKey: e.epKey, epNumber: e.number })}
+                          title="Choose web streaming server or rematch anime"
+                        >
+                          <Icon name="sparkles" size={13} /> Web
+                        </button>
                         <button
                           class="btn btn-ghost btn-sm upto"
                           onclick={() => (torrentTarget = { epKey: e.epKey, epNumber: e.number, autoStart: false })}
@@ -1208,14 +1261,32 @@
       />
     {/if}
 
+    {#if webTarget !== null}
+      <WebStreamDialog
+        detail={d}
+        epKey={webTarget.epKey}
+        episodeNumber={webTarget.epNumber}
+        onclose={() => (webTarget = null)}
+        onswitchtotorrent={() => {
+          if (!webTarget) return;
+          torrentTarget = { epKey: webTarget.epKey, epNumber: webTarget.epNumber, autoStart: false };
+        }}
+      />
+    {/if}
+
     {#if torrentTarget !== null}
       <TorrentPickerDialog
         anilistId={d.anilistId}
         title={displayTitle(d)}
         epKey={torrentTarget.epKey}
         episodeNumber={torrentTarget.epNumber}
+        detail={d}
         autoStart={torrentTarget.autoStart}
         onclose={() => (torrentTarget = null)}
+        onswitchtoweb={() => {
+          if (!torrentTarget) return;
+          webTarget = { epKey: torrentTarget.epKey, epNumber: torrentTarget.epNumber };
+        }}
       />
     {/if}
   {/key}

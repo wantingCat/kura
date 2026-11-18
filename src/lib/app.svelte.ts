@@ -2,15 +2,25 @@ import {
   api,
   events,
   type AnilistAccount,
+  type Anime4kPreset,
   type BuiltinPlayerState,
+  type InstalledExtension,
   type Library,
   type MediaCard,
+  type MediaDetail,
   type PlaybackEvent,
   type PlayerKind,
   type ScanProgress,
   type TorrentSessionStatus,
   type UnmatchedGroup,
 } from "./api";
+import {
+  autoPlayWebEpisode,
+  getCachedOrLoadMediaDetail,
+  preloadNextWebEpisode,
+} from "./onlinestream.svelte";
+import { searchInstalledTorrentExtensions } from "./extensions/host";
+import { detailsModal } from "./detailsModal.svelte";
 import { updater } from "./updater.svelte";
 
 export interface PlaybackPrefs {
@@ -101,6 +111,19 @@ class AppStore {
   torrentAutoSubs = $state(true);
   torrentSeeding = $state(true);
   nyaaUrl = $state("");
+  /** Default stream backend for unowned episodes ("web" = Direct Soft-Sub Web Stream, "torrent" = BitTorrent Swarm). */
+  streamSource = $state<"web" | "torrent">("web");
+  /** Enforce clean soft-sub streams only (skip burned-in hardsub servers unless manually overridden). */
+  streamSoftSubOnly = $state(true);
+  /** Default Anime4K real-time GPU shader preset in native libmpv. */
+  anime4kPreset = $state<Anime4kPreset>("off");
+  /** Auto-select release profile preferences for torrent scoring. */
+  torrentGroups = $state("");
+  torrentCodec = $state<"any" | "hevc" | "avc" | "av1">("any");
+  torrentMinSeeders = $state(0);
+  torrentExclude = $state("");
+  extensionMarketplaceUrl = $state("");
+  installedExtensions = $state<InstalledExtension[]>([]);
   torrentSessions = $state<TorrentSessionStatus[]>([]);
   discord = $state<DiscordPrefs>({
     enabled: true,
@@ -252,8 +275,67 @@ class AppStore {
         if (p.hint) this.toast(p.hint, "warn", 9000);
       }
     });
+    await events.onPreloadNextEpisode((ev) => {
+      if (ev.streamKind === "web") {
+        void preloadNextWebEpisode(ev.anilistId, ev.nextEpisode, this.streamSoftSubOnly);
+      } else if (ev.streamKind === "torrent") {
+        void api.preloadNextTorrentEpisode(ev.anilistId, ev.nextEpisode).catch(() => {});
+      }
+    });
+    await events.onPlayNextStreamEpisode(async (ev) => {
+      if (ev.streamKind === "web") {
+        try {
+          const detail = await getCachedOrLoadMediaDetail(ev.anilistId);
+          this.launching = { anilistId: ev.anilistId, epKey: String(ev.nextEpisode) };
+          const picked = await autoPlayWebEpisode(detail, ev.nextEpisode, this.streamSoftSubOnly);
+          this.toast(
+            `Playing Ep ${ev.nextEpisode} via ${picked.providerName} (${picked.server})…`,
+            "info",
+            4000,
+            ev.anilistId,
+          );
+        } catch (e) {
+          this.launching = null;
+          this.toast(`Next episode stream failed: ${e instanceof Error ? e.message : String(e)}`, "warn", 7000);
+        }
+      } else if (ev.streamKind === "torrent") {
+        try {
+          this.launching = { anilistId: ev.anilistId, epKey: String(ev.nextEpisode) };
+          const [nativeRes, detailRes] = await Promise.allSettled([
+            api.searchEpisodeTorrents(ev.anilistId, ev.nextEpisode, null),
+            getCachedOrLoadMediaDetail(ev.anilistId),
+          ]);
+          const nativeCands = nativeRes.status === "fulfilled" ? nativeRes.value : [];
+          let jsCands: typeof nativeCands = [];
+          if (detailRes.status === "fulfilled") {
+            jsCands = await searchInstalledTorrentExtensions(
+              detailRes.value,
+              ev.nextEpisode,
+              this.torrentQuality,
+            ).catch(() => []);
+          }
+          const cands = [...nativeCands, ...jsCands].sort((a, b) => b.score - a.score);
+          const best =
+            cands.find((c) => c.isBestRelease) ??
+            cands.find((c) => c.seeders > 0) ??
+            cands[0];
+          if (!best) throw new Error(`No torrent release found for Episode ${ev.nextEpisode}`);
+          await api.startTorrentSession({
+            anilistId: ev.anilistId,
+            epKey: String(ev.nextEpisode),
+            episodeNum: ev.nextEpisode,
+            candidate: best,
+            modeOverride: this.torrentAction === "download" ? "stream" : this.torrentAction,
+          });
+        } catch (e) {
+          this.launching = null;
+          this.toast(`Next episode torrent failed: ${e instanceof Error ? e.message : String(e)}`, "warn", 7000);
+        }
+      }
+    });
     this.scanning = await api.isScanning();
     await this.loadPrefs();
+    await this.refreshExtensions();
     await this.refresh();
     if (this.autoUpdate) setTimeout(() => updater.check(), 3000);
   }
@@ -286,6 +368,23 @@ class AppStore {
       this.torrentAutoSubs = prefs.torrent_auto_subs !== "0";
       this.torrentSeeding = prefs.torrent_seeding !== "0";
       this.nyaaUrl = prefs.nyaa_url ?? "";
+      this.streamSource = prefs.stream_source === "torrent" ? "torrent" : "web";
+      this.streamSoftSubOnly = prefs.stream_softsub_only !== "0";
+      this.anime4kPreset =
+        prefs.anime4k_preset === "a_fast" ||
+        prefs.anime4k_preset === "a_hq" ||
+        prefs.anime4k_preset === "b_soft" ||
+        prefs.anime4k_preset === "c_upscale"
+          ? prefs.anime4k_preset
+          : "off";
+      this.torrentGroups = prefs.torrent_groups ?? "";
+      this.torrentCodec =
+        prefs.torrent_codec === "hevc" || prefs.torrent_codec === "avc" || prefs.torrent_codec === "av1"
+          ? prefs.torrent_codec
+          : "any";
+      this.torrentMinSeeders = Math.max(0, Number(prefs.torrent_min_seeders ?? "0") || 0);
+      this.torrentExclude = prefs.torrent_exclude ?? "";
+      this.extensionMarketplaceUrl = prefs.extension_marketplace_url ?? "";
       const num = (v: string | undefined, d: number) => (v !== undefined && !isNaN(Number(v)) ? Number(v) : d);
       this.playback = {
         player: (prefs.player as PlayerKind) ?? "",
@@ -428,6 +527,112 @@ class AppStore {
     await api.setPref("nyaa_url", clean);
   }
 
+  async refreshExtensions() {
+    try {
+      this.installedExtensions = await api.listExtensions();
+    } catch {
+      this.installedExtensions = [];
+    }
+  }
+
+  get hasEnabledWebStreamProvider(): boolean {
+    return this.installedExtensions.some(
+      (e) => e.enabled && e.extType === "onlinestream-provider",
+    );
+  }
+
+  async setStreamSource(source: "web" | "torrent") {
+    this.streamSource = source;
+    await api.setPref("stream_source", source);
+  }
+
+  async setStreamSoftSubOnly(on: boolean) {
+    this.streamSoftSubOnly = on;
+    await api.setPref("stream_softsub_only", on ? "1" : "0");
+  }
+
+  async setAnime4kPreset(preset: Anime4kPreset) {
+    this.anime4kPreset = preset;
+    await api.setPref("anime4k_preset", preset);
+    if (this.builtinPlayer?.active) {
+      await api.builtinPlayerCommand({ type: "set_shader_preset", preset }).catch(() => {});
+    }
+  }
+
+  async setTorrentGroups(groups: string) {
+    this.torrentGroups = groups.trim();
+    await api.setPref("torrent_groups", this.torrentGroups);
+  }
+
+  async setTorrentCodec(codec: "any" | "hevc" | "avc" | "av1") {
+    this.torrentCodec = codec;
+    await api.setPref("torrent_codec", codec);
+  }
+
+  async setTorrentMinSeeders(minSeeders: number) {
+    const clean = Math.max(0, Math.floor(minSeeders || 0));
+    this.torrentMinSeeders = clean;
+    await api.setPref("torrent_min_seeders", String(clean));
+  }
+
+  async setTorrentExclude(exclude: string) {
+    this.torrentExclude = exclude.trim();
+    await api.setPref("torrent_exclude", this.torrentExclude);
+  }
+
+  async setExtensionMarketplaceUrl(url: string) {
+    const clean = url.trim();
+    this.extensionMarketplaceUrl = clean;
+    await api.setPref("extension_marketplace_url", clean);
+  }
+
+  /**
+   * Smart primary stream launcher for unowned episodes:
+   * - If `streamSource === "web"` and an `onlinestream-provider` extension is enabled, resolves
+   *   the best soft-sub stream and launches `libmpv` directly (with `.vtt` -> Jimaku retiming).
+   * - Otherwise tells the caller which picker dialog to open (`"open_web_picker"` or `"open_torrent_picker"`).
+   */
+  async playStreamEpisode(
+    detail: MediaDetail,
+    episodeNum: number,
+  ): Promise<"launched" | "open_web_picker" | "open_torrent_picker"> {
+    if (this.streamSource === "torrent") {
+      return "open_torrent_picker";
+    }
+    if (!this.hasEnabledWebStreamProvider) {
+      await this.refreshExtensions();
+    }
+    if (!this.hasEnabledWebStreamProvider) {
+      return "open_web_picker";
+    }
+
+    const epKey = String(episodeNum);
+    if (this.#launchTimer) clearTimeout(this.#launchTimer);
+    this.launching = { anilistId: detail.anilistId, epKey };
+    this.#launchTimer = setTimeout(() => {
+      if (this.launching?.anilistId === detail.anilistId && this.launching?.epKey === epKey) {
+        this.launching = null;
+      }
+    }, 18000);
+
+    try {
+      const picked = await autoPlayWebEpisode(detail, episodeNum, this.streamSoftSubOnly);
+      this.toast(
+        `Streaming Ep ${episodeNum} via ${picked.providerName} (${picked.server})…`,
+        "info",
+        4000,
+        detail.anilistId,
+      );
+      return "launched";
+    } catch (e) {
+      this.launching = null;
+      if (this.#launchTimer) clearTimeout(this.#launchTimer);
+      const msg = e instanceof Error ? e.message : String(e);
+      this.toast(msg.replace(/^[A-Z_]+:\s*/, ""), "warn", 7000, detail.anilistId);
+      return "open_web_picker";
+    }
+  }
+
   async setPlayback<K extends keyof PlaybackPrefs>(key: K, value: PlaybackPrefs[K]) {
     this.playback[key] = value;
     const names: Record<keyof PlaybackPrefs, string> = {
@@ -459,6 +664,19 @@ class AppStore {
 
   /** Play an episode with the configured player; errors become a toast. */
   async play(anilistId: number, epKey: string, path: string) {
+    if (!path && this.appMode === "streaming") {
+      try {
+        const detail = await getCachedOrLoadMediaDetail(anilistId);
+        const epNum = Number(epKey.replace(/^\D+/, "")) || 1;
+        const action = await this.playStreamEpisode(detail, epNum);
+        if (action !== "launched") {
+          detailsModal.open(anilistId);
+        }
+      } catch (e) {
+        this.toast(String(e), "error", 7000);
+      }
+      return;
+    }
     if (this.#launchTimer) clearTimeout(this.#launchTimer);
     this.launching = { anilistId, epKey };
     this.#launchTimer = setTimeout(() => {

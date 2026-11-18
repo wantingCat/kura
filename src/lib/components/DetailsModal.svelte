@@ -36,6 +36,8 @@
   } from "$lib/ja";
   import Icon from "./Icon.svelte";
   import Ja from "./Ja.svelte";
+  import TorrentPickerDialog from "./TorrentPickerDialog.svelte";
+  import WebStreamDialog from "./WebStreamDialog.svelte";
 
   /** Extra Japanese vocabulary used only by the modal (decorative). */
   const JA_LOCAL = {
@@ -54,6 +56,8 @@
   let error = $state<string | null>(null);
   let anilistSaving = $state(false);
   let togglingStreamLib = $state(false);
+  let webTarget = $state<{ epKey: string; epNumber: number } | null>(null);
+  let torrentTarget = $state<{ epKey: string; epNumber: number; autoStart: boolean } | null>(null);
   let dialogEl = $state<HTMLDivElement | undefined>();
   const cache = new Map<number, MediaDetail>();
   let reqSeq = 0;
@@ -62,6 +66,8 @@
   $effect(() => {
     const id = detailsModal.anilistId;
     viewId = id;
+    webTarget = null;
+    torrentTarget = null;
     if (id === null) {
       d = null;
       error = null;
@@ -148,9 +154,24 @@
 
   async function play(e: EpisodeRow) {
     if (!d) return;
+    if (app.isLaunching(d.anilistId, e.epKey)) return;
     const f = e.files[0];
-    if (!f || app.isLaunching(d.anilistId, e.epKey)) return;
-    await app.play(d.anilistId, e.epKey, f.path);
+    if (f) {
+      await app.play(d.anilistId, e.epKey, f.path);
+      return;
+    }
+    if (app.appMode === "streaming") {
+      const action = await app.playStreamEpisode(d, e.number);
+      if (action === "open_web_picker") {
+        webTarget = { epKey: e.epKey, epNumber: e.number };
+      } else if (action === "open_torrent_picker") {
+        torrentTarget = {
+          epKey: e.epKey,
+          epNumber: e.number,
+          autoStart: app.torrentQuality !== "ask",
+        };
+      }
+    }
   }
 
   async function addToPlanning() {
@@ -220,6 +241,15 @@
 
   function onKeydown(ev: KeyboardEvent) {
     if (!open) return;
+    if (webTarget || torrentTarget) {
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        webTarget = null;
+        torrentTarget = null;
+      }
+      return;
+    }
     if (ev.key === "Escape") {
       ev.preventDefault();
       ev.stopPropagation();
@@ -298,13 +328,13 @@
               {@const playingNow = app.isPlaying(d.anilistId, ctaEp.epKey)}
               {@const isMovie = d.format === "MOVIE"}
               {@const verb = ctaEp.progressPos ? "Resume" : rewatch ? "Watch again" : "Play"}
-              {#if ctaEp.files.length > 0}
+              {#if ctaEp.files.length > 0 || app.appMode === "streaming"}
                 <button
                   class="btn btn-cta dm-cta"
                   class:launching
                   disabled={launching}
                   onclick={() => play(ctaEp!)}
-                  aria-label={launching ? "Launching player" : `${verb} ${isMovie ? "movie" : `episode ${ctaEp.number}`}`}
+                  aria-label={launching ? "Launching player" : `${ctaEp.files.length > 0 ? verb : "Stream"} ${isMovie ? "movie" : `episode ${ctaEp.number}`}`}
                 >
                   {#if launching}
                     <span class="spinner dm-spin" aria-hidden="true"></span> Launching…
@@ -313,16 +343,15 @@
                     Now Playing
                   {:else}
                     <Icon name="play" size={16} fill />
-                    {verb}{isMovie ? "" : ` EP ${pad(ctaEp.number)}`}
+                    {ctaEp.files.length > 0 ? verb : "Stream"}{isMovie ? "" : ` EP ${pad(ctaEp.number)}`}
                     {#if ctaEp.progressPos && remaining(ctaEp) > 0}
                       <Ja text={`· ${jaRemaining(remaining(ctaEp))}`} class="dm-cta-ja" />
                     {/if}
                   {/if}
                 </button>
               {:else}
-                <!-- Streaming / torrent flow lives on the full page. -->
                 <a class="btn btn-cta dm-cta" href={`/anime/${d.anilistId}`}>
-                  <Icon name="play" size={16} fill /> Stream EP {pad(ctaEp.number)}
+                  <Icon name="play" size={16} fill /> Open EP {pad(ctaEp.number)}
                 </a>
               {/if}
             {:else if d}
@@ -522,14 +551,15 @@
                         {@render epInner(e, thumb, pct, launchingThis, playingThis, isNext, true)}
                       </button>
                     {:else if app.appMode === "streaming"}
-                      <a
+                      <button
                         class="dm-ep-btn"
-                        href={`/anime/${d.anilistId}`}
-                        title="Not in your library — stream or download it from the full page"
-                        aria-label={`Episode ${e.number}: ${epTitle(e)} — open full page to stream`}
+                        onclick={() => play(e)}
+                        aria-disabled={launchingThis}
+                        title="Stream episode directly"
+                        aria-label={`Stream episode ${e.number}: ${epTitle(e)}`}
                       >
-                        {@render epInner(e, thumb, pct, false, false, isNext, false)}
-                      </a>
+                        {@render epInner(e, thumb, pct, launchingThis, playingThis, isNext, true)}
+                      </button>
                     {:else}
                       <div
                         class="dm-ep-btn"
@@ -584,6 +614,35 @@
       </div>
     </div>
   </div>
+
+  {#if d && webTarget !== null}
+    <WebStreamDialog
+      detail={d}
+      epKey={webTarget.epKey}
+      episodeNumber={webTarget.epNumber}
+      onclose={() => (webTarget = null)}
+      onswitchtotorrent={() => {
+        if (!webTarget) return;
+        torrentTarget = { epKey: webTarget.epKey, epNumber: webTarget.epNumber, autoStart: false };
+      }}
+    />
+  {/if}
+
+  {#if d && torrentTarget !== null}
+    <TorrentPickerDialog
+      anilistId={d.anilistId}
+      title={displayTitle(d)}
+      epKey={torrentTarget.epKey}
+      episodeNumber={torrentTarget.epNumber}
+      detail={d}
+      autoStart={torrentTarget.autoStart}
+      onclose={() => (torrentTarget = null)}
+      onswitchtoweb={() => {
+        if (!torrentTarget) return;
+        webTarget = { epKey: torrentTarget.epKey, epNumber: torrentTarget.epNumber };
+      }}
+    />
+  {/if}
 {/if}
 
 {#snippet epInner(

@@ -28,6 +28,11 @@ use tauri::{AppHandle, Emitter};
 
 const EXTERNAL_SUB_TRACK_ID: i64 = 1000;
 
+#[inline]
+fn is_overlay_cue_track(sid: Option<i64>) -> bool {
+    matches!(sid, Some(id) if id >= EXTERNAL_SUB_TRACK_ID)
+}
+
 // ---------------------------------------------------------------------------
 // State & IPC Models
 // ---------------------------------------------------------------------------
@@ -83,6 +88,8 @@ pub struct BuiltinPlayerState {
     pub has_next_episode: bool,
     pub external_sub_path: Option<String>,
     pub today_immersion_sec: i64,
+    pub shader_preset: String,
+    pub stream_kind: Option<String>,
 }
 
 impl Default for BuiltinPlayerState {
@@ -117,6 +124,8 @@ impl Default for BuiltinPlayerState {
             has_next_episode: false,
             external_sub_path: None,
             today_immersion_sec: 0,
+            shader_preset: "off".to_string(),
+            stream_kind: None,
         }
     }
 }
@@ -136,6 +145,7 @@ pub enum BuiltinCommand {
     SetSubTrack { id: i64 }, // 0 = off
     AddSubOffset { delta: f64 },
     LoadSubFile { path: String },
+    SetShaderPreset { preset: String },
     NextEpisode,
     OpenExternalMpv,
     Html5Tick {
@@ -148,6 +158,35 @@ pub enum BuiltinCommand {
     Stop,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebStreamSubtitleTrack {
+    pub url: String,
+    pub language: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartWebStreamReq {
+    pub anilist_id: i64,
+    pub ep_key: String,
+    pub url: String,
+    #[serde(default)]
+    pub stream_type: Option<String>,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub subtitles: Vec<WebStreamSubtitleTrack>,
+    #[serde(default)]
+    pub provider_name: Option<String>,
+    #[serde(default)]
+    pub server_name: Option<String>,
+}
+
 struct RuntimeSession {
     state: BuiltinPlayerState,
     mpv: Option<MpvInstance>,
@@ -156,6 +195,7 @@ struct RuntimeSession {
     threshold: f64,
     autoplay: bool,
     marked_watched: bool,
+    next_preloaded: bool,
     aniskip_queried: bool,
     tick_count: u64,
     pending_start_pos: f64,
@@ -183,6 +223,7 @@ fn runtime() -> &'static Mutex<RuntimeSession> {
             threshold: 0.90,
             autoplay: true,
             marked_watched: false,
+            next_preloaded: false,
             aniskip_queried: false,
             tick_count: 0,
             pending_start_pos: 0.0,
@@ -294,8 +335,8 @@ fn apply_sub_track_to_mpv(mpv: &MpvInstance, sub_tracks: &[TrackItem], chosen_si
             let _ = mpv.set_property_string("sid", "no");
             let _ = mpv.set_property_string("sub-visibility", "no");
         }
-        Some(id) if id == EXTERNAL_SUB_TRACK_ID => {
-            // External cues are rendered directly by Kura's interactive subtitle overlay
+        Some(id) if id >= EXTERNAL_SUB_TRACK_ID => {
+            // External / companion cues are rendered directly by Kura's interactive subtitle overlay
             let _ = mpv.set_property_string("sid", "no");
             let _ = mpv.set_property_string("sub-visibility", "no");
         }
@@ -330,7 +371,7 @@ fn refresh_tracks_and_chapters_from_mpv(mpv: &MpvInstance, g: &mut RuntimeSessio
         .state
         .sub_tracks
         .iter()
-        .filter(|t| t.id == EXTERNAL_SUB_TRACK_ID)
+        .filter(|t| t.id >= EXTERNAL_SUB_TRACK_ID)
         .cloned()
         .collect();
 
@@ -420,11 +461,14 @@ fn refresh_tracks_and_chapters_from_mpv(mpv: &MpvInstance, g: &mut RuntimeSessio
         g.state.sub_tracks = sub_tracks;
         apply_sub_track_to_mpv(mpv, &g.state.sub_tracks, chosen_sid);
 
-        if chosen_sid == Some(EXTERNAL_SUB_TRACK_ID) {
-            if let Some(ext_cues) = g.cues_by_track.get(&EXTERNAL_SUB_TRACK_ID).cloned() {
-                g.state.sub_text =
-                    find_cue_at(&ext_cues, g.state.position, g.state.sub_offset_sec).unwrap_or_default();
-                g.cues = ext_cues;
+        if is_overlay_cue_track(chosen_sid) {
+            if let Some(id) = chosen_sid {
+                if let Some(ext_cues) = g.cues_by_track.get(&id).cloned() {
+                    g.state.sub_text =
+                        find_cue_at(&ext_cues, g.state.position, g.state.sub_offset_sec)
+                            .unwrap_or_default();
+                    g.cues = ext_cues;
+                }
             }
         } else if chosen_sid.is_some() {
             let raw = mpv.get_property_string("sub-text").unwrap_or_default();
@@ -537,11 +581,13 @@ fn run_mpv_event_loop(app: AppHandle, st: Arc<AppState>, mpv: MpvInstance) {
         if event_id == MPV_EVENT_END_FILE && !ev.data.is_null() {
             let end_ev = unsafe { &*(ev.data as *const MpvEventEndFile) };
             if end_ev.reason == MPV_END_FILE_REASON_EOF {
-                let (active, autoplay, cur_ep) = {
+                let (active, autoplay, has_next_ep, stream_kind, cur_ep) = {
                     let g = runtime().lock().unwrap_or_else(|e| e.into_inner());
                     (
                         g.state.active,
                         g.autoplay,
+                        g.state.has_next_episode,
+                        g.state.stream_kind.clone(),
                         Ep {
                             anilist_id: g.state.anilist_id,
                             ep_key: g.state.ep_key.clone(),
@@ -553,6 +599,17 @@ fn run_mpv_event_loop(app: AppHandle, st: Arc<AppState>, mpv: MpvInstance) {
                     let next = player::next_episode(&st.db(), &cur_ep);
                     if let Some(next_ep) = next {
                         let _ = start(app.clone(), st.clone(), next_ep);
+                    } else if has_next_ep {
+                        if let Ok(num) = cur_ep.ep_key.parse::<i64>() {
+                            let _ = app.emit(
+                                "play-next-stream-episode",
+                                serde_json::json!({
+                                    "anilistId": cur_ep.anilist_id,
+                                    "nextEpisode": num + 1,
+                                    "streamKind": stream_kind.unwrap_or_else(|| "web".to_string()),
+                                }),
+                            );
+                        }
                     }
                 }
             }
@@ -640,7 +697,7 @@ fn run_mpv_event_loop(app: AppHandle, st: Arc<AppState>, mpv: MpvInstance) {
                     let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
                     if g.state.active
                         && g.state.sid.is_some()
-                        && g.state.sid != Some(EXTERNAL_SUB_TRACK_ID)
+                        && !is_overlay_cue_track(g.state.sid)
                     {
                         let cleaned = clean_mpv_sub_text(&raw);
                         if g.state.sub_text != cleaned {
@@ -683,6 +740,7 @@ fn handle_mpv_time_tick(app: &AppHandle, st: &Arc<AppState>, position: f64) {
         show_title,
         cur_ep,
         try_live_align,
+        preload_stream_kind,
     ) = {
         let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
         if !g.state.active {
@@ -716,7 +774,7 @@ fn handle_mpv_time_tick(app: &AppHandle, st: &Arc<AppState>, position: f64) {
         let eff_dur = g.state.duration;
 
         let mut sub_changed = false;
-        if g.state.sid == Some(EXTERNAL_SUB_TRACK_ID) {
+        if is_overlay_cue_track(g.state.sid) {
             let off = g.state.sub_offset_sec;
             let next_sub = find_cue_at(&g.cues, position, off).unwrap_or_default();
             if g.state.sub_text != next_sub {
@@ -729,6 +787,7 @@ fn handle_mpv_time_tick(app: &AppHandle, st: &Arc<AppState>, position: f64) {
         let try_live_align = !g.user_adjusted_offset
             && !g.auto_aligned_offset
             && g.state.sid == Some(EXTERNAL_SUB_TRACK_ID)
+            && g.state.stream_kind.as_deref() != Some("web")
             && !g.cues.is_empty()
             && (g.tick_count == 5 || g.tick_count % 60 == 0)
             && g.tick_count <= 600;
@@ -738,6 +797,20 @@ fn handle_mpv_time_tick(app: &AppHandle, st: &Arc<AppState>, position: f64) {
         if should_mark_watched {
             g.marked_watched = true;
         }
+        let should_preload_next = !g.next_preloaded
+            && g.autoplay
+            && g.state.has_next_episode
+            && g.state.stream_kind.is_some()
+            && eff_dur > 60.0
+            && (position / eff_dur) >= 0.85;
+        if should_preload_next {
+            g.next_preloaded = true;
+        }
+        let preload_stream_kind = if should_preload_next {
+            g.state.stream_kind.clone()
+        } else {
+            None
+        };
         let should_save_prog =
             !g.marked_watched && position > 15.0 && eff_dur > 0.0 && g.tick_count % 25 == 0;
 
@@ -767,8 +840,23 @@ fn handle_mpv_time_tick(app: &AppHandle, st: &Arc<AppState>, position: f64) {
             } else {
                 None
             },
+            preload_stream_kind,
         )
     };
+
+    if let Some(sk) = preload_stream_kind {
+        if let Ok(num) = cur_ep.ep_key.parse::<i64>() {
+            let _ = app.emit(
+                "preload-next-episode",
+                serde_json::json!({
+                    "anilistId": cur_ep.anilist_id,
+                    "epKey": cur_ep.ep_key,
+                    "nextEpisode": num + 1,
+                    "streamKind": sk,
+                }),
+            );
+        }
+    }
 
     if let Some(cues_snapshot) = try_live_align {
         let ep_clone = cur_ep.clone();
@@ -911,6 +999,123 @@ pub fn reload_cues_if_active(anilist_id: i64, ep_key: &str, sub_path: &str) -> b
             g.cues = cues;
         }
         return true;
+    }
+    false
+}
+
+/// Hot-load an already piecewise-retimed Japanese subtitle file into an active web/torrent stream
+/// session and emit updated player state immediately.
+pub fn reload_stream_cues_if_active(
+    app: &AppHandle,
+    anilist_id: i64,
+    ep_key: &str,
+    sub_path: &str,
+) -> bool {
+    let cues = subtitles::parse_subtitle_file_cues(Path::new(sub_path));
+    if cues.is_empty() {
+        return false;
+    }
+
+    let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+    if !g.state.active || g.state.anilist_id != anilist_id || g.state.ep_key != ep_key {
+        return false;
+    }
+
+    g.state.external_sub_path = Some(sub_path.to_string());
+    let file_name = Path::new(sub_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Jimaku Japanese".to_string());
+    let ext_lang = subtitles::detect_sub_language(&file_name).unwrap_or_else(|| "ja".to_string());
+    let should_select = !g.user_selected_sub_track
+        && match g.track_prefs.sub.as_deref() {
+            Some(pref) => player::lang_matches_code(&ext_lang, Some(&file_name), pref),
+            None => true,
+        };
+
+    g.cues_by_track.insert(EXTERNAL_SUB_TRACK_ID, cues.clone());
+    if should_select {
+        for tr in &mut g.state.sub_tracks {
+            tr.selected = false;
+        }
+    }
+    if let Some(existing) = g
+        .state
+        .sub_tracks
+        .iter_mut()
+        .find(|t| t.id == EXTERNAL_SUB_TRACK_ID)
+    {
+        existing.title = Some(file_name);
+        existing.lang = Some(ext_lang);
+        if should_select {
+            existing.selected = true;
+        }
+    } else {
+        g.state.sub_tracks.insert(
+            0,
+            TrackItem {
+                id: EXTERNAL_SUB_TRACK_ID,
+                track_type: "sub".to_string(),
+                title: Some(file_name),
+                lang: Some(ext_lang),
+                codec: Some("external".to_string()),
+                selected: should_select,
+                external: true,
+            },
+        );
+    }
+
+    if should_select {
+        g.state.sid = Some(EXTERNAL_SUB_TRACK_ID);
+        if let Some(ref mpv) = g.mpv {
+            apply_sub_track_to_mpv(mpv, &g.state.sub_tracks, Some(EXTERNAL_SUB_TRACK_ID));
+        }
+        if !g.user_adjusted_offset {
+            g.auto_aligned_offset = true;
+            g.state.sub_offset_sec = 0.0;
+        }
+        let pos = g.state.position;
+        let off = g.state.sub_offset_sec;
+        g.state.sub_text = find_cue_at(&cues, pos, off).unwrap_or_default();
+        g.cues = cues;
+    }
+
+    emit_state(app, &g.state);
+    true
+}
+
+fn has_next_stream_or_local_episode(conn: &rusqlite::Connection, ep: &Ep) -> bool {
+    if player::next_episode(conn, ep).is_some() {
+        return true;
+    }
+    let Ok(num) = ep.ep_key.parse::<i64>() else {
+        return false;
+    };
+    let next_num = num + 1;
+    let in_episodes: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM episodes WHERE anilist_id = ?1 AND number = ?2 AND is_special = 0)",
+            params![ep.anilist_id, next_num],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if in_episodes {
+        return true;
+    }
+    let media_bounds: Option<(Option<i64>, Option<i64>)> = conn
+        .query_row(
+            "SELECT episodes, next_airing_episode FROM media WHERE anilist_id = ?1",
+            [ep.anilist_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .unwrap_or(None);
+    if let Some((total_eps, next_airing)) = media_bounds {
+        let aired_max = next_airing
+            .map(|n| (n - 1).max(0))
+            .or(total_eps)
+            .unwrap_or(0);
+        return next_num <= aired_max;
     }
     false
 }
@@ -1122,6 +1327,7 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         today_immersion_sec,
         prev_volume,
         prev_muted,
+        shader_preset,
     ) = {
         let conn = st.db();
         let p = player::prefs(&conn);
@@ -1132,7 +1338,7 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             0.0
         };
         let (show_title, episode_title) = resolve_titles(&conn, ep.anilist_id, &ep.ep_key);
-        let has_next = player::next_episode(&conn, &ep).is_some();
+        let has_next = has_next_stream_or_local_episode(&conn, &ep);
         let candidate_sub_paths =
             subtitles::candidate_subtitle_paths_for_episode(&conn, ep.anilist_id, &ep.ep_key);
         let track_prefs = player::effective_track_prefs(&conn, ep.anilist_id);
@@ -1143,6 +1349,11 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
                 |r| r.get(0),
             )
             .unwrap_or(0);
+        let preset = db::get_setting(&conn, "pref.anime4k_preset")
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "off".to_string());
         let (vol, muted) = {
             let g = runtime().lock().unwrap_or_else(|e| e.into_inner());
             (g.state.volume, g.state.muted)
@@ -1159,7 +1370,14 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             today_sec,
             vol,
             muted,
+            preset,
         )
+    };
+
+    let inferred_stream_kind = if ep.path.starts_with("http://127.0.0.1:") {
+        Some("torrent".to_string())
+    } else {
+        None
     };
 
     let initial_state = BuiltinPlayerState {
@@ -1192,6 +1410,8 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         has_next_episode: has_next,
         external_sub_path: None,
         today_immersion_sec,
+        shader_preset: shader_preset.clone(),
+        stream_kind: inferred_stream_kind,
     };
 
     {
@@ -1202,6 +1422,7 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         g.threshold = threshold;
         g.autoplay = autoplay;
         g.marked_watched = false;
+        g.next_preloaded = false;
         g.aniskip_queried = false;
         g.tick_count = 0;
         g.pending_start_pos = start_pos;
@@ -1220,6 +1441,8 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
     emit_state(&app, &initial_state);
 
     // Load file into native libmpv right away so demux + D3D11 decode start immediately.
+    let shader_paths = libmpv::resolve_shader_preset_paths(&shader_preset);
+    let _ = mpv.set_property_string("glsl-shaders", &shader_paths);
     let _ = mpv.set_property_double("volume", prev_volume);
     let _ = mpv.set_property_bool("mute", prev_muted);
     let _ = mpv.set_property_double("speed", 1.0);
@@ -1296,6 +1519,279 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
     let ep_srv = ep.clone();
     tauri::async_runtime::spawn(async move {
         fetch_and_apply_aniskip(&app_srv, &st_srv, &ep_srv, 0.0, session_id).await;
+    });
+
+    Ok(())
+}
+
+/// Start playing a direct soft-sub web stream (`.m3u8` / `.mp4`) in native `libmpv` via Kura's
+/// local header-injecting proxy, load companion `.vtt` tracks, and auto-fetch + piecewise-retime
+/// Jimaku Japanese subtitles against the stream's soft-sub cues.
+pub fn start_web_stream(app: AppHandle, st: Arc<AppState>, req: StartWebStreamReq) -> Result<()> {
+    let session_id = SESSION_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
+    let _play_session = st.play_session.fetch_add(1, Ordering::SeqCst) + 1;
+
+    let mpv = ensure_mpv(&app, &st)?;
+    let proxy_url = crate::onlinestream::build_proxy_url(&req.url, &req.headers)?;
+    let ep = Ep {
+        anilist_id: req.anilist_id,
+        ep_key: req.ep_key.clone(),
+        path: proxy_url.clone(),
+    };
+
+    let (
+        start_pos,
+        threshold,
+        autoplay,
+        show_title,
+        episode_title,
+        has_next,
+        track_prefs,
+        today_immersion_sec,
+        prev_volume,
+        prev_muted,
+        shader_preset,
+    ) = {
+        let conn = st.db();
+        let p = player::prefs(&conn);
+        let saved = player::saved_progress(&conn, ep.anilist_id, &ep.ep_key);
+        let start_pos = if p.resume {
+            player::resume_point(saved, p.threshold)
+        } else {
+            0.0
+        };
+        let (show_title, episode_title) = resolve_titles(&conn, ep.anilist_id, &ep.ep_key);
+        let has_next = has_next_stream_or_local_episode(&conn, &ep);
+        let track_prefs = player::effective_track_prefs(&conn, ep.anilist_id);
+        let today_sec: i64 = conn
+            .query_row(
+                "SELECT active_seconds FROM immersion_daily WHERE day_key = ?1",
+                [db::today_day_key()],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let preset = db::get_setting(&conn, "pref.anime4k_preset")
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "off".to_string());
+        let (vol, muted) = {
+            let g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+            (g.state.volume, g.state.muted)
+        };
+        (
+            start_pos,
+            p.threshold,
+            p.autoplay,
+            show_title,
+            episode_title,
+            has_next,
+            track_prefs,
+            today_sec,
+            vol,
+            muted,
+            preset,
+        )
+    };
+
+    let initial_state = BuiltinPlayerState {
+        active: true,
+        backend: "libmpv".to_string(),
+        anilist_id: ep.anilist_id,
+        ep_key: ep.ep_key.clone(),
+        path: proxy_url.clone(),
+        stream_url: req.url.clone(),
+        transcode_base_url: None,
+        show_title,
+        episode_title,
+        paused: false,
+        position: start_pos,
+        duration: 0.0,
+        volume: prev_volume,
+        muted: prev_muted,
+        speed: 1.0,
+        aid: None,
+        sid: None,
+        sub_text: String::new(),
+        sub_offset_sec: 0.0,
+        audio_tracks: Vec::new(),
+        sub_tracks: Vec::new(),
+        chapters: Vec::new(),
+        op_start: None,
+        op_end: None,
+        ed_start: None,
+        ed_end: None,
+        has_next_episode: has_next,
+        external_sub_path: None,
+        today_immersion_sec,
+        shader_preset: shader_preset.clone(),
+        stream_kind: Some("web".to_string()),
+    };
+
+    {
+        let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+        g.state = initial_state.clone();
+        g.cues = Vec::new();
+        g.cues_by_track = HashMap::new();
+        g.threshold = threshold;
+        g.autoplay = autoplay;
+        g.marked_watched = false;
+        g.next_preloaded = false;
+        g.aniskip_queried = false;
+        g.tick_count = 0;
+        g.pending_start_pos = start_pos;
+        g.user_adjusted_offset = false;
+        g.auto_aligned_offset = false;
+        g.user_selected_sub_track = false;
+        g.track_prefs = track_prefs;
+        g.last_unpaused_tick = None;
+        g.unflushed_immersion_sec = 0.0;
+        g.last_emit_at = None;
+    }
+
+    libmpv::sync_surface_bounds(&app, true);
+    emit_state(&app, &initial_state);
+
+    let shader_paths = libmpv::resolve_shader_preset_paths(&shader_preset);
+    let _ = mpv.set_property_string("glsl-shaders", &shader_paths);
+    let _ = mpv.set_property_double("volume", prev_volume);
+    let _ = mpv.set_property_bool("mute", prev_muted);
+    let _ = mpv.set_property_double("speed", 1.0);
+    let _ = mpv.set_property_double("sub-delay", 0.0);
+    let _ = mpv.set_property_bool("pause", false);
+    mpv.command(&["loadfile", &proxy_url, "replace"])?;
+
+    // Background task: fetch companion soft-sub `.vtt` tracks, register them in the player HUD,
+    // and auto-download + piecewise-retime Jimaku Japanese subtitles against the `.vtt` reference!
+    let app_bg = app.clone();
+    let st_bg = st.clone();
+    let ep_bg = ep.clone();
+    tauri::async_runtime::spawn(async move {
+        player::sync_discord_activity(&st_bg, &ep_bg, start_pos, 0.0, true);
+
+        let mut loaded_companion_tracks: Vec<(i64, TrackItem, Vec<SubtitleCue>)> = Vec::new();
+        for (idx, sub) in req.subtitles.iter().enumerate() {
+            if sub.url.trim().is_empty() {
+                continue;
+            }
+            // Skip thumbnail sprite VTT tracks (`thumbnails.vtt` / `sprite`)
+            let lang_low = sub.language.to_ascii_lowercase();
+            let lbl_low = sub.label.as_deref().unwrap_or("").to_ascii_lowercase();
+            if lang_low.contains("thumb") || lbl_low.contains("thumb") || sub.url.to_ascii_lowercase().contains("thumbnails") {
+                continue;
+            }
+            if let Ok(cues) =
+                subtitles::fetch_remote_subtitle_cues(&st_bg.providers.http, &sub.url, &req.headers)
+                    .await
+            {
+                if cues.is_empty() {
+                    continue;
+                }
+                let track_id = EXTERNAL_SUB_TRACK_ID + 1 + (idx as i64);
+                let title = sub
+                    .label
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| format!("Stream · {}", sub.language));
+                let norm_lang = if lang_low.contains("eng") || lang_low == "en" {
+                    "eng".to_string()
+                } else if lang_low.contains("jap") || lang_low == "ja" || lang_low == "jpn" {
+                    "jpn".to_string()
+                } else {
+                    sub.language.clone()
+                };
+                loaded_companion_tracks.push((
+                    track_id,
+                    TrackItem {
+                        id: track_id,
+                        track_type: "sub".to_string(),
+                        title: Some(title),
+                        lang: Some(norm_lang),
+                        codec: Some("vtt".to_string()),
+                        selected: false,
+                        external: true,
+                    },
+                    cues,
+                ));
+            }
+        }
+
+        // Register companion `.vtt` tracks so fallback English/other subtitles are selectable right away
+        if !loaded_companion_tracks.is_empty()
+            && SESSION_COUNTER.load(Ordering::SeqCst) == session_id
+        {
+            let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+            if g.state.active && SESSION_COUNTER.load(Ordering::SeqCst) == session_id {
+                for (tid, item, cues) in &loaded_companion_tracks {
+                    g.cues_by_track.insert(*tid, cues.clone());
+                    if !g.state.sub_tracks.iter().any(|t| t.id == *tid) {
+                        g.state.sub_tracks.push(item.clone());
+                    }
+                }
+                if !g.user_selected_sub_track {
+                    let chosen_sid = pick_best_sub_track_id(&g.state.sub_tracks, &g.track_prefs);
+                    for tr in &mut g.state.sub_tracks {
+                        tr.selected = Some(tr.id) == chosen_sid;
+                    }
+                    g.state.sid = chosen_sid;
+                    if let Some(ref mpv_inst) = g.mpv {
+                        apply_sub_track_to_mpv(mpv_inst, &g.state.sub_tracks, chosen_sid);
+                    }
+                    if let Some(cid) = chosen_sid.filter(|id| *id >= EXTERNAL_SUB_TRACK_ID) {
+                        if let Some(cues) = g.cues_by_track.get(&cid).cloned() {
+                            g.state.sub_text =
+                                find_cue_at(&cues, g.state.position, g.state.sub_offset_sec)
+                                    .unwrap_or_default();
+                            g.cues = cues;
+                        }
+                    }
+                }
+                emit_state(&app_bg, &g.state);
+            }
+        }
+
+        // Pick best reference cue set (prefer English dialogue with >= 10 cues, else largest cue set)
+        let best_ref: Vec<SubtitleCue> = loaded_companion_tracks
+            .iter()
+            .filter(|(_, item, cues)| {
+                cues.len() >= 10
+                    && item
+                        .lang
+                        .as_deref()
+                        .map(|l| l == "eng")
+                        .unwrap_or(false)
+                    && !player::is_signs_or_songs_title(item.title.as_deref())
+            })
+            .max_by_key(|(_, _, cues)| cues.len())
+            .or_else(|| {
+                loaded_companion_tracks
+                    .iter()
+                    .filter(|(_, _, cues)| cues.len() >= 10)
+                    .max_by_key(|(_, _, cues)| cues.len())
+            })
+            .map(|(_, _, cues)| cues.clone())
+            .unwrap_or_default();
+
+        let ep_num = req.ep_key.parse::<i64>().unwrap_or(0);
+        if SESSION_COUNTER.load(Ordering::SeqCst) == session_id {
+            let _ = subtitles::auto_prepare_stream_subtitles(
+                &app_bg,
+                &st_bg,
+                req.anilist_id,
+                &req.ep_key,
+                ep_num,
+                &best_ref,
+                "Web Stream Soft-Sub (.vtt)",
+            )
+            .await;
+        }
+    });
+
+    // Query AniSkip in parallel
+    let app_srv = app.clone();
+    let st_srv = st.clone();
+    tauri::async_runtime::spawn(async move {
+        fetch_and_apply_aniskip(&app_srv, &st_srv, &ep, 0.0, session_id).await;
     });
 
     Ok(())
@@ -1478,6 +1974,23 @@ pub async fn dispatch_command(
             let next = player::next_episode(&st.db(), &cur_ep);
             if let Some(next_ep) = next {
                 start(app.clone(), st.clone(), next_ep)?;
+            } else {
+                let (has_next_ep, stream_kind) = {
+                    let g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                    (g.state.has_next_episode, g.state.stream_kind.clone())
+                };
+                if has_next_ep {
+                    if let Ok(num) = cur_ep.ep_key.parse::<i64>() {
+                        let _ = app.emit(
+                            "play-next-stream-episode",
+                            serde_json::json!({
+                                "anilistId": cur_ep.anilist_id,
+                                "nextEpisode": num + 1,
+                                "streamKind": stream_kind.unwrap_or_else(|| "web".to_string()),
+                            }),
+                        );
+                    }
+                }
             }
         }
         BuiltinCommand::PlayPause => {
@@ -1518,7 +2031,7 @@ pub async fn dispatch_command(
             }
             let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
             g.state.position = target;
-            if g.state.sid == Some(EXTERNAL_SUB_TRACK_ID) {
+            if is_overlay_cue_track(g.state.sid) {
                 let offset = g.state.sub_offset_sec;
                 g.state.sub_text = find_cue_at(&g.cues, target, offset).unwrap_or_default();
             }
@@ -1531,7 +2044,7 @@ pub async fn dispatch_command(
             let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
             let target = (g.state.position + delta).max(0.0);
             g.state.position = target;
-            if g.state.sid == Some(EXTERNAL_SUB_TRACK_ID) {
+            if is_overlay_cue_track(g.state.sid) {
                 let offset = g.state.sub_offset_sec;
                 g.state.sub_text = find_cue_at(&g.cues, target, offset).unwrap_or_default();
             }
@@ -1617,7 +2130,7 @@ pub async fn dispatch_command(
                 if id <= 0 {
                     g.state.sub_text.clear();
                     g.cues.clear();
-                } else if id == EXTERNAL_SUB_TRACK_ID {
+                } else if id >= EXTERNAL_SUB_TRACK_ID {
                     if let Some(track_cues) = g.cues_by_track.get(&id).cloned() {
                         let pos = g.state.position;
                         let off = g.state.sub_offset_sec;
@@ -1641,7 +2154,7 @@ pub async fn dispatch_command(
                 g.user_adjusted_offset = true;
                 g.state.sub_offset_sec =
                     ((g.state.sub_offset_sec + delta) * 100.0).round() / 100.0;
-                if g.state.sid == Some(EXTERNAL_SUB_TRACK_ID) {
+                if is_overlay_cue_track(g.state.sid) {
                     let pos = g.state.position;
                     let off = g.state.sub_offset_sec;
                     g.state.sub_text = find_cue_at(&g.cues, pos, off).unwrap_or_default();
@@ -1652,6 +2165,28 @@ pub async fn dispatch_command(
             if let Some(mpv) = mpv_opt {
                 let _ = mpv.set_property_double("sub-delay", new_off);
             }
+        }
+        BuiltinCommand::SetShaderPreset { preset } => {
+            let norm = match preset.trim().to_ascii_lowercase().as_str() {
+                "a_fast" => "a_fast",
+                "a_hq" => "a_hq",
+                "b_soft" => "b_soft",
+                "c_upscale" => "c_upscale",
+                _ => "off",
+            }
+            .to_string();
+            let shader_paths = libmpv::resolve_shader_preset_paths(&norm);
+            if let Some(mpv) = mpv_opt {
+                let _ = mpv.set_property_string("glsl-shaders", &shader_paths);
+            }
+            {
+                let conn = st.db();
+                let _ = db::set_setting(&conn, "pref.anime4k_preset", &norm);
+            }
+            crate::backup::mark_dirty();
+            let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+            g.state.shader_preset = norm;
+            emit_state(&app, &g.state);
         }
         BuiltinCommand::LoadSubFile { path } => {
             let cues = subtitles::parse_subtitle_file_cues(Path::new(&path));

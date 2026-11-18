@@ -6,10 +6,13 @@ pub mod dht;
 pub mod dictionary;
 pub mod discord;
 pub mod embedded_player;
+pub mod extensions;
 pub mod franchise;
 pub mod libmpv;
 pub mod logging;
 pub mod matcher;
+pub mod mse;
+pub mod onlinestream;
 pub mod parser;
 pub mod player;
 pub mod providers;
@@ -176,6 +179,7 @@ pub fn run() {
             // Debounced writer for the automatic safety backup.
             backup::start_auto(state.clone());
             anilist_sync::start_worker(app.handle().clone(), state.clone());
+            dht::warm_up();
 
             // Pre-warm the built-in libmpv engine & hidden Win32 video surface shortly after
             // launch so the first click on Play opens instantaneously.
@@ -335,6 +339,24 @@ pub fn run() {
             commands::get_immersion_overview,
             commands::get_anilist_immersion_lists,
             commands::set_anilist_immersion_list,
+            commands::list_extensions,
+            commands::fetch_marketplace_extensions,
+            commands::install_extension,
+            commands::toggle_extension,
+            commands::remove_extension,
+            commands::set_extension_user_config,
+            commands::extension_http_fetch,
+            commands::get_onlinestream_mapping,
+            commands::set_onlinestream_mapping,
+            commands::remove_onlinestream_mapping,
+            commands::start_web_stream,
+            commands::prefetch_web_stream_subtitles,
+            commands::get_anidb_ids,
+            commands::list_torrent_files,
+            commands::get_remembered_batch,
+            commands::clear_remembered_batch,
+            commands::check_episode_availability,
+            commands::preload_next_torrent_episode,
         ])
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {

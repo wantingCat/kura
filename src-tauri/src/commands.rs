@@ -1776,6 +1776,9 @@ pub async fn set_pref(st: St<'_>, key: String, value: String) -> CmdResult<()> {
         st.discord.clear();
     }
     db::set_setting(&st.db(), &format!("pref.{key}"), &value).map_err(err)?;
+    if key.starts_with("torrent_") {
+        crate::torrent::clear_torrent_search_cache();
+    }
     if key == "folder_watcher" {
         st.watcher.reload();
     }
@@ -3133,6 +3136,7 @@ pub async fn start_torrent_session(
     episode_num: Option<i64>,
     candidate: crate::torrent::TorrentCandidate,
     mode_override: Option<String>,
+    file_index: Option<usize>,
 ) -> CmdResult<crate::torrent::TorrentSessionStatus> {
     crate::torrent::start_torrent_session(
         app,
@@ -3142,6 +3146,7 @@ pub async fn start_torrent_session(
         episode_num,
         candidate,
         mode_override,
+        file_index,
     )
     .await
     .map_err(err)
@@ -4440,4 +4445,246 @@ pub async fn set_anilist_immersion_list(
     crate::backup::mark_dirty();
 
     get_anilist_immersion_lists(st).await
+}
+
+// ---------------------------------------------------------------------------
+// Seanime-Compatible Extensions, Direct Web Streaming & Torrent Upgrades
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_extensions(
+    st: St<'_>,
+) -> CmdResult<Vec<crate::extensions::InstalledExtension>> {
+    let conn = st.db();
+    crate::extensions::list_installed_extensions(&conn).map_err(err)
+}
+
+#[tauri::command]
+pub async fn fetch_marketplace_extensions(
+    st: St<'_>,
+    url: String,
+) -> CmdResult<Vec<crate::extensions::MarketplaceExtension>> {
+    let installed = {
+        let conn = st.db();
+        crate::extensions::list_installed_extensions(&conn).unwrap_or_default()
+    };
+    crate::extensions::fetch_marketplace_extensions(&st.providers.http, &installed, &url)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn install_extension(
+    st: St<'_>,
+    source: String,
+) -> CmdResult<crate::extensions::InstalledExtension> {
+    let (
+        id,
+        name,
+        version,
+        ext_type,
+        language,
+        manifest_uri,
+        icon_url,
+        author,
+        description,
+        payload,
+        user_config,
+    ) = crate::extensions::install_extension_from_source(&st.providers.http, &source)
+        .await
+        .map_err(err)?;
+
+    let conn = st.db();
+    crate::extensions::upsert_installed_extension(
+        &conn,
+        &id,
+        &name,
+        &version,
+        &ext_type,
+        &language,
+        &manifest_uri,
+        icon_url.as_deref(),
+        author.as_deref(),
+        description.as_deref(),
+        &payload,
+        user_config,
+    )
+    .map_err(err)
+}
+
+#[tauri::command]
+pub async fn toggle_extension(st: St<'_>, id: String, enabled: bool) -> CmdResult<()> {
+    let conn = st.db();
+    crate::extensions::toggle_extension(&conn, &id, enabled).map_err(err)
+}
+
+#[tauri::command]
+pub async fn remove_extension(st: St<'_>, id: String) -> CmdResult<()> {
+    let conn = st.db();
+    crate::extensions::remove_extension(&conn, &id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_extension_user_config(
+    st: St<'_>,
+    id: String,
+    values: serde_json::Value,
+) -> CmdResult<crate::extensions::InstalledExtension> {
+    let conn = st.db();
+    crate::extensions::set_extension_user_config(&conn, &id, values).map_err(err)
+}
+
+#[tauri::command]
+pub async fn extension_http_fetch(
+    req: crate::extensions::ExtensionFetchReq,
+) -> CmdResult<crate::extensions::ExtensionFetchResp> {
+    crate::extensions::extension_http_fetch(req)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn get_onlinestream_mapping(
+    st: St<'_>,
+    provider_id: String,
+    anilist_id: i64,
+) -> CmdResult<Option<crate::onlinestream::OnlinestreamMapping>> {
+    let conn = st.db();
+    crate::onlinestream::get_mapping(&conn, &provider_id, anilist_id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_onlinestream_mapping(
+    st: St<'_>,
+    provider_id: String,
+    anilist_id: i64,
+    provider_anime_id: String,
+    provider_title: Option<String>,
+) -> CmdResult<crate::onlinestream::OnlinestreamMapping> {
+    let conn = st.db();
+    crate::onlinestream::set_mapping(
+        &conn,
+        &provider_id,
+        anilist_id,
+        &provider_anime_id,
+        provider_title.as_deref(),
+    )
+    .map_err(err)
+}
+
+#[tauri::command]
+pub async fn remove_onlinestream_mapping(
+    st: St<'_>,
+    provider_id: String,
+    anilist_id: i64,
+) -> CmdResult<()> {
+    let conn = st.db();
+    crate::onlinestream::remove_mapping(&conn, &provider_id, anilist_id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn start_web_stream(
+    app: AppHandle,
+    st: St<'_>,
+    req: crate::embedded_player::StartWebStreamReq,
+) -> CmdResult<crate::embedded_player::BuiltinPlayerState> {
+    // Bookmark in `stream_library` when playing a direct web stream
+    {
+        let conn = st.db();
+        let _ = conn.execute_batch(db::SCHEMA_V7);
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO stream_library (anilist_id, added_at) VALUES (?1, ?2)",
+            params![req.anilist_id, db::now()],
+        );
+    }
+    crate::embedded_player::start_web_stream(app, st.inner().clone(), req).map_err(err)?;
+    Ok(crate::embedded_player::get_state())
+}
+
+#[tauri::command]
+pub async fn prefetch_web_stream_subtitles(
+    app: AppHandle,
+    st: St<'_>,
+    anilist_id: i64,
+    episode: i64,
+    ref_sub_url: Option<String>,
+    headers: Option<HashMap<String, String>>,
+) -> CmdResult<bool> {
+    let ep_key = episode.to_string();
+    let hdrs = headers.unwrap_or_default();
+    let ref_cues = if let Some(ref url) = ref_sub_url.filter(|s| !s.trim().is_empty()) {
+        crate::subtitles::fetch_remote_subtitle_cues(&st.providers.http, url, &hdrs)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let ok = crate::subtitles::auto_prepare_stream_subtitles(
+        &app,
+        st.inner(),
+        anilist_id,
+        &ep_key,
+        episode,
+        &ref_cues,
+        "Preloaded Web Stream Soft-Sub (.vtt)",
+    )
+    .await
+    .is_some();
+    Ok(ok)
+}
+
+#[tauri::command]
+pub async fn get_anidb_ids(
+    st: St<'_>,
+    anilist_id: i64,
+    episode: i64,
+) -> CmdResult<(Option<i64>, Option<i64>)> {
+    Ok(st.providers.anizip_anidb_lookup(anilist_id, episode).await)
+}
+
+#[tauri::command]
+pub async fn list_torrent_files(
+    st: St<'_>,
+    candidate: crate::torrent::TorrentCandidate,
+) -> CmdResult<Vec<crate::torrent::TorrentFileEntry>> {
+    crate::torrent::list_torrent_files(st.inner(), candidate)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn get_remembered_batch(
+    st: St<'_>,
+    anilist_id: i64,
+) -> CmdResult<Option<crate::torrent::RememberedBatch>> {
+    let conn = st.db();
+    Ok(crate::torrent::get_remembered_batch(&conn, anilist_id))
+}
+
+#[tauri::command]
+pub async fn clear_remembered_batch(st: St<'_>, anilist_id: i64) -> CmdResult<()> {
+    let conn = st.db();
+    crate::torrent::clear_remembered_batch(&conn, anilist_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn check_episode_availability(
+    st: St<'_>,
+    anilist_id: i64,
+    episodes: Vec<i64>,
+) -> CmdResult<HashMap<i64, bool>> {
+    Ok(crate::torrent::check_episode_availability(st.inner(), anilist_id, episodes).await)
+}
+
+#[tauri::command]
+pub async fn preload_next_torrent_episode(
+    app: AppHandle,
+    st: St<'_>,
+    anilist_id: i64,
+    next_episode: i64,
+) -> CmdResult<bool> {
+    crate::torrent::preload_next_torrent_episode(app, st.inner().clone(), anilist_id, next_episode)
+        .await
+        .map_err(err)
 }
