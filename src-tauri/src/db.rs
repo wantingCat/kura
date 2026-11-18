@@ -310,6 +310,44 @@ CREATE TABLE IF NOT EXISTS immersion_anilist_shows (
 );
 "#;
 
+/// v0.9: Seanime-compatible extensions, online stream manual mappings, and batch torrent memory.
+pub const SCHEMA_V9: &str = r#"
+CREATE TABLE IF NOT EXISTS installed_extensions (
+    id               TEXT PRIMARY KEY,
+    name             TEXT NOT NULL,
+    version          TEXT NOT NULL DEFAULT '0.1.0',
+    ext_type         TEXT NOT NULL,
+    language         TEXT NOT NULL DEFAULT 'javascript',
+    manifest_uri     TEXT NOT NULL DEFAULT '',
+    icon_url         TEXT,
+    author           TEXT,
+    description      TEXT,
+    payload          TEXT NOT NULL,
+    user_config_json TEXT NOT NULL DEFAULT '{}',
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    updated_at       INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS onlinestream_mappings (
+    provider_id       TEXT NOT NULL,
+    anilist_id        INTEGER NOT NULL,
+    provider_anime_id TEXT NOT NULL,
+    provider_title    TEXT,
+    updated_at        INTEGER NOT NULL,
+    PRIMARY KEY (provider_id, anilist_id)
+);
+
+CREATE TABLE IF NOT EXISTS torrent_batch_history (
+    anilist_id    INTEGER PRIMARY KEY,
+    info_hash     TEXT,
+    magnet_uri    TEXT,
+    torrent_url   TEXT,
+    title         TEXT NOT NULL,
+    file_map_json TEXT NOT NULL DEFAULT '{}',
+    updated_at    INTEGER NOT NULL
+);
+"#;
+
 pub const SCHEMA_V7: &str = r#"
 CREATE TABLE IF NOT EXISTS stream_library (
     anilist_id  INTEGER PRIMARY KEY,
@@ -391,6 +429,14 @@ pub fn seed_default_prefs_if_missing(conn: &Connection) -> Result<()> {
         ("pref.torrent_extensions", "[]"),
         ("pref.builtin_player_migrated_v1", "0"),
         ("pref.immersion_daily_goal", "60"),
+        ("pref.stream_source", "web"),
+        ("pref.stream_softsub_only", "1"),
+        ("pref.anime4k_preset", "off"),
+        ("pref.torrent_groups", ""),
+        ("pref.torrent_codec", "any"),
+        ("pref.torrent_min_seeders", "0"),
+        ("pref.torrent_exclude", ""),
+        ("pref.extension_marketplace_url", ""),
         ("pref.anilist_immersion_list", ""),
     ];
 
@@ -447,10 +493,17 @@ fn migrate(conn: &Connection) -> Result<()> {
     } else {
         conn.execute_batch(SCHEMA_V8)?;
     }
+    if version < 10 {
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA_V9} PRAGMA user_version = 10; COMMIT;"
+        ))?;
+    } else {
+        conn.execute_batch(SCHEMA_V9)?;
+    }
     let _ = backfill_immersion_from_watch_state(conn);
     if version < 8 {
         conn.execute_batch(&format!(
-            "BEGIN; {SCHEMA_V7} PRAGMA user_version = 9; COMMIT;"
+            "BEGIN; {SCHEMA_V7} PRAGMA user_version = 10; COMMIT;"
         ))?;
     } else {
         conn.execute_batch(SCHEMA_V7)?;

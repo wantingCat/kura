@@ -5,13 +5,15 @@
   import { getVersion } from "@tauri-apps/api/app";
   import {
 
-    api, events, type AnilistAccount, type AnilistSyncReport, type BackupSummary,
+    api, events, type AnilistAccount, type AnilistSyncReport, type Anime4kPreset, type BackupSummary,
     type DetectedPlayer,
     type Diagnostics,
     type DictionaryInfo,
     type ImportOptions,
     type ImportReport,
+    type InstalledExtension,
     type Library,
+    type MarketplaceExtension,
     type PlayerKind,
     type SafetyCopy,
     type TorrentExtension,
@@ -46,12 +48,35 @@
   let jimakuKeyInput = $state(app.jimakuApiKey);
   let jimakuSaved = $state(false);
 
-  // Modular Torrent Extensions (bring-your-own indexer)
+  // Modular Torrent & Seanime Extensions (bring-your-own provider/indexer)
   let torrentExtensions = $state<TorrentExtension[]>([]);
   let extUrlInput = $state("");
   let extImporting = $state(false);
   let extFailedIcons = $state<Record<string, boolean>>({});
   let extHelpOpen = $state(false);
+
+  // Seanime Marketplace & UserConfig state
+  let marketplaceUrlInput = $state(app.extensionMarketplaceUrl);
+  let marketplaceLoading = $state(false);
+  let marketplaceItems = $state<MarketplaceExtension[]>([]);
+  let installingMarketId = $state<string | null>(null);
+  let openConfigExtId = $state<string | null>(null);
+  let configDrafts = $state<Record<string, Record<string, string>>>({});
+  let savingConfigExtId = $state<string | null>(null);
+
+  const seanimeStreamProviders = $derived(
+    app.installedExtensions.filter((e) => e.extType === "onlinestream-provider"),
+  );
+  const seanimeTorrentProviders = $derived(
+    app.installedExtensions.filter((e) => e.extType === "anime-torrent-provider"),
+  );
+  const totalActiveExtensions = $derived(
+    torrentExtensions.filter((e) => e.enabled).length +
+      app.installedExtensions.filter((e) => e.enabled).length,
+  );
+  const totalInstalledExtensions = $derived(
+    torrentExtensions.length + app.installedExtensions.length,
+  );
 
   const torrentSources = $derived(torrentExtensions.filter((e) => e.kind !== "http-stream"));
   const streamSources = $derived(torrentExtensions.filter((e) => e.kind === "http-stream"));
@@ -72,6 +97,8 @@
         return "Curated releases";
       case "subsplease-json":
         return "Simulcast feed";
+      case "animetosho-api":
+        return "AnimeTosho AniDB API";
       case "http-stream":
         return "Direct stream";
       default:
@@ -81,7 +108,11 @@
 
   async function refreshTorrentExtensions() {
     try {
-      torrentExtensions = await api.listTorrentExtensions();
+      const [nativeList] = await Promise.all([
+        api.listTorrentExtensions(),
+        app.refreshExtensions(),
+      ]);
+      torrentExtensions = nativeList;
     } catch {
       // ignore
     }
@@ -92,13 +123,161 @@
     if (!val || extImporting) return;
     extImporting = true;
     try {
-      torrentExtensions = await api.importTorrentExtension(val);
-      extUrlInput = "";
-      app.toast(`Imported extension (${torrentExtensions.filter((e) => e.enabled).length} active)`, "info", 4000);
+      // 1. If user pasted a GitHub repo URL (e.g. `https://github.com/pal-droid/seanime-providers` or `gh:owner/repo`),
+      //    check if it contains Seanime anime extensions first and open the Marketplace Catalog!
+      const isRepoUrl =
+        !val.endsWith(".json") &&
+        !val.endsWith(".xml") &&
+        !val.endsWith(".rss") &&
+        (val.startsWith("gh:") || /^https?:\/\/github\.com\/[^/]+\/[^/]+(\/tree\/.*)?\/?$/i.test(val));
+      if (isRepoUrl) {
+        const items = await api.fetchMarketplaceExtensions(val).catch(() => []);
+        if (items.length > 0) {
+          marketplaceUrlInput = val;
+          await app.setExtensionMarketplaceUrl(val);
+          marketplaceItems = items;
+          extUrlInput = "";
+          app.toast(
+            `Found ${items.length} compatible anime extension(s) in repository — click + Install below!`,
+            "info",
+            5000,
+          );
+          return;
+        }
+      }
+
+      // 2. Try Seanime extension manifest if JSON or manifest/github blob URL
+      let handledAsSeanime = false;
+      if (
+        val.startsWith("{") ||
+        val.endsWith(".json") ||
+        val.includes("onlinestream") ||
+        val.includes("manifest") ||
+        val.includes("/blob/")
+      ) {
+        try {
+          const seanimeExt = await api.installExtension(val);
+          await app.refreshExtensions();
+          extUrlInput = "";
+          app.toast(`Installed Seanime extension "${seanimeExt.name}"`, "info", 4000);
+          handledAsSeanime = true;
+        } catch (seanimeErr) {
+          const errStr = String(seanimeErr);
+          // Surface explicit Seanime manifest errors (like `manga-provider`) instead of falling through!
+          if (
+            errStr.includes("UNSUPPORTED_SEANIME_TYPE") ||
+            errStr.includes("SEANIME_MANIFEST_ERR") ||
+            errStr.includes("Unsupported extension type")
+          ) {
+            throw new Error(errStr.replace(/^[A-Z_]+:\s*/, ""));
+          }
+          // What if they pasted a Seanime marketplace catalog JSON into the top box?
+          if (val.startsWith("http://") || val.startsWith("https://")) {
+            const items = await api.fetchMarketplaceExtensions(val).catch(() => []);
+            if (items.length > 0) {
+              marketplaceUrlInput = val;
+              await app.setExtensionMarketplaceUrl(val);
+              marketplaceItems = items;
+              extUrlInput = "";
+              app.toast(`Loaded ${items.length} extension(s) from catalog — click + Install below!`, "info", 4500);
+              return;
+            }
+          }
+          handledAsSeanime = false;
+        }
+      }
+      if (!handledAsSeanime) {
+        torrentExtensions = await api.importTorrentExtension(val);
+        extUrlInput = "";
+        app.toast(`Imported source (${totalActiveExtensions} active)`, "info", 4000);
+      }
+    } catch (e) {
+      app.toast(e instanceof Error ? e.message : String(e), "error", 8000);
+    } finally {
+      extImporting = false;
+    }
+  }
+
+  async function loadMarketplace() {
+    const url = marketplaceUrlInput.trim();
+    if (!url || marketplaceLoading) return;
+    marketplaceLoading = true;
+    try {
+      await app.setExtensionMarketplaceUrl(url);
+      marketplaceItems = await api.fetchMarketplaceExtensions(url);
+      if (marketplaceItems.length === 0) {
+        app.toast("No compatible streaming or torrent extensions found at that URL.", "warn", 5000);
+      }
     } catch (e) {
       app.toast(String(e), "error", 6000);
     } finally {
-      extImporting = false;
+      marketplaceLoading = false;
+    }
+  }
+
+  async function installFromMarketplace(item: MarketplaceExtension) {
+    if (installingMarketId) return;
+    installingMarketId = item.id;
+    try {
+      const installed = await api.installExtension(item.manifestUri);
+      await app.refreshExtensions();
+      app.toast(`Installed "${installed.name}" v${installed.version}`, "info", 4000);
+    } catch (e) {
+      app.toast(String(e), "error", 6000);
+    } finally {
+      installingMarketId = null;
+    }
+  }
+
+  async function handleToggleSeanimeExt(ext: InstalledExtension) {
+    try {
+      await api.toggleExtension(ext.id, !ext.enabled);
+      await app.refreshExtensions();
+    } catch (e) {
+      app.toast(String(e), "error", 5000);
+    }
+  }
+
+  async function handleRemoveSeanimeExt(ext: InstalledExtension) {
+    try {
+      await api.removeExtension(ext.id);
+      await app.refreshExtensions();
+      app.toast(`Removed "${ext.name}"`, "info", 3500);
+    } catch (e) {
+      app.toast(String(e), "error", 5000);
+    }
+  }
+
+  function extConfigFields(ext: InstalledExtension) {
+    return ext.userConfig?.definition?.fields ?? [];
+  }
+
+  function toggleExtConfigPanel(ext: InstalledExtension) {
+    if (openConfigExtId === ext.id) {
+      openConfigExtId = null;
+      return;
+    }
+    const initial: Record<string, string> = {};
+    const savedVals = ext.userConfig?.values ?? {};
+    for (const f of extConfigFields(ext)) {
+      initial[f.name] = savedVals[f.name] ?? f.default ?? "";
+    }
+    configDrafts = { ...configDrafts, [ext.id]: initial };
+    openConfigExtId = ext.id;
+  }
+
+  async function saveExtUserConfig(ext: InstalledExtension) {
+    const vals = configDrafts[ext.id] ?? {};
+    savingConfigExtId = ext.id;
+    try {
+      await api.setExtensionUserConfig(ext.id, vals);
+      await app.refreshExtensions();
+      openConfigExtId = null;
+      app.toast(`Saved settings for "${ext.name}"`, "info", 3500);
+    } catch (e) {
+      app.toast(String(e), "error", 5000);
+    } finally {
+      savingConfigExtId = null;
     }
   }
 
@@ -122,6 +301,10 @@
     if (active === "playback" || active === "extensions") {
       void refreshTorrentExtensions();
     }
+  });
+
+  $effect(() => {
+    marketplaceUrlInput = app.extensionMarketplaceUrl;
   });
 
   $effect(() => {
@@ -752,8 +935,11 @@
     { cat: "appearance", label: "Japanese accents", hint: "Native titles, Japanese labels and kanji (日本語アクセント)", target: "set-japanese-accents", kw: "japanese jp kanji native title nihongo accent language 日本語" },
     { cat: "appearance", label: "Multi-season shows", hint: "Group seasons into one card or keep them separate", target: "set-seasons", kw: "group grouped separate season movie ova tabs" },
     { cat: "playback", label: "App Mode (Offline vs. Streaming)", hint: "Switch between Offline Library Mode and Streaming & Hybrid Mode", target: "set-app-mode", kw: "mode streaming torrent offline local hybrid discover" },
+    { cat: "playback", label: "Default Streaming Backend (Web vs. Torrent)", hint: "Choose Direct Soft-Sub Web Stream or BitTorrent Swarm for unowned episodes", target: "set-stream-source", fallback: "set-app-mode", kw: "web stream softsub m3u8 hls vtt seanime torrent backend" },
     { cat: "playback", label: "Torrent Streaming & Download Action", hint: "Stream Only (Temp Cache), Stream & Save to Library, or Download First", target: "set-torrent-action", fallback: "set-app-mode", kw: "torrent stream download hybrid nyaa animetosho cache" },
-    { cat: "extensions", label: "Extensions", hint: "Add, enable or remove torrent and streaming sources", target: "set-torrent-extensions", kw: "extension source indexer repository rss subsplease seadex nyaa stream manifest" },
+    { cat: "playback", label: "Torrent Auto-Select Release Profile", hint: "Preferred fansub groups, codec (HEVC/AV1), minimum seeders, and excluded terms", target: "set-torrent-profile", fallback: "set-app-mode", kw: "torrent profile group subsplease erai hevc av1 10bit seeders exclude" },
+    { cat: "playback", label: "Anime4K GPU Shaders", hint: "Real-time GPU upscaling and line restoration in Kura Built-In Player", target: "pref-anime4k", fallback: "set-player", kw: "anime4k shader upscale gpu glsl 4k crisp libmpv" },
+    { cat: "extensions", label: "Extensions & Seanime Marketplace", hint: "Install Seanime streaming/torrent extensions, marketplaces, or RSS/API feeds", target: "set-torrent-extensions", kw: "extension seanime marketplace onlinestream source indexer repository rss subsplease seadex animetosho nyaa stream manifest" },
     { cat: "playback", label: "Player", hint: "Kura Built-In, mpv, VLC, MPC or system default", target: "set-player", kw: "builtin mpv vlc mpc system default video install" },
     { cat: "playback", label: "Program location", hint: "Point Kura at your player's executable", target: "player-path", fallback: "set-player", kw: "path exe browse custom" },
     { cat: "playback", label: "MPC web interface port", hint: "Port MPC-HC / BE listens on", target: "mpc-port", fallback: "set-player", kw: "mpc port web interface" },
@@ -1253,9 +1439,45 @@
 
       {#if app.appMode === "streaming"}
         <div class="opt-divider"></div>
+        <div class="opt-head" id="set-stream-source">
+          <h3>Default Streaming Backend</h3>
+          <p class="faint">
+            Choose what happens first when you click Play on an unowned episode. You can still open either Web Sources or Torrents on any episode at any time.
+          </p>
+        </div>
+        <div class="choices" role="radiogroup" aria-label="Default Streaming Backend">
+          <button
+            class="choice"
+            class:on={app.streamSource === "web"}
+            role="radio"
+            aria-checked={app.streamSource === "web"}
+            onclick={() => app.setStreamSource("web")}
+            id="pref-stream-source-web"
+          >
+            <span class="choice-text">
+              <strong>Direct Soft-Sub Web Stream <span class="rec">Zero P2P</span></strong>
+              <small>Instant HLS/MP4 streaming via Seanime <code>onlinestream-provider</code> extensions with clean video + automatic <code>.vtt</code> → Jimaku Japanese subtitle retiming.</small>
+            </span>
+          </button>
+          <button
+            class="choice"
+            class:on={app.streamSource === "torrent"}
+            role="radio"
+            aria-checked={app.streamSource === "torrent"}
+            onclick={() => app.setStreamSource("torrent")}
+            id="pref-stream-source-torrent"
+          >
+            <span class="choice-text">
+              <strong>BitTorrent Swarm <span class="rec">Max Quality</span></strong>
+              <small>Streams or saves Blu-ray / WEB-DL <code>.mkv</code> releases via Kura's built-in warm-DHT + MSE-encrypted BitTorrent engine.</small>
+            </span>
+          </button>
+        </div>
+
+        <div class="opt-divider"></div>
         <div class="opt-head" id="set-torrent-action">
-          <h3>When Playing an Unowned Episode</h3>
-          <p class="faint">Choose whether Kura streams into a temporary cache, saves while streaming, or downloads to your library first.</p>
+          <h3>BitTorrent Action Mode</h3>
+          <p class="faint">When using BitTorrent, choose whether Kura streams into a temporary cache, saves while streaming, or downloads to your library first.</p>
         </div>
         <div class="choices presets-grid" role="radiogroup" aria-label="Torrent Action">
           <button
@@ -1316,19 +1538,87 @@
           </div>
 
           <div class="field">
-            <span class="field-label">Sources</span>
+            <span class="field-label">Sources &amp; Extensions</span>
             <button class="ext-jump" onclick={() => go("extensions")}>
               <Icon name="grid" size={15} />
               <span>
-                <strong>{torrentExtensions.filter((e) => e.enabled).length} of {torrentExtensions.length} extensions active</strong>
-                <small>Manage torrent and streaming sources</small>
+                <strong>{totalActiveExtensions} of {totalInstalledExtensions} extensions active</strong>
+                <small>Manage Seanime web stream providers, marketplace &amp; torrent indexers</small>
               </span>
               <Icon name="chevron-right" size={15} />
             </button>
           </div>
         </div>
 
+        <div class="opt-divider"></div>
+        <div class="opt-head" id="set-torrent-profile">
+          <h3>Auto-Select Release Profile</h3>
+          <p class="faint">Fine-tune how Kura ranks and auto-picks torrent releases for instant playback and 85% next-episode preloading.</p>
+        </div>
+        <div class="track-fields">
+          <div class="field">
+            <label for="pref-torrent-groups">Preferred Release Groups (comma-separated)</label>
+            <input
+              id="pref-torrent-groups"
+              class="input"
+              placeholder="e.g. SubsPlease, Erai-raws"
+              value={app.torrentGroups}
+              onchange={(e) => app.setTorrentGroups(e.currentTarget.value)}
+            />
+          </div>
+          <div class="field">
+            <label for="pref-torrent-codec">Preferred Video Codec</label>
+            <select
+              id="pref-torrent-codec"
+              class="input select"
+              value={app.torrentCodec}
+              onchange={(e) => app.setTorrentCodec(e.currentTarget.value as "any" | "hevc" | "avc" | "av1")}
+            >
+              <option value="any">Any codec</option>
+              <option value="hevc">HEVC / x265 (10-bit compact)</option>
+              <option value="avc">AVC / x264 (Fastest decode)</option>
+              <option value="av1">AV1</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="pref-torrent-min-seeders">Minimum Seeders</label>
+            <input
+              id="pref-torrent-min-seeders"
+              type="number"
+              min="0"
+              class="input"
+              value={app.torrentMinSeeders}
+              onchange={(e) => app.setTorrentMinSeeders(Number(e.currentTarget.value) || 0)}
+            />
+          </div>
+          <div class="field">
+            <label for="pref-torrent-exclude">Exclude Terms (comma-separated)</label>
+            <input
+              id="pref-torrent-exclude"
+              class="input"
+              placeholder="e.g. CAM, 480p, Dub"
+              value={app.torrentExclude}
+              onchange={(e) => app.setTorrentExclude(e.currentTarget.value)}
+            />
+          </div>
+        </div>
+
         <div class="rows" style="margin-top: 10px;">
+          <div class="row">
+            <div class="row-text">
+              <strong>Enforce Soft-Sub Only on Direct Web Streams</strong>
+              <small>Skip burned-in hardsub servers automatically so video frames stay clean underneath Kura's interactive Yomitan Japanese subtitles.</small>
+            </div>
+            <button
+              class="switch"
+              class:on={app.streamSoftSubOnly}
+              role="switch"
+              aria-checked={app.streamSoftSubOnly}
+              aria-label="Enforce Soft-Sub Only on Direct Web Streams"
+              onclick={() => app.setStreamSoftSubOnly(!app.streamSoftSubOnly)}
+              id="pref-stream-softsub-only"
+            ><span></span></button>
+          </div>
           <div class="row">
             <div class="row-text">
               <strong>Auto-fetch &amp; auto-retime Japanese subtitles on stream</strong>
@@ -1490,7 +1780,7 @@
         <div class="row">
           <div class="row-text">
             <strong>Autoplay next episode</strong>
-            <small>When an episode ends, play the next one you own in the same window — including the next season.</small>
+            <small>When an episode ends, play the next one automatically (preloads streams &amp; subtitles in the background at 85% progress).</small>
           </div>
           <button
             class="switch"
@@ -1502,6 +1792,25 @@
             id="pref-autoplay"
           ><span></span></button>
         </div>
+        <div class="row">
+          <div class="row-text">
+            <strong>Anime4K Real-Time GPU Shaders (Built-In Player)</strong>
+            <small>Apply bundled Anime4K v4 GLSL upscaling &amp; line-restoration shaders in native <code>libmpv</code>. Also switchable live via the <strong>A4K</strong> button inside the player.</small>
+          </div>
+          <select
+            id="pref-anime4k"
+            class="input select"
+            style="max-width: 240px;"
+            value={app.anime4kPreset}
+            onchange={(e) => app.setAnime4kPreset(e.currentTarget.value as Anime4kPreset)}
+          >
+            <option value="off">Off (Original video)</option>
+            <option value="a_fast">Mode A · Crisp (Fast)</option>
+            <option value="a_hq">Mode A · High Quality</option>
+            <option value="b_soft">Mode B · Soft Restore</option>
+            <option value="c_upscale">Mode C · Clean Upscale</option>
+          </select>
+        </div>
       </div>
     </div>
   </section>
@@ -1511,14 +1820,14 @@
   <section class="block" id="set-extensions">
     <div class="block-head">
       <h2 class="section-title">Extensions <Ja text={"拡張"} class="ja-sub" /></h2>
-      <span class="ext-count">{torrentExtensions.filter((e) => e.enabled).length} active · {torrentExtensions.length} installed</span>
+      <span class="ext-count">{totalActiveExtensions} active · {totalInstalledExtensions} installed</span>
     </div>
 
     <div class="ext-install" id="set-torrent-extensions">
       <Icon name="link" size={16} />
       <input
         id="pref-ext-url"
-        placeholder="Add a repository or source URL"
+        placeholder="Paste Seanime extension manifest (.json), Hayase index.json, gh:owner/repo, or RSS/API URL"
         bind:value={extUrlInput}
         autocomplete="off"
         spellcheck="false"
@@ -1531,22 +1840,227 @@
       />
       <button class="btn btn-primary btn-sm" disabled={extImporting || !extUrlInput.trim()} onclick={importExtension}>
         {#if extImporting}<span class="spinner"></span>{/if}
-        {extImporting ? "Adding…" : "Add"}
+        {extImporting ? "Adding…" : "Install"}
       </button>
     </div>
+
+    <div class="ext-install" style="margin-top: 10px;">
+      <Icon name="grid" size={16} />
+      <input
+        id="pref-marketplace-url"
+        placeholder="Optional Seanime Extension Marketplace JSON URL (browse & one-click install)"
+        bind:value={marketplaceUrlInput}
+        autocomplete="off"
+        spellcheck="false"
+        onkeydown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void loadMarketplace();
+          }
+        }}
+      />
+      <button class="btn btn-sm" disabled={marketplaceLoading || !marketplaceUrlInput.trim()} onclick={loadMarketplace}>
+        {#if marketplaceLoading}<span class="spinner"></span>{/if}
+        {marketplaceLoading ? "Loading…" : "Browse Marketplace"}
+      </button>
+    </div>
+
     <button class="ext-help-toggle" onclick={() => (extHelpOpen = !extHelpOpen)}>
       {extHelpOpen ? "Hide" : "What can I paste here?"}
     </button>
     {#if extHelpOpen}
       <div class="ext-help faint">
-        <p>Kura doesn't ship with any sources. You can add:</p>
+        <p>Kura ships 100% clean with zero built-in scrapers. It natively runs Seanime-compatible extensions and native Rust feeds:</p>
         <ul>
-          <li>A GitHub repository — <code>gh:owner/repo</code></li>
-          <li>An extension manifest — <code>https://…/index.json</code></li>
-          <li>A direct RSS, SubsPlease or SeaDex API URL</li>
+          <li>A Seanime extension manifest — <code>https://…/manifest.json</code> (<code>onlinestream-provider</code> or <code>anime-torrent-provider</code>)</li>
+          <li>A Seanime marketplace index URL in the second box to browse &amp; install extensions in one click</li>
+          <li>A GitHub repo (<code>gh:owner/repo</code>), Hayase <code>index.json</code>, or direct RSS / SubsPlease / SeaDex / AnimeTosho URL</li>
         </ul>
       </div>
     {/if}
+
+    {#if marketplaceItems.length > 0}
+      <div class="ext-group">
+        <div class="block-head" style="margin-bottom: 8px;">
+          <h3 class="ext-group-title" style="margin: 0;">Marketplace Catalog ({marketplaceItems.length})</h3>
+          <button class="ext-help-toggle" style="margin: 0;" onclick={() => (marketplaceItems = [])}>Close catalog</button>
+        </div>
+        <div class="ext-list">
+          {#each marketplaceItems as m (m.id)}
+            {@const already = app.installedExtensions.find((x) => x.id === m.id)}
+            <div class="ext-item">
+              <div class="ext-icon">
+                {#if m.iconUrl && !extFailedIcons[`m:${m.id}`]}
+                  <img
+                    src={m.iconUrl}
+                    alt=""
+                    loading="lazy"
+                    onerror={() => (extFailedIcons = { ...extFailedIcons, [`m:${m.id}`]: true })}
+                  />
+                {:else}
+                  <span>{m.name.slice(0, 1).toUpperCase()}</span>
+                {/if}
+              </div>
+              <div class="ext-text">
+                <div class="ext-name-row">
+                  <strong>{m.name}</strong>
+                  <span class="ext-kind">
+                    {m.type === "onlinestream-provider" ? "Web Stream" : "Torrent"} · v{m.version}
+                  </span>
+                  {#if m.language}<span class="badge">{m.language.toUpperCase()}</span>{/if}
+                </div>
+                <small>{m.description || m.author || m.id}</small>
+              </div>
+              <button
+                class="btn btn-sm"
+                class:btn-primary={!already || already.version !== m.version}
+                disabled={installingMarketId !== null || !m.manifestUri}
+                onclick={() => void installFromMarketplace(m)}
+              >
+                {#if installingMarketId === m.id}
+                  Installing…
+                {:else if already && already.version === m.version}
+                  Reinstall
+                {:else if already}
+                  Update → v{m.version}
+                {:else}
+                  + Install
+                {/if}
+              </button>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
+    {#snippet seanimeExtList(list: InstalledExtension[])}
+      <div class="ext-list">
+        {#each list as ext (ext.id)}
+          {@const cfgFields = extConfigFields(ext)}
+          <div class="seanime-ext-wrap">
+            <div class="ext-item" class:off={!ext.enabled}>
+              <div class="ext-icon">
+                {#if ext.iconUrl && !extFailedIcons[ext.id]}
+                  <img
+                    src={ext.iconUrl}
+                    alt=""
+                    loading="lazy"
+                    onerror={() => (extFailedIcons = { ...extFailedIcons, [ext.id]: true })}
+                  />
+                {:else}
+                  <span>{ext.name.slice(0, 1).toUpperCase()}</span>
+                {/if}
+              </div>
+              <div class="ext-text">
+                <div class="ext-name-row">
+                  <strong>{ext.name}</strong>
+                  <span class="ext-kind">v{ext.version} · {ext.language.toUpperCase()}</span>
+                </div>
+                <small title={ext.manifestUri || ext.id}>{ext.description || ext.author || ext.id}</small>
+              </div>
+              {#if cfgFields.length > 0}
+                <button
+                  class="btn btn-ghost btn-sm"
+                  onclick={() => toggleExtConfigPanel(ext)}
+                  title="Configure extension preferences"
+                >
+                  {openConfigExtId === ext.id ? "Close" : "Configure"}
+                </button>
+              {/if}
+              <button
+                class="ext-remove"
+                onclick={() => void handleRemoveSeanimeExt(ext)}
+                title="Remove"
+                aria-label={`Remove ${ext.name}`}
+              >
+                <Icon name="trash" size={14} />
+              </button>
+              <button
+                class="switch"
+                class:on={ext.enabled}
+                role="switch"
+                aria-checked={ext.enabled}
+                aria-label={`Toggle ${ext.name}`}
+                onclick={() => void handleToggleSeanimeExt(ext)}
+              ><span></span></button>
+            </div>
+
+            {#if openConfigExtId === ext.id && cfgFields.length > 0}
+              <div class="ext-config-panel">
+                {#each cfgFields as field (field.name)}
+                  <div class="field">
+                    <label for={`ext-cfg-${ext.id}-${field.name}`}>{field.label || field.name}</label>
+                    {#if field.type === "select" && field.options && field.options.length > 0}
+                      <select
+                        id={`ext-cfg-${ext.id}-${field.name}`}
+                        class="input select"
+                        value={configDrafts[ext.id]?.[field.name] ?? field.default ?? ""}
+                        onchange={(e) => {
+                          configDrafts = {
+                            ...configDrafts,
+                            [ext.id]: {
+                              ...(configDrafts[ext.id] ?? {}),
+                              [field.name]: e.currentTarget.value,
+                            },
+                          };
+                        }}
+                      >
+                        {#each field.options as opt (opt.value)}
+                          <option value={opt.value}>{opt.label}</option>
+                        {/each}
+                      </select>
+                    {:else if field.type === "switch"}
+                      <label class="ext-cfg-switch">
+                        <input
+                          id={`ext-cfg-${ext.id}-${field.name}`}
+                          type="checkbox"
+                          checked={(configDrafts[ext.id]?.[field.name] ?? field.default) === "true"}
+                          onchange={(e) => {
+                            configDrafts = {
+                              ...configDrafts,
+                              [ext.id]: {
+                                ...(configDrafts[ext.id] ?? {}),
+                                [field.name]: (e.currentTarget as HTMLInputElement).checked ? "true" : "false",
+                              },
+                            };
+                          }}
+                        />
+                        <span class="faint">{field.description || "Enable option"}</span>
+                      </label>
+                    {:else}
+                      <input
+                        id={`ext-cfg-${ext.id}-${field.name}`}
+                        class="input"
+                        value={configDrafts[ext.id]?.[field.name] ?? field.default ?? ""}
+                        placeholder={field.description ?? ""}
+                        oninput={(e) => {
+                          configDrafts = {
+                            ...configDrafts,
+                            [ext.id]: {
+                              ...(configDrafts[ext.id] ?? {}),
+                              [field.name]: (e.currentTarget as HTMLInputElement).value,
+                            },
+                          };
+                        }}
+                      />
+                    {/if}
+                  </div>
+                {/each}
+                <div class="ext-config-actions">
+                  <button
+                    class="btn btn-primary btn-sm"
+                    disabled={savingConfigExtId === ext.id}
+                    onclick={() => void saveExtUserConfig(ext)}
+                  >
+                    {savingConfigExtId === ext.id ? "Saving…" : "Save Extension Config"}
+                  </button>
+                </div>
+              </div>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/snippet}
 
     {#snippet extList(list: TorrentExtension[])}
       <div class="ext-list">
@@ -1593,25 +2107,37 @@
       </div>
     {/snippet}
 
-    {#if torrentExtensions.length === 0}
+    {#if totalInstalledExtensions === 0}
       <div class="card ext-empty">
         <div class="ext-empty-icon"><Icon name="grid" size={22} /></div>
         <strong>No extensions yet</strong>
-        <p class="faint">Add a source above to start streaming episodes you don't have locally.</p>
+        <p class="faint">Paste a Seanime extension manifest, marketplace URL, or torrent feed above to start streaming.</p>
       </div>
     {:else}
-      <div class="ext-group">
-        <h3 class="ext-group-title">Torrent sources</h3>
-        {#if torrentSources.length}
-          {@render extList(torrentSources)}
-        {:else}
-          <p class="faint ext-group-empty">None installed.</p>
-        {/if}
-      </div>
-
-      {#if streamSources.length}
+      {#if seanimeStreamProviders.length > 0}
         <div class="ext-group">
-          <h3 class="ext-group-title">Streaming sources</h3>
+          <h3 class="ext-group-title">Web Streaming Providers (Seanime)</h3>
+          {@render seanimeExtList(seanimeStreamProviders)}
+        </div>
+      {/if}
+
+      {#if seanimeTorrentProviders.length > 0}
+        <div class="ext-group">
+          <h3 class="ext-group-title">Torrent Providers (Seanime)</h3>
+          {@render seanimeExtList(seanimeTorrentProviders)}
+        </div>
+      {/if}
+
+      {#if torrentSources.length > 0}
+        <div class="ext-group">
+          <h3 class="ext-group-title">Native Torrent &amp; Feed Sources</h3>
+          {@render extList(torrentSources)}
+        </div>
+      {/if}
+
+      {#if streamSources.length > 0}
+        <div class="ext-group">
+          <h3 class="ext-group-title">Direct HTTP Stream Sources</h3>
           {@render extList(streamSources)}
         </div>
       {/if}
@@ -3716,10 +4242,6 @@
     color: var(--text-3);
     margin: 0 0 8px 2px;
   }
-  .ext-group-empty {
-    font-size: 12.5px;
-    margin: 0 0 0 2px;
-  }
 
   .ext-list {
     display: flex;
@@ -3823,6 +4345,29 @@
   .ext-remove:hover {
     background: color-mix(in srgb, var(--danger) 14%, transparent);
     color: var(--danger);
+  }
+
+  .seanime-ext-wrap + .seanime-ext-wrap {
+    border-top: var(--bw) solid var(--line);
+  }
+  .ext-config-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 16px 14px;
+    background: var(--surface-2);
+    border-top: 1px solid var(--line);
+  }
+  .ext-cfg-switch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .ext-config-actions {
+    display: flex;
+    justify-content: flex-end;
   }
 
   .ext-empty {

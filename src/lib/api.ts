@@ -352,6 +352,141 @@ export interface TorrentCandidate {
   isBatch: boolean;
   score: number;
   refSubtitleUrl: string | null;
+  codec?: string | null;
+  bitDepth?: string | null;
+  isDualAudio?: boolean;
+  isBestRelease?: boolean;
+}
+
+export interface TorrentFileEntry {
+  index: number;
+  name: string;
+  length: number;
+  detectedEpisode: number | null;
+  isVideo: boolean;
+}
+
+export interface RememberedBatch {
+  anilistId: number;
+  infoHash: string | null;
+  magnetUri: string | null;
+  torrentUrl: string | null;
+  title: string;
+  updatedAt: number;
+}
+
+export type Anime4kPreset = "off" | "a_fast" | "a_hq" | "b_soft" | "c_upscale";
+
+export interface ExtensionConfigField {
+  name: string;
+  label?: string;
+  type?: string;
+  description?: string;
+  default?: string;
+  options?: { value: string; label: string }[];
+}
+
+export interface InstalledExtension {
+  id: string;
+  name: string;
+  version: string;
+  extType: "onlinestream-provider" | "anime-torrent-provider" | string;
+  language: "javascript" | "typescript" | string;
+  manifestUri: string;
+  iconUrl: string | null;
+  author: string | null;
+  description: string | null;
+  payload: string;
+  userConfig: {
+    definition?: {
+      version?: number;
+      requiresConfig?: boolean;
+      fields?: ExtensionConfigField[];
+    } | null;
+    values?: Record<string, string>;
+  };
+  enabled: boolean;
+  updatedAt: number;
+}
+
+export interface MarketplaceExtension {
+  id: string;
+  name: string;
+  version: string;
+  type: "onlinestream-provider" | "anime-torrent-provider" | string;
+  language: string;
+  manifestUri: string;
+  iconUrl: string | null;
+  author: string | null;
+  description: string | null;
+  website: string | null;
+  installed: boolean;
+  installedVersion: string | null;
+}
+
+export interface ExtensionFetchReq {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  bodyBase64?: string;
+  redirect?: "follow" | "manual" | "error";
+  timeout?: number;
+}
+
+export interface ExtensionFetchResp {
+  status: number;
+  statusText: string;
+  method: string;
+  ok: boolean;
+  url: string;
+  redirected: boolean;
+  contentType: string;
+  contentLength: number;
+  headers: Record<string, string>;
+  rawHeaders: Record<string, string[]>;
+  cookies: Record<string, string>;
+  bodyText: string;
+  bodyBase64: string;
+}
+
+export interface OnlinestreamMapping {
+  providerId: string;
+  anilistId: number;
+  providerAnimeId: string;
+  providerTitle: string | null;
+  updatedAt: number;
+}
+
+export interface WebStreamSubtitleTrack {
+  url: string;
+  language: string;
+  label?: string | null;
+  isDefault?: boolean;
+}
+
+export interface StartWebStreamReq {
+  anilistId: number;
+  epKey: string;
+  url: string;
+  streamType?: string | null;
+  headers?: Record<string, string>;
+  subtitles?: WebStreamSubtitleTrack[];
+  providerName?: string | null;
+  serverName?: string | null;
+}
+
+export interface PreloadNextEpisodeEvent {
+  anilistId: number;
+  epKey: string;
+  nextEpisode: number;
+  streamKind: "web" | "torrent" | string;
+}
+
+export interface PlayNextStreamEpisodeEvent {
+  anilistId: number;
+  nextEpisode: number;
+  streamKind: "web" | "torrent" | string;
 }
 
 export interface TorrentExtension {
@@ -633,6 +768,8 @@ export interface BuiltinPlayerState {
   hasNextEpisode: boolean;
   externalSubPath: string | null;
   todayImmersionSec?: number;
+  shaderPreset?: Anime4kPreset | string;
+  streamKind?: "web" | "torrent" | string | null;
 }
 
 export type BuiltinCommand =
@@ -648,6 +785,7 @@ export type BuiltinCommand =
   | { type: "set_sub_track"; id: number }
   | { type: "add_sub_offset"; delta: number }
   | { type: "load_sub_file"; path: string }
+  | { type: "set_shader_preset"; preset: Anime4kPreset | string }
   | { type: "next_episode" }
   | { type: "open_external_mpv" }
   | { type: "html5_tick"; position: number; duration: number; paused: boolean; ended: boolean }
@@ -962,6 +1100,7 @@ export const api = {
     episodeNum?: number | null;
     candidate: TorrentCandidate;
     modeOverride?: "stream" | "hybrid" | "download" | null;
+    fileIndex?: number | null;
   }) =>
     invoke<TorrentSessionStatus>("start_torrent_session", {
       anilistId: opts.anilistId,
@@ -969,6 +1108,7 @@ export const api = {
       episodeNum: opts.episodeNum ?? null,
       candidate: opts.candidate,
       modeOverride: opts.modeOverride ?? null,
+      fileIndex: opts.fileIndex ?? null,
     }),
   listTorrentSessions: () => invoke<TorrentSessionStatus[]>("list_torrent_sessions"),
   cancelTorrentSession: (sessionId: string) => invoke<void>("cancel_torrent_session", { sessionId }),
@@ -1015,6 +1155,60 @@ export const api = {
     invoke<AnilistImmersionListsResponse>("get_anilist_immersion_lists"),
   setAnilistImmersionList: (listName: string | null) =>
     invoke<AnilistImmersionListsResponse>("set_anilist_immersion_list", { listName }),
+  listExtensions: () => invoke<InstalledExtension[]>("list_extensions"),
+  fetchMarketplaceExtensions: (url: string) =>
+    invoke<MarketplaceExtension[]>("fetch_marketplace_extensions", { url }),
+  installExtension: (source: string) =>
+    invoke<InstalledExtension>("install_extension", { source }),
+  toggleExtension: (id: string, enabled: boolean) =>
+    invoke<void>("toggle_extension", { id, enabled }),
+  removeExtension: (id: string) => invoke<void>("remove_extension", { id }),
+  setExtensionUserConfig: (id: string, values: Record<string, string>) =>
+    invoke<InstalledExtension>("set_extension_user_config", { id, values }),
+  extensionHttpFetch: (req: ExtensionFetchReq) =>
+    invoke<ExtensionFetchResp>("extension_http_fetch", { req }),
+  getOnlinestreamMapping: (providerId: string, anilistId: number) =>
+    invoke<OnlinestreamMapping | null>("get_onlinestream_mapping", { providerId, anilistId }),
+  setOnlinestreamMapping: (
+    providerId: string,
+    anilistId: number,
+    providerAnimeId: string,
+    providerTitle?: string | null,
+  ) =>
+    invoke<OnlinestreamMapping>("set_onlinestream_mapping", {
+      providerId,
+      anilistId,
+      providerAnimeId,
+      providerTitle: providerTitle ?? null,
+    }),
+  removeOnlinestreamMapping: (providerId: string, anilistId: number) =>
+    invoke<void>("remove_onlinestream_mapping", { providerId, anilistId }),
+  startWebStream: (req: StartWebStreamReq) =>
+    invoke<BuiltinPlayerState>("start_web_stream", { req }),
+  prefetchWebStreamSubtitles: (opts: {
+    anilistId: number;
+    episode: number;
+    refSubUrl?: string | null;
+    headers?: Record<string, string> | null;
+  }) =>
+    invoke<boolean>("prefetch_web_stream_subtitles", {
+      anilistId: opts.anilistId,
+      episode: opts.episode,
+      refSubUrl: opts.refSubUrl ?? null,
+      headers: opts.headers ?? null,
+    }),
+  getAnidbIds: (anilistId: number, episode: number) =>
+    invoke<[number | null, number | null]>("get_anidb_ids", { anilistId, episode }),
+  listTorrentFiles: (candidate: TorrentCandidate) =>
+    invoke<TorrentFileEntry[]>("list_torrent_files", { candidate }),
+  getRememberedBatch: (anilistId: number) =>
+    invoke<RememberedBatch | null>("get_remembered_batch", { anilistId }),
+  clearRememberedBatch: (anilistId: number) =>
+    invoke<void>("clear_remembered_batch", { anilistId }),
+  checkEpisodeAvailability: (anilistId: number, episodes: number[]) =>
+    invoke<Record<string, boolean>>("check_episode_availability", { anilistId, episodes }),
+  preloadNextTorrentEpisode: (anilistId: number, nextEpisode: number) =>
+    invoke<boolean>("preload_next_torrent_episode", { anilistId, nextEpisode }),
 };
 
 export const events = {
@@ -1037,6 +1231,10 @@ export const events = {
     listen<BuiltinPlayerState>("builtin-player-state", (e) => cb(e.payload)),
   onDictionaryProgress: (cb: (p: { stage: string; message: string }) => void): Promise<UnlistenFn> =>
     listen<{ stage: string; message: string }>("dictionary-progress", (e) => cb(e.payload)),
+  onPreloadNextEpisode: (cb: (e: PreloadNextEpisodeEvent) => void): Promise<UnlistenFn> =>
+    listen<PreloadNextEpisodeEvent>("preload-next-episode", (ev) => cb(ev.payload)),
+  onPlayNextStreamEpisode: (cb: (e: PlayNextStreamEpisodeEvent) => void): Promise<UnlistenFn> =>
+    listen<PlayNextStreamEpisodeEvent>("play-next-stream-episode", (ev) => cb(ev.payload)),
 };
 
 /** Prefer the locally cached image (works offline), fall back to the remote URL. */

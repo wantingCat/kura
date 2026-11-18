@@ -46,6 +46,36 @@ pub struct Backup {
     pub track_prefs: Vec<TrackPrefRow>,
     #[serde(default)]
     pub manual_matches: Vec<ManualMatch>,
+    #[serde(default)]
+    pub extensions: Vec<ExtensionBackupRow>,
+    #[serde(default)]
+    pub onlinestream_mappings: Vec<OnlinestreamMappingBackupRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionBackupRow {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub ext_type: String,
+    pub language: String,
+    pub manifest_uri: String,
+    pub icon_url: Option<String>,
+    pub author: Option<String>,
+    pub description: Option<String>,
+    pub payload: String,
+    pub user_config_json: String,
+    pub enabled: bool,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnlinestreamMappingBackupRow {
+    pub provider_id: String,
+    pub anilist_id: i64,
+    pub provider_anime_id: String,
+    pub provider_title: Option<String>,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +213,45 @@ pub fn snapshot(conn: &Connection) -> Backup {
         });
     }
 
+    let extensions = rows(
+        conn,
+        "SELECT id, name, version, ext_type, language, manifest_uri, icon_url, author, description,
+                payload, user_config_json, enabled, updated_at
+         FROM installed_extensions ORDER BY id",
+        |r| {
+            Ok(ExtensionBackupRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                version: r.get(2)?,
+                ext_type: r.get(3)?,
+                language: r.get(4)?,
+                manifest_uri: r.get(5)?,
+                icon_url: r.get(6)?,
+                author: r.get(7)?,
+                description: r.get(8)?,
+                payload: r.get(9)?,
+                user_config_json: r.get(10)?,
+                enabled: r.get::<_, i64>(11)? != 0,
+                updated_at: r.get(12)?,
+            })
+        },
+    );
+
+    let onlinestream_mappings = rows(
+        conn,
+        "SELECT provider_id, anilist_id, provider_anime_id, provider_title, updated_at
+         FROM onlinestream_mappings ORDER BY provider_id, anilist_id",
+        |r| {
+            Ok(OnlinestreamMappingBackupRow {
+                provider_id: r.get(0)?,
+                anilist_id: r.get(1)?,
+                provider_anime_id: r.get(2)?,
+                provider_title: r.get(3)?,
+                updated_at: r.get(4)?,
+            })
+        },
+    );
+
     Backup {
         app: "kura".into(),
         version: FORMAT,
@@ -194,6 +263,8 @@ pub fn snapshot(conn: &Connection) -> Backup {
         progress,
         track_prefs,
         manual_matches,
+        extensions,
+        onlinestream_mappings,
     }
 }
 
@@ -268,6 +339,44 @@ pub fn apply(conn: &Connection, b: &Backup, o: &ImportOptions) -> Result<ImportR
                 params![k, v],
             )?;
             rep.settings += 1;
+        }
+        let _ = tx.execute_batch(crate::db::SCHEMA_V9);
+        for ext in &b.extensions {
+            let _ = tx.execute(
+                "INSERT INTO installed_extensions
+                 (id, name, version, ext_type, language, manifest_uri, icon_url, author, description,
+                  payload, user_config_json, enabled, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    version = excluded.version,
+                    ext_type = excluded.ext_type,
+                    language = excluded.language,
+                    manifest_uri = excluded.manifest_uri,
+                    icon_url = excluded.icon_url,
+                    author = excluded.author,
+                    description = excluded.description,
+                    payload = excluded.payload,
+                    user_config_json = excluded.user_config_json,
+                    enabled = excluded.enabled,
+                    updated_at = excluded.updated_at
+                 WHERE excluded.updated_at >= installed_extensions.updated_at",
+                params![
+                    ext.id,
+                    ext.name,
+                    ext.version,
+                    ext.ext_type,
+                    ext.language,
+                    ext.manifest_uri,
+                    ext.icon_url,
+                    ext.author,
+                    ext.description,
+                    ext.payload,
+                    ext.user_config_json,
+                    if ext.enabled { 1i64 } else { 0i64 },
+                    ext.updated_at,
+                ],
+            );
         }
     }
 
@@ -374,6 +483,26 @@ pub fn apply(conn: &Connection, b: &Backup, o: &ImportOptions) -> Result<ImportR
             }
             rep.matches += 1;
         }
+        let _ = tx.execute_batch(crate::db::SCHEMA_V9);
+        for m in &b.onlinestream_mappings {
+            let _ = tx.execute(
+                "INSERT INTO onlinestream_mappings
+                 (provider_id, anilist_id, provider_anime_id, provider_title, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(provider_id, anilist_id) DO UPDATE SET
+                    provider_anime_id = excluded.provider_anime_id,
+                    provider_title = excluded.provider_title,
+                    updated_at = excluded.updated_at
+                 WHERE excluded.updated_at >= onlinestream_mappings.updated_at",
+                params![
+                    m.provider_id,
+                    m.anilist_id,
+                    m.provider_anime_id,
+                    m.provider_title,
+                    m.updated_at,
+                ],
+            );
+        }
     }
 
     tx.commit()?;
@@ -451,7 +580,11 @@ pub fn safety_paths(data_dir: &Path) -> Vec<PathBuf> {
 
 /// Whether a snapshot holds anything worth protecting (default settings alone don't count).
 fn meaningful(b: &Backup) -> bool {
-    !b.libraries.is_empty() || !b.watched.is_empty() || !b.progress.is_empty()
+    !b.libraries.is_empty()
+        || !b.watched.is_empty()
+        || !b.progress.is_empty()
+        || !b.extensions.is_empty()
+        || !b.onlinestream_mappings.is_empty()
 }
 
 pub fn write_safety_copy_from(b: &Backup, data_dir: &Path) {
@@ -473,11 +606,12 @@ pub fn write_safety_copy(conn: &Connection, data_dir: &Path) {
 /// On startup: fill whatever is empty in the database from the newest readable safety copy.
 pub fn restore_if_needed(conn: &Connection, data_dir: &Path) -> Result<bool> {
     let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
-    let no_settings = count("SELECT COUNT(*) FROM settings WHERE key LIKE 'pref.%'") == 0;
+    let no_settings = count("SELECT COUNT(*) FROM settings WHERE key LIKE 'pref.%' AND key NOT LIKE 'pref.%_v1'") == 0;
     let no_libraries = count("SELECT COUNT(*) FROM libraries") == 0;
     let no_history = count("SELECT COUNT(*) FROM watch_state") == 0 && count("SELECT COUNT(*) FROM watch_progress") == 0;
     let no_track_prefs = count("SELECT COUNT(*) FROM media_track_prefs") == 0;
-    if !(no_settings || no_libraries || no_history || no_track_prefs) {
+    let no_extensions = count("SELECT COUNT(*) FROM installed_extensions") == 0;
+    if !(no_settings || no_libraries || no_history || no_track_prefs || no_extensions) {
         return Ok(false);
     }
 
@@ -488,12 +622,12 @@ pub fn restore_if_needed(conn: &Connection, data_dir: &Path) -> Result<bool> {
     let Some((path, b)) = newest else { return Ok(false) };
 
     let opts = ImportOptions {
-        settings: no_settings && !b.settings.is_empty(),
+        settings: (no_settings && !b.settings.is_empty()) || (no_extensions && !b.extensions.is_empty()),
         libraries: no_libraries && !b.libraries.is_empty(),
         history: no_history && (!b.watched.is_empty() || !b.progress.is_empty()),
         track_prefs: no_track_prefs && !b.track_prefs.is_empty(),
-        // Manual matches only make sense together with freshly restored libraries.
-        matches: no_libraries && !b.manual_matches.is_empty(),
+        // Manual matches only make sense together with freshly restored libraries (or online stream mappings).
+        matches: (no_libraries && !b.manual_matches.is_empty()) || !b.onlinestream_mappings.is_empty(),
     };
     if !(opts.settings || opts.libraries || opts.history || opts.track_prefs || opts.matches) {
         return Ok(false);
@@ -517,7 +651,9 @@ fn fingerprint(conn: &Connection) -> String {
             (SELECT COUNT(*) || ':' || IFNULL(MAX(watched_at), 0) FROM watch_state) || '|' ||
             (SELECT COUNT(*) || ':' || IFNULL(MAX(updated_at), 0) FROM watch_progress) || '|' ||
             (SELECT COUNT(*) || ':' || IFNULL(MAX(updated_at), 0) FROM media_track_prefs) || '|' ||
-            (SELECT COUNT(*) || ':' || IFNULL(SUM(anilist_id), 0) FROM match_groups WHERE manual = 1)",
+            (SELECT COUNT(*) || ':' || IFNULL(SUM(anilist_id), 0) FROM match_groups WHERE manual = 1) || '|' ||
+            (SELECT COUNT(*) || ':' || IFNULL(MAX(updated_at), 0) FROM installed_extensions) || '|' ||
+            (SELECT COUNT(*) || ':' || IFNULL(MAX(updated_at), 0) FROM onlinestream_mappings)",
         [],
         |r| r.get(0),
     )

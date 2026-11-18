@@ -501,7 +501,18 @@ export function installMock() {
           };
         }
         case "list_torrent_sessions":
+        case "list_extensions":
+        case "list_torrent_extensions":
+        case "fetch_marketplace_extensions":
+        case "list_torrent_files":
           return [];
+        case "check_episode_availability":
+          return {};
+        case "get_anidb_ids":
+          return [null, null];
+        case "get_onlinestream_mapping":
+        case "get_remembered_batch":
+          return null;
         case "plugin:app|version":
           return "0.8.1";
         default:
