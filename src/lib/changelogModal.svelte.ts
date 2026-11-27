@@ -20,7 +20,10 @@ class ChangelogModalState {
 
   open(version?: string) {
     if (version) {
-      const found = CHANGELOG.find((r) => r.version === version);
+      const normalized = version.replace(/\.0$/, "");
+      const found = CHANGELOG.find(
+        (r) => r.version === version || r.version.replace(/\.0$/, "") === normalized,
+      );
       if (found) {
         this.currentRelease = found;
         this.activeVersion = found.version;
@@ -33,10 +36,13 @@ class ChangelogModalState {
   }
 
   selectVersion(v: string) {
-    const found = CHANGELOG.find((r) => r.version === v);
+    const normalized = v.replace(/\.0$/, "");
+    const found = CHANGELOG.find(
+      (r) => r.version === v || r.version.replace(/\.0$/, "") === normalized,
+    );
     if (found) {
       this.currentRelease = found;
-      this.activeVersion = v;
+      this.activeVersion = found.version;
     }
   }
 

@@ -536,7 +536,7 @@ export function installMock() {
         case "get_remembered_batch":
           return null;
         case "plugin:app|version":
-          return "0.8.1";
+          return "0.9.0";
         default:
           console.info("[preview] ignored command", cmd, a);
           return null;

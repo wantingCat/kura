@@ -16,10 +16,47 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.9.0",
+    title: "Tokyo Night Redesign, Seanime Web & Torrent Extensions, Anime4K Upscaling & Security Overhaul",
+    date: "November 2026",
+    badge: "Latest",
+    summary:
+      "Kura 0.9.0 introduces the Tokyo Night (蔵 · 東京ナイト) visual redesign, full compatibility with Seanime web-streaming and torrent extensions in a hardened Web Worker sandbox, real-time Anime4K GPU upscaling shaders, encrypted BitTorrent peer streaming with batch file selection and 85% next-episode preloading, and a 58-point security, memory, and SQLite performance overhaul.",
+    items: [
+      {
+        type: "new",
+        text: "Tokyo Night (蔵 · 東京ナイト) Redesign: refreshed top glassmorphic navigation, full-bleed hero banners, tactile library & discover grids, unified details modal, and sleek player controls.",
+      },
+      {
+        type: "new",
+        text: "Seanime Extension Ecosystem & Marketplace: install Seanime TypeScript/JavaScript web-streaming (onlinestream-provider) and torrent (anime-torrent-provider) extensions or GitHub repositories directly in Settings → Extensions.",
+      },
+      {
+        type: "new",
+        text: "Direct Soft-Sub Web Streaming & VTT-to-Jimaku Auto-Retiming: local HLS (.m3u8) / MP4 stream proxy with automatic piecewise alignment of Jimaku Japanese subtitles against stream WebVTT cues.",
+      },
+      {
+        type: "new",
+        text: "Anime4K v4 Real-Time GPU Shaders: toggle Fast, HQ, Soft, or Upscale GLSL shader presets live from the player's new A4K control button or Shift+A.",
+      },
+      {
+        type: "improvement",
+        text: "Upgraded BitTorrent Engine & 85% Preloading: MSE/PE RC4 stream encryption (BEP 8), warm Mainline DHT routing, batch torrent file picker, background Stream & Save completion, and automatic next-episode preloading at 85% progress.",
+      },
+      {
+        type: "improvement",
+        text: "Performance & Memory Overhaul: concurrent read-only SQLite WAL pool, streaming Yomitan dictionary and MKV subtitle parsers, lazy torrent magnet resolution, and 100-episode range tabs for long-running anime.",
+      },
+      {
+        type: "fix",
+        text: "Comprehensive Security & Stability Hardening: CSP-enforced Blob Worker sandbox for community extensions, DNS-pinned SSRF protection, token-authenticated local media proxies, secret-redacted backups with opt-in extension restore, and Windows shared-handle file safety.",
+      },
+    ],
+  },
+  {
     version: "0.8.1",
     title: "Native libmpv Built-In Player Engine, Instant Zero-Transcode Playback & Non-Destructive Subtitle Sync",
     date: "November 2026",
-    badge: "Latest",
     summary:
       "Kura 0.8.1 replaces the HTML5 <video> + live transcode pipeline in the Built-In Player with native libmpv (libmpv-2.dll) rendering directly onto a hardware-accelerated D3D11 surface behind Kura's transparent HUD, eliminating audio/codec incompatibilities, dual-audio switching stalls, and partial-torrent subtitle retiming corruption.",
     items: [

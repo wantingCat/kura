@@ -3385,6 +3385,7 @@ const MAX_TORRENT_META_CACHE: usize = 64;
 /// so concurrent readers (`subtitles.rs` MKV alignment, `libmpv`, or Windows Defender) never
 /// block atomic `.part` -> `.mkv` renaming with `ERROR_SHARING_VIOLATION` (`os error 32`).
 fn shared_open_options() -> std::fs::OpenOptions {
+    #[allow(unused_mut)]
     let mut opts = std::fs::OpenOptions::new();
     #[cfg(windows)]
     {
