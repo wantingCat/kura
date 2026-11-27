@@ -1,4 +1,4 @@
-export interface LangOption {
+interface LangOption {
   value: string;
   label: string;
 }
@@ -90,7 +90,7 @@ export const TRACK_PRESETS: TrackPreset[] = [
   },
 ];
 
-export function langLabel(options: LangOption[], val: string): string {
+function langLabel(options: LangOption[], val: string): string {
   const found = options.find((o) => o.value === val);
   return found ? found.label : val;
 }

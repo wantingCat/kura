@@ -71,7 +71,9 @@
 
   const current = $derived(heroes.length ? heroIdx % heroes.length : 0);
   const hero = $derived(heroes.length ? heroes[current] : null);
-  const paused = $derived(hovered || focused || reducedMotion);
+  const paused = $derived(
+    hovered || focused || reducedMotion || Boolean(app.builtinPlayer?.active),
+  );
 
   $effect(() => {
     const n = heroes.length;

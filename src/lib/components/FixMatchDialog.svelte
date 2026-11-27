@@ -28,20 +28,24 @@
   let error = $state<string | null>(null);
   let input: HTMLInputElement | undefined = $state();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let reqSeq = 0;
 
   async function search(q: string) {
+    const seq = ++reqSeq;
     if (!q.trim()) {
       results = [];
+      loading = false;
       return;
     }
     loading = true;
     error = null;
     try {
-      results = await api.searchAnilist(q.trim());
+      const res = await api.searchAnilist(q.trim());
+      if (seq === reqSeq) results = res;
     } catch (e) {
-      error = `Search failed: ${e}`;
+      if (seq === reqSeq) error = `Search failed: ${e}`;
     } finally {
-      loading = false;
+      if (seq === reqSeq) loading = false;
     }
   }
 
@@ -68,10 +72,15 @@
     search(initialQuery);
     input?.focus();
     input?.select();
+    return () => clearTimeout(timer);
   });
 
   function onKey(e: KeyboardEvent) {
-    if (e.key === "Escape") onclose();
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      onclose();
+    }
   }
 </script>
 
@@ -156,8 +165,10 @@
     max-height: 84vh;
     display: flex;
     flex-direction: column;
-    background: var(--bg-elev);
-    border: var(--bw) solid var(--line);
+    background: var(--glass-tn-strong);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
     border-radius: var(--r-xl);
     box-shadow: var(--sticker-lg), var(--neon-glow);
     animation: pop 340ms var(--bounce);
@@ -289,13 +300,7 @@
     text-align: center;
   }
 
-  /* Tokyo Night pass: glass surface + neon focus ------------------------ */
-  .dialog {
-    background: var(--glass-tn-strong);
-    backdrop-filter: var(--blur-tn);
-    -webkit-backdrop-filter: var(--blur-tn);
-    border: 1px solid var(--glass-hairline);
-  }
+  /* Tokyo Night pass: neon focus ---------------------------------------- */
   button:focus-visible,
   input:focus-visible {
     outline: 2px solid var(--neon-violet);

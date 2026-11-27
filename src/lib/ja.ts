@@ -1,5 +1,5 @@
 /**
- * Japanese accent layer (日本語アクセント) for Kura's Tokyo Night UI.
+ * Japanese accent layer (日本語アクセント) & pitch-accent / TTS utilities for Kura's Tokyo Night UI.
  *
  * Kura stays an English app; this module supplies the Japanese labels that are
  * sprinkled on top of it (row subtitles, calendar weekdays, episode / season /
@@ -12,13 +12,6 @@
  *  - If Japanese REPLACES English (weekday headers, placeholders), keep the
  *    English in aria-label / <abbr title> / .sr-only.
  */
-
-import { app } from "./app.svelte";
-
-/** True when the Japanese accent layer is enabled (Settings → 日本語アクセント). */
-export function jaOn(): boolean {
-  return app.japaneseAccents;
-}
 
 // ---------------------------------------------------------------------------
 // Static vocabulary
@@ -108,7 +101,6 @@ export const JA = {
 /** Index = JS `Date#getDay()` (0 = Sunday). */
 const WEEKDAY_SHORT = ["日", "月", "火", "水", "木", "金", "土"] as const;
 const WEEKDAY_EN_SHORT = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"] as const;
-const WEEKDAY_EN_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
 
 /** 月 / 火 / … for a JS weekday index (0 = Sunday). */
 export function jaWeekday(day: number): string {
@@ -120,22 +112,14 @@ export function jaWeekdayLong(day: number): string {
   return `${jaWeekday(day)}曜日`;
 }
 
-/** English helpers so callers can keep accessible names next to Japanese. */
+/** English helper so callers can keep accessible names next to Japanese. */
 export function enWeekdayShort(day: number): string {
   return WEEKDAY_EN_SHORT[((day % 7) + 7) % 7];
-}
-export function enWeekdayLong(day: number): string {
-  return WEEKDAY_EN_LONG[((day % 7) + 7) % 7];
 }
 
 /** 11月17日 */
 export function jaDate(d: Date): string {
   return `${d.getMonth() + 1}月${d.getDate()}日`;
-}
-
-/** 2023年10月 */
-export function jaYearMonth(d: Date): string {
-  return `${d.getFullYear()}年${d.getMonth() + 1}月`;
 }
 
 /** 23:30 — local time, 24-hour (Japanese TV-listing style). */
@@ -289,4 +273,66 @@ export function jaDuration(seconds: number): string {
   if (h && m) return `${h}時間${m}分`;
   if (h) return `${h}時間`;
   return `${m}分`;
+}
+
+// ---------------------------------------------------------------------------
+// Pitch-Accent Mora Splitter, Contour & Japanese TTS
+// ---------------------------------------------------------------------------
+
+const SMALL_YOTACIZED_KANA = new Set([
+  "ゃ",
+  "ゅ",
+  "ょ",
+  "ぁ",
+  "ぃ",
+  "ぅ",
+  "ぇ",
+  "ぉ",
+  "ゎ",
+  "ャ",
+  "ュ",
+  "ョ",
+  "ァ",
+  "ィ",
+  "ゥ",
+  "ェ",
+  "ォ",
+  "ヮ",
+]);
+
+/** Split a hiragana/katakana reading into moras (combining digraphs such as きゃ, ティ, くゎ, グヮ). */
+export function splitMoras(reading: string): string[] {
+  const chars = Array.from(reading);
+  const out: string[] = [];
+  for (let i = 0; i < chars.length; i++) {
+    if (i + 1 < chars.length && SMALL_YOTACIZED_KANA.has(chars[i + 1])) {
+      out.push(chars[i] + chars[i + 1]);
+      i++;
+    } else {
+      out.push(chars[i]);
+    }
+  }
+  return out;
+}
+
+/** Standard Tokyo pitch-accent high/low contour for mora index given NHK/Yomitan downstep index. */
+export function isMoraHigh(moraIndex: number, downstep: number): boolean {
+  if (downstep === 0) return moraIndex > 0;
+  if (downstep === 1) return moraIndex === 0;
+  return moraIndex > 0 && moraIndex < downstep;
+}
+
+/** Speak Japanese text using Web Speech synthesis when available. */
+export function speakJapanese(text: string, e?: Event): void {
+  e?.stopPropagation();
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+  try {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "ja-JP";
+    u.rate = 0.95;
+    window.speechSynthesis.speak(u);
+  } catch {
+    // ignore if speech synthesis unavailable
+  }
 }

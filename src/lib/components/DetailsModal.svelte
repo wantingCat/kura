@@ -12,20 +12,24 @@
   import { untrack } from "svelte";
   import { fade, scale } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
-  import { api, img, type EpisodeRow, type FranchiseEntry, type MediaDetail } from "$lib/api";
+  import { api, img, type EpisodeRow, type MediaDetail } from "$lib/api";
   import { app } from "$lib/app.svelte";
+  import { changelogModal } from "$lib/changelogModal.svelte";
   import { detailsModal } from "$lib/detailsModal.svelte";
+  import { mpvModal } from "$lib/mpvModal.svelte";
   import {
     cleanDescription,
     displayTitle,
+    episodeProgressPct,
+    epTitle,
     formatLabel,
     franchiseLabel,
+    seasonJa,
     seasonLabel,
     statusLabel,
   } from "$lib/format";
   import {
     JA,
-    jaCour,
     jaEpisode,
     jaEpisodeCount,
     jaFormat,
@@ -34,6 +38,12 @@
     jaSeason,
     jaStatus,
   } from "$lib/ja";
+  import {
+    computeNextUp,
+    getCachedMediaDetail,
+    setCachedMediaDetail,
+    toggleMediaStreamLibrary,
+  } from "$lib/mediaDetail.svelte";
   import Icon from "./Icon.svelte";
   import Ja from "./Ja.svelte";
   import TorrentPickerDialog from "./TorrentPickerDialog.svelte";
@@ -59,8 +69,12 @@
   let webTarget = $state<{ epKey: string; epNumber: number } | null>(null);
   let torrentTarget = $state<{ epKey: string; epNumber: number; autoStart: boolean } | null>(null);
   let dialogEl = $state<HTMLDivElement | undefined>();
-  const cache = new Map<number, MediaDetail>();
+  let epRangeIdx = $state<number | null>(null);
+  let showAllEpisodes = $state(false);
   let reqSeq = 0;
+
+  const EP_WINDOW_THRESHOLD = 120;
+  const EP_PAGE_SIZE = 100;
 
   // Follow the store: a new id resets the in-modal season selection.
   $effect(() => {
@@ -68,6 +82,8 @@
     viewId = id;
     webTarget = null;
     torrentTarget = null;
+    epRangeIdx = null;
+    showAllEpisodes = false;
     if (id === null) {
       d = null;
       error = null;
@@ -76,14 +92,14 @@
 
   async function load(target: number) {
     const seq = ++reqSeq;
-    const cached = cache.get(target);
+    const cached = getCachedMediaDetail(target);
     if (cached) d = cached;
     else if (d?.anilistId !== target) d = null;
     loading = !d;
     error = null;
     try {
       const res = await api.getMediaDetail(target);
-      cache.set(target, res);
+      setCachedMediaDetail(res);
       if (seq === reqSeq) d = res;
     } catch (e) {
       if (seq === reqSeq && !d) error = String(e);
@@ -109,21 +125,18 @@
   const owned = $derived(regular.filter((e) => e.files.length > 0).length);
   const totalEps = $derived(Math.max(d?.episodes ?? 0, regular.length));
   // Same rule as /anime/[id]: an episode left part-way wins over the first unwatched one.
-  const nextUp = $derived(
-    regular.find((e) => !e.watchedAt && e.files.length > 0 && (e.progressPos ?? 0) > 0) ??
-      regular.find((e) => !e.watchedAt && e.files.length > 0) ??
-      (app.appMode === "streaming"
-        ? (regular.find((e) => !e.watchedAt && (e.progressPos ?? 0) > 0) ??
-            regular.find((e) => !e.watchedAt && e.number > (d?.anilistProgress ?? 0)) ??
-            regular[0] ??
-            null)
-        : null),
-  );
+  const nextUp = $derived(computeNextUp(d, app.appMode));
   /** Fully-watched shows still get a primary action: rewatch the first owned episode. */
   const ctaEp = $derived(nextUp ?? regular.find((e) => e.files.length > 0) ?? null);
   const rewatch = $derived(!nextUp && !!ctaEp);
   const playingKey = $derived(
-    app.nowPlaying && d && app.nowPlaying.anilistId === d.anilistId ? app.nowPlaying.epKey : null,
+    d
+      ? app.builtinPlayer?.active && app.builtinPlayer.anilistId === d.anilistId
+        ? app.builtinPlayer.epKey
+        : app.nowPlaying && app.nowPlaying.anilistId === d.anilistId
+          ? app.nowPlaying.epKey
+          : null
+      : null,
   );
   const banner = $derived(head ? (img(head.bannerPath, head.bannerUrl) ?? img(head.coverPath, head.coverUrl)) : null);
   const bannerIsCover = $derived(!!head && !head.bannerPath && !head.bannerUrl);
@@ -135,22 +148,49 @@
   const accent = $derived(head?.coverColor || "#8b5cf6");
   const titleId = "dm-title";
 
-  const progressPct = (e: EpisodeRow) =>
-    e.progressPos && e.progressDur ? Math.min(100, (e.progressPos / e.progressDur) * 100) : 0;
+  const epRanges = $derived.by(() => {
+    if (regular.length <= EP_WINDOW_THRESHOLD) return [];
+    const ranges: { idx: number; start: number; end: number; label: string }[] = [];
+    for (let start = 0, idx = 0; start < regular.length; start += EP_PAGE_SIZE, idx++) {
+      const end = Math.min(regular.length, start + EP_PAGE_SIZE);
+      ranges.push({
+        idx,
+        start,
+        end,
+        label: `${regular[start].number}–${regular[end - 1].number}`,
+      });
+    }
+    return ranges;
+  });
+
+  const activeEpRangeIdx = $derived.by(() => {
+    if (epRanges.length === 0) return 0;
+    if (epRangeIdx !== null && epRangeIdx < epRanges.length) return epRangeIdx;
+    if (nextUp) {
+      const pos = regular.findIndex((e) => e.epKey === nextUp.epKey);
+      if (pos >= 0) return Math.floor(pos / EP_PAGE_SIZE);
+    }
+    return 0;
+  });
+
+  const visibleRegular = $derived.by(() => {
+    if (showAllEpisodes || epRanges.length === 0) return regular;
+    const r = epRanges[activeEpRangeIdx] ?? epRanges[0];
+    return regular.slice(r.start, r.end);
+  });
+
+  let lastNextUpKey: string | null = null;
+  $effect(() => {
+    const key = nextUp?.epKey ?? null;
+    if (key !== lastNextUpKey) {
+      lastNextUpKey = key;
+      epRangeIdx = null;
+    }
+  });
+
   const remaining = (e: EpisodeRow) =>
     e.progressPos && e.progressDur ? Math.max(0, e.progressDur - e.progressPos) : 0;
   const pad = (n: number) => String(n).padStart(2, "0");
-
-  function epTitle(e: EpisodeRow) {
-    return e.titleEn || e.titleRomaji || e.titleJa || (e.isSpecial ? `Special ${e.number}` : `Episode ${e.number}`);
-  }
-
-  /** 第1期 for TV cours, otherwise the Japanese format (劇場版, OVA…). */
-  function seasonJa(s: FranchiseEntry, list: FranchiseEntry[]) {
-    const tvish = (x: FranchiseEntry) => !x.format || x.format === "TV" || x.format === "TV_SHORT" || x.format === "ONA";
-    if (!tvish(s)) return jaFormat(s.format);
-    return jaCour(list.filter(tvish).findIndex((x) => x.anilistId === s.anilistId) + 1);
-  }
 
   async function play(e: EpisodeRow) {
     if (!d) return;
@@ -180,6 +220,7 @@
     try {
       const updated = await api.anilistUpdateEntry({ anilistId: d.anilistId, status: "PLANNING" });
       d.anilistStatus = updated.status;
+      setCachedMediaDetail(d);
       app.toast(`Added ${displayTitle(d)} to your AniList Planning`, "info", 3500);
     } catch (e) {
       app.toast(String(e), "error", 6000);
@@ -192,10 +233,7 @@
     if (!d || togglingStreamLib) return;
     togglingStreamLib = true;
     try {
-      const next = await api.toggleStreamLibrary(d.anilistId);
-      d.inStreamLibrary = next;
-      await app.refresh();
-      app.toast(next ? `Added ${displayTitle(d)} to your library` : `Removed from stream library`, "info", 3500);
+      await toggleMediaStreamLibrary(d);
     } catch (e) {
       app.toast(String(e), "error", 5000);
     } finally {
@@ -240,19 +278,19 @@
   }
 
   function onKeydown(ev: KeyboardEvent) {
-    if (!open) return;
-    if (webTarget || torrentTarget) {
-      if (ev.key === "Escape") {
-        ev.preventDefault();
-        ev.stopPropagation();
-        webTarget = null;
-        torrentTarget = null;
-      }
+    if (
+      !open ||
+      app.builtinPlayer?.active ||
+      webTarget ||
+      torrentTarget ||
+      mpvModal.visible ||
+      changelogModal.visible
+    ) {
       return;
     }
     if (ev.key === "Escape") {
       ev.preventDefault();
-      ev.stopPropagation();
+      ev.stopImmediatePropagation();
       detailsModal.close();
       return;
     }
@@ -522,7 +560,11 @@
                         class:active={current}
                         aria-pressed={current}
                         title={displayTitle(s)}
-                        onclick={() => (viewId = s.anilistId)}
+                        onclick={() => {
+                          epRangeIdx = null;
+                          showAllEpisodes = false;
+                          viewId = s.anilistId;
+                        }}
                       >
                         <Ja text={seasonJa(s, seasons)} class="dm-season-ja" />
                         <span>{franchiseLabel(s, seasons[0])}</span>
@@ -532,14 +574,41 @@
                 {/if}
               </div>
 
+              {#if epRanges.length > 0}
+                <div class="dm-ep-ranges">
+                  <div class="dm-seasons no-scrollbar" role="group" aria-label="Episode ranges">
+                    {#each epRanges as r (r.idx)}
+                      <button
+                        type="button"
+                        class="dm-season"
+                        class:active={!showAllEpisodes && activeEpRangeIdx === r.idx}
+                        onclick={() => {
+                          showAllEpisodes = false;
+                          epRangeIdx = r.idx;
+                        }}
+                      >
+                        <span>EP {r.label}</span>
+                      </button>
+                    {/each}
+                  </div>
+                  <button
+                    type="button"
+                    class="dm-ep-all-toggle"
+                    onclick={() => (showAllEpisodes = !showAllEpisodes)}
+                  >
+                    {showAllEpisodes ? "Show 100-ep window" : `Show all ${regular.length} episodes`}
+                  </button>
+                </div>
+              {/if}
+
               <ol class="dm-eps">
-                {#each regular as e (e.epKey)}
+                {#each visibleRegular as e (e.epKey)}
                   {@const has = e.files.length > 0}
                   {@const isNext = nextUp?.epKey === e.epKey}
                   {@const thumb = img(e.thumbPath, e.thumbUrl) ?? banner}
                   {@const launchingThis = app.isLaunching(d.anilistId, e.epKey)}
                   {@const playingThis = playingKey === e.epKey}
-                  {@const pct = e.watchedAt ? 100 : progressPct(e)}
+                  {@const pct = e.watchedAt ? 100 : episodeProgressPct(e)}
                   <li class="dm-ep" class:next={isNext} class:missing={!has} class:watched={!!e.watchedAt}>
                     {#if has}
                       <button
@@ -1096,6 +1165,27 @@
   }
   .dm-season :global(.dm-season-ja)::after {
     content: " ·";
+  }
+  .dm-ep-ranges {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .dm-ep-all-toggle {
+    background: none;
+    border: none;
+    padding: 4px 6px;
+    color: var(--accent);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .dm-ep-all-toggle:hover {
+    text-decoration: underline;
   }
 
   /* Episodes --------------------------------------------------------------- */

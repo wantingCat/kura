@@ -9,13 +9,13 @@ import {
 // Seanime Extension Type Contracts (`online-streaming-provider.d.ts` & `anime-torrent-provider.d.ts`)
 // ---------------------------------------------------------------------------
 
-export interface SeanimeFuzzyDate {
+interface SeanimeFuzzyDate {
   year: number;
   month?: number;
   day?: number;
 }
 
-export interface SeanimeMedia {
+interface SeanimeMedia {
   id: number;
   idMal?: number;
   status?: string;
@@ -43,7 +43,7 @@ export interface OnlinestreamEpisodeDetails {
   title?: string;
 }
 
-export interface OnlinestreamVideoSubtitle {
+interface OnlinestreamVideoSubtitle {
   id?: string;
   url: string;
   language: string;
@@ -64,19 +64,19 @@ export interface OnlinestreamEpisodeServer {
   videoSources: OnlinestreamVideoSource[];
 }
 
-export interface OnlinestreamSettings {
+interface OnlinestreamSettings {
   episodeServers: string[];
   supportsDub: boolean;
 }
 
-export interface SeanimeTorrentProviderSettings {
+interface SeanimeTorrentProviderSettings {
   canSmartSearch: boolean;
   smartSearchFilters?: string[];
   supportsAdult?: boolean;
   type?: "main" | "special" | string;
 }
 
-export interface SeanimeAnimeTorrent {
+interface SeanimeAnimeTorrent {
   name: string;
   date?: string;
   size?: number;
@@ -97,15 +97,45 @@ export interface SeanimeAnimeTorrent {
 }
 
 // ---------------------------------------------------------------------------
-// Worker Lifecycle & RPC Manager
+// Installed Extensions Snapshot Accessor (Zero Circular Imports, Zero Redundant IPC)
 // ---------------------------------------------------------------------------
+
+let installedExtensionsGetter: (() => InstalledExtension[] | null) | null = null;
+
+export function registerInstalledExtensionsGetter(
+  getter: () => InstalledExtension[] | null,
+): void {
+  installedExtensionsGetter = getter;
+}
+
+export async function getInstalledExtensions(): Promise<InstalledExtension[]> {
+  const cached = installedExtensionsGetter?.();
+  if (cached !== null && cached !== undefined) {
+    return cached;
+  }
+  try {
+    return await api.listExtensions();
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Worker Lifecycle & RPC Manager (with 2-Minute Idle Reaping & Crash Eviction)
+// ---------------------------------------------------------------------------
+
+const WORKER_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 
 interface WorkerSlot {
   extId: string;
   updatedAt: number;
+  configSig: string;
+  poisoned?: boolean;
+  blobUrl: string | null;
   worker: Worker;
   ready: Promise<void>;
   nextCallId: number;
+  idleTimer: ReturnType<typeof setTimeout> | null;
   pending: Map<
     number,
     { resolve: (val: unknown) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }
@@ -113,6 +143,35 @@ interface WorkerSlot {
 }
 
 const slots = new Map<string, WorkerSlot>();
+
+function revokeSlotBlobUrl(slot: WorkerSlot) {
+  if (slot.blobUrl) {
+    try {
+      URL.revokeObjectURL(slot.blobUrl);
+    } catch {
+      /* ignore */
+    }
+    slot.blobUrl = null;
+  }
+}
+
+function clearIdleTimer(slot: WorkerSlot) {
+  if (slot.idleTimer !== null) {
+    clearTimeout(slot.idleTimer);
+    slot.idleTimer = null;
+  }
+}
+
+function scheduleIdleTimer(slot: WorkerSlot) {
+  clearIdleTimer(slot);
+  if (slot.pending.size > 0 || slots.get(slot.extId) !== slot) return;
+  slot.idleTimer = setTimeout(() => {
+    slot.idleTimer = null;
+    if (slot.pending.size === 0 && slots.get(slot.extId) === slot) {
+      terminateWorkerSlot(slot.extId);
+    }
+  }, WORKER_IDLE_TIMEOUT_MS);
+}
 
 function resolveEffectiveUserPrefs(ext: InstalledExtension): Record<string, string> {
   const out: Record<string, string> = {};
@@ -131,23 +190,64 @@ function resolveEffectiveUserPrefs(ext: InstalledExtension): Record<string, stri
   return out;
 }
 
+function terminateWorkerSlot(extId: string) {
+  const existing = slots.get(extId);
+  if (!existing) return;
+  slots.delete(extId);
+  clearIdleTimer(existing);
+  revokeSlotBlobUrl(existing);
+  for (const [, p] of existing.pending) {
+    clearTimeout(p.timer);
+    p.reject(new Error("Extension worker terminated"));
+  }
+  existing.pending.clear();
+  existing.worker.terminate();
+}
+
+export function evictExtensionWorker(extId?: string): void {
+  if (extId !== undefined) {
+    terminateWorkerSlot(extId);
+    return;
+  }
+  for (const id of [...slots.keys()]) {
+    terminateWorkerSlot(id);
+  }
+}
+
 function getOrSpawnWorker(ext: InstalledExtension): WorkerSlot {
+  const nextConfigSig = JSON.stringify(ext.userConfig?.values ?? {});
   const existing = slots.get(ext.id);
-  if (existing && existing.updatedAt === ext.updatedAt) {
+  if (
+    existing &&
+    !existing.poisoned &&
+    existing.updatedAt === ext.updatedAt &&
+    existing.configSig === nextConfigSig
+  ) {
+    clearIdleTimer(existing);
     return existing;
   }
   if (existing) {
     terminateWorkerSlot(ext.id);
   }
 
-  const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
+  // Spawn via a `blob:` module bootstrapper so WebView2 enforces the creator document's CSP inside the Worker
+  const workerScriptUrl = new URL("./worker.ts", import.meta.url).href;
+  const bootstrapBlob = new Blob([`import ${JSON.stringify(workerScriptUrl)};`], {
+    type: "text/javascript",
+  });
+  const blobUrl = URL.createObjectURL(bootstrapBlob);
+  const worker = new Worker(blobUrl, { type: "module" });
   const pending: WorkerSlot["pending"] = new Map();
   const slot: WorkerSlot = {
     extId: ext.id,
     updatedAt: ext.updatedAt,
+    configSig: nextConfigSig,
+    poisoned: false,
+    blobUrl,
     worker,
     ready: Promise.resolve(),
     nextCallId: 2,
+    idleTimer: null,
     pending,
   };
 
@@ -156,16 +256,24 @@ function getOrSpawnWorker(ext: InstalledExtension): WorkerSlot {
     if (!msg) return;
 
     if (msg.kind === "http_fetch") {
+      // Reject post-timeout or unsolicited background fetches when no RPC call is active
+      if (slot.pending.size === 0 || slots.get(ext.id) !== slot) {
+        return;
+      }
       try {
         const resp = await api.extensionHttpFetch(msg.req);
-        worker.postMessage({ kind: "http_fetch_done", reqId: msg.reqId, ok: true, resp });
+        if (slots.get(ext.id) === slot) {
+          worker.postMessage({ kind: "http_fetch_done", reqId: msg.reqId, ok: true, resp });
+        }
       } catch (e) {
-        worker.postMessage({
-          kind: "http_fetch_done",
-          reqId: msg.reqId,
-          ok: false,
-          error: e instanceof Error ? e.message : String(e),
-        });
+        if (slots.get(ext.id) === slot) {
+          worker.postMessage({
+            kind: "http_fetch_done",
+            reqId: msg.reqId,
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
       }
       return;
     }
@@ -180,6 +288,13 @@ function getOrSpawnWorker(ext: InstalledExtension): WorkerSlot {
       } else {
         entry.reject(new Error(msg.error ?? "Extension method failed"));
       }
+      if (pending.size === 0 && slots.get(ext.id) === slot) {
+        if (slot.poisoned) {
+          terminateWorkerSlot(ext.id);
+        } else {
+          scheduleIdleTimer(slot);
+        }
+      }
     }
   };
 
@@ -190,47 +305,53 @@ function getOrSpawnWorker(ext: InstalledExtension): WorkerSlot {
       p.reject(err);
     }
     pending.clear();
+    terminateWorkerSlot(ext.id);
   };
 
-  slot.ready = new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pending.delete(1);
-      reject(new Error(`Extension '${ext.name}' timed out during initialization`));
-    }, 15_000);
-    pending.set(1, {
-      resolve: () => resolve(),
-      reject,
-      timer,
+  slot.ready = (async () => {
+    const payload = ext.payload || (await api.getExtensionPayload(ext.id));
+    if (slots.get(ext.id) !== slot) {
+      throw new Error("Extension worker terminated during initialization");
+    }
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(1);
+        terminateWorkerSlot(ext.id);
+        reject(new Error(`Extension '${ext.name}' timed out during initialization`));
+      }, 15_000);
+      pending.set(1, {
+        resolve: () => resolve(),
+        reject,
+        timer,
+      });
+      worker.postMessage({
+        kind: "init",
+        callId: 1,
+        data: {
+          id: ext.id,
+          language: ext.language,
+          payload,
+          userPrefs: resolveEffectiveUserPrefs(ext),
+        },
+      });
     });
-    worker.postMessage({
-      kind: "init",
-      callId: 1,
-      data: {
-        id: ext.id,
-        language: ext.language,
-        payload: ext.payload,
-        userPrefs: resolveEffectiveUserPrefs(ext),
-      },
+  })();
+
+  slot.ready
+    .finally(() => {
+      revokeSlotBlobUrl(slot);
+    })
+    .catch(() => {
+      if (slots.get(ext.id) === slot) {
+        terminateWorkerSlot(ext.id);
+      }
     });
-  });
 
   slots.set(ext.id, slot);
   return slot;
 }
 
-export function terminateWorkerSlot(extId: string) {
-  const existing = slots.get(extId);
-  if (!existing) return;
-  slots.delete(extId);
-  for (const [, p] of existing.pending) {
-    clearTimeout(p.timer);
-    p.reject(new Error("Extension worker terminated"));
-  }
-  existing.pending.clear();
-  existing.worker.terminate();
-}
-
-export async function callExtensionMethod<T = unknown>(
+async function callExtensionMethod<T = unknown>(
   ext: InstalledExtension,
   method: string,
   args: unknown[] = [],
@@ -238,11 +359,16 @@ export async function callExtensionMethod<T = unknown>(
 ): Promise<T> {
   const slot = getOrSpawnWorker(ext);
   await slot.ready;
+  clearIdleTimer(slot);
 
   const callId = slot.nextCallId++;
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       slot.pending.delete(callId);
+      slot.poisoned = true;
+      if (slot.pending.size === 0 && slots.get(ext.id) === slot) {
+        terminateWorkerSlot(ext.id);
+      }
       reject(new Error(`${ext.name}.${method}() timed out after ${Math.round(timeoutMs / 1000)}s`));
     }, timeoutMs);
 
@@ -322,6 +448,62 @@ function parseClientReleaseBadges(title: string) {
   return { codec, bitDepth, isDualAudio };
 }
 
+const MAX_DEFERRED_MAGNETS = 500;
+const deferredTorrentMagnets = new Map<
+  string,
+  { ext: InstalledExtension; rawTorrent: SeanimeAnimeTorrent }
+>();
+
+function deferredMagnetKey(providerName: string, title: string, size: number): string {
+  return `${providerName}::${title}::${size}`;
+}
+
+function rememberDeferredMagnet(
+  ext: InstalledExtension,
+  rawTorrent: SeanimeAnimeTorrent,
+  size: number,
+) {
+  const key = deferredMagnetKey(ext.name, rawTorrent.name, size);
+  if (deferredTorrentMagnets.has(key)) {
+    deferredTorrentMagnets.delete(key);
+  }
+  deferredTorrentMagnets.set(key, { ext, rawTorrent });
+  while (deferredTorrentMagnets.size > MAX_DEFERRED_MAGNETS) {
+    const oldest = deferredTorrentMagnets.keys().next().value;
+    if (oldest === undefined) break;
+    deferredTorrentMagnets.delete(oldest);
+  }
+}
+
+const torrentProviderHost = {
+  getMagnetLink: (ext: InstalledExtension, rawTorrent: SeanimeAnimeTorrent) =>
+    callExtensionMethod<string>(ext, "getTorrentMagnetLink", [rawTorrent], 10_000),
+};
+
+export async function ensureCandidateMagnet(
+  candidate: TorrentCandidate,
+): Promise<TorrentCandidate> {
+  if (candidate.magnetUri || candidate.torrentUrl) {
+    return candidate;
+  }
+  const providerName = candidate.source.replace(/\s*★ Best$/, "");
+  const key = deferredMagnetKey(providerName, candidate.title, candidate.size);
+  const entry = deferredTorrentMagnets.get(key);
+  if (!entry) {
+    return candidate;
+  }
+  const magnet = (await torrentProviderHost.getMagnetLink(entry.ext, entry.rawTorrent))?.trim() || null;
+  let hash = candidate.infoHash;
+  if (!hash && magnet?.includes("urn:btih:")) {
+    hash = magnet.split("urn:btih:")[1]?.split("&")[0]?.trim()?.toLowerCase() ?? null;
+  }
+  return {
+    ...candidate,
+    magnetUri: magnet,
+    infoHash: hash,
+  };
+}
+
 /**
  * Query all enabled Seanime `anime-torrent-provider` extensions in parallel and normalize their
  * results into Kura `TorrentCandidate[]` rows so they merge cleanly into `TorrentPickerDialog`.
@@ -332,14 +514,8 @@ export async function searchInstalledTorrentExtensions(
   resolution: string,
   customQuery?: string | null,
 ): Promise<TorrentCandidate[]> {
-  let exts: InstalledExtension[] = [];
-  try {
-    exts = (await api.listExtensions()).filter(
-      (e) => e.enabled && e.extType === "anime-torrent-provider",
-    );
-  } catch {
-    return [];
-  }
+  const allExts = await getInstalledExtensions();
+  const exts = allExts.filter((e) => e.enabled && e.extType === "anime-torrent-provider");
   if (exts.length === 0) return [];
 
   const media = buildSeanimeMedia(detail);
@@ -409,16 +585,19 @@ export async function searchInstalledTorrentExtensions(
           )) ?? [];
       }
 
-      const mapped: TorrentCandidate[] = [];
-      for (const t of items.slice(0, 40)) {
-        if (!t?.name) continue;
-        let magnet = t.magnetLink || null;
-        let hash = t.infoHash || null;
-        if (!magnet && !t.downloadUrl) {
-          try {
-            magnet = await callExtensionMethod<string>(ext, "getTorrentMagnetLink", [t], 8_000);
-          } catch {}
+      const validItems = items
+        .slice(0, 40)
+        .filter((t): t is SeanimeAnimeTorrent => Boolean(t?.name));
+
+      return validItems.map((t): TorrentCandidate => {
+        const magnet = t.magnetLink || null;
+        const torrentUrl =
+          t.downloadUrl && t.downloadUrl.startsWith("http") ? t.downloadUrl : null;
+        const size = Number(t.size ?? 0);
+        if (!magnet && !torrentUrl) {
+          rememberDeferredMagnet(ext, t, size);
         }
+        let hash = t.infoHash || null;
         if (!hash && magnet?.includes("urn:btih:")) {
           hash = magnet.split("urn:btih:")[1]?.split("&")[0]?.trim()?.toLowerCase() ?? null;
         }
@@ -438,14 +617,14 @@ export async function searchInstalledTorrentExtensions(
           Math.min(seeders, 200) * 8 +
           (t.isBatch ? 200 : 900);
 
-        mapped.push({
+        return {
           title: t.name,
           group,
           resolution: res,
-          size: Number(t.size ?? 0),
+          size,
           seeders,
           leechers: Number(t.leechers ?? 0),
-          torrentUrl: t.downloadUrl && t.downloadUrl.startsWith("http") ? t.downloadUrl : null,
+          torrentUrl,
           magnetUri: magnet,
           infoHash: hash,
           publishedAt: null,
@@ -457,9 +636,8 @@ export async function searchInstalledTorrentExtensions(
           bitDepth,
           isDualAudio,
           isBestRelease: Boolean(t.isBestRelease),
-        });
-      }
-      return mapped;
+        };
+      });
     }),
   );
 

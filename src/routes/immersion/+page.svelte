@@ -8,9 +8,10 @@
     type ImmersionWordItem,
   } from "$lib/api";
   import { app } from "$lib/app.svelte";
+  import { clock, displayTitle, formatDuration, relativeTime } from "$lib/format";
   import Icon from "$lib/components/Icon.svelte";
   import Ja from "$lib/components/Ja.svelte";
-  import { JA, jaStreak, jaDuration } from "$lib/ja";
+  import { JA, jaStreak, jaDuration, isMoraHigh, speakJapanese, splitMoras } from "$lib/ja";
 
   let overview = $state<ImmersionOverview | null>(null);
   let loading = $state(true);
@@ -19,9 +20,13 @@
   let statusFilter = $state<"all" | "learning" | "known" | "ignored">("all");
   let sortBy = $state<"count" | "recent" | "oldest">("count");
   let searchQuery = $state("");
+  let debouncedSearchQuery = $state("");
   let flashcardMode = $state(false);
   let revealedIds = $state<Set<number>>(new Set());
   let selectedWordId = $state<number | null>(null);
+
+  const VOCAB_PAGE_SIZE = 80;
+  let vocabLimit = $state(VOCAB_PAGE_SIZE);
 
   // Chart range
   let chartDays = $state<14 | 30>(14);
@@ -33,7 +38,27 @@
   let logMinutes = $state(24);
   let logLabel = $state("");
   let logAnilistId = $state<number | null>(null);
+  let logAnimeFilter = $state("");
   let submittingLog = $state(false);
+
+  $effect(() => {
+    const q = searchQuery;
+    if (!q) {
+      debouncedSearchQuery = "";
+      return;
+    }
+    const timer = setTimeout(() => {
+      debouncedSearchQuery = q;
+    }, 120);
+    return () => clearTimeout(timer);
+  });
+
+  $effect(() => {
+    void statusFilter;
+    void sortBy;
+    void debouncedSearchQuery;
+    vocabLimit = VOCAB_PAGE_SIZE;
+  });
 
   onMount(async () => {
     await loadOverview();
@@ -58,7 +83,7 @@
 
   let filteredWords = $derived.by(() => {
     if (!overview) return [];
-    const q = searchQuery.trim().toLowerCase();
+    const q = debouncedSearchQuery.trim().toLowerCase();
     let list = overview.words.filter((w) => {
       if (statusFilter === "all") {
         return w.status !== "ignored";
@@ -115,73 +140,29 @@
     return Math.min(100, Math.round((overview.todayImmersionSec / goalSec) * 100));
   });
 
-  function formatDuration(seconds: number): string {
-    const sec = Math.max(0, Math.floor(seconds));
-    const hrs = Math.floor(sec / 3600);
-    const mins = Math.floor((sec % 3600) / 60);
-    if (hrs > 0) {
-      return `${hrs}h ${mins}m`;
+  let visibleWords = $derived(
+    filteredWords.length > vocabLimit ? filteredWords.slice(0, vocabLimit) : filteredWords,
+  );
+
+  let logAnimeOptions = $derived.by(() => {
+    const q = logAnimeFilter.trim().toLowerCase();
+    const matched = q
+      ? app.cards.filter((c) => {
+          const t = `${c.titleEnglish ?? ""} ${c.titleRomaji ?? ""} ${c.titleNative ?? ""}`.toLowerCase();
+          return t.includes(q);
+        })
+      : app.cards;
+    const capped = matched.slice(0, 100);
+    if (logAnilistId !== null && !capped.some((c) => c.anilistId === logAnilistId)) {
+      const selected = app.cards.find((c) => c.anilistId === logAnilistId);
+      if (selected) return [selected, ...capped];
     }
-    if (mins > 0) {
-      return `${mins}m`;
-    }
-    return sec > 0 ? `${sec}s` : "0m";
-  }
+    return capped;
+  });
 
   function formatHoursDecimal(seconds: number): string {
     const hrs = Math.max(0, seconds) / 3600;
     return hrs >= 10 ? hrs.toFixed(1) : hrs.toFixed(1);
-  }
-
-  function formatTimestamp(sec: number | null): string {
-    if (sec === null || !Number.isFinite(sec) || sec < 0) return "";
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${m}:${s.toString().padStart(2, "0")}`;
-  }
-
-  function formatRelativeTime(unixSec: number): string {
-    const diff = Math.max(0, Math.floor(Date.now() / 1000) - unixSec);
-    if (diff < 60) return "just now";
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    const days = Math.floor(diff / 86400);
-    return `${days}d ago`;
-  }
-
-  function splitMoras(reading: string): string[] {
-    const small = new Set(["ゃ", "ゅ", "ょ", "ぁ", "ぃ", "ぅ", "ぇ", "ぉ", "ャ", "ュ", "ョ", "ァ", "ィ", "ゥ", "ェ", "ォ"]);
-    const chars = Array.from(reading);
-    const out: string[] = [];
-    for (let i = 0; i < chars.length; i++) {
-      if (i + 1 < chars.length && small.has(chars[i + 1])) {
-        out.push(chars[i] + chars[i + 1]);
-        i++;
-      } else {
-        out.push(chars[i]);
-      }
-    }
-    return out;
-  }
-
-  function isMoraHigh(moraIndex: number, downstep: number): boolean {
-    if (downstep === 0) return moraIndex > 0;
-    if (downstep === 1) return moraIndex === 0;
-    return moraIndex > 0 && moraIndex < downstep;
-  }
-
-  function speakJapanese(text: string, e?: MouseEvent) {
-    e?.stopPropagation();
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    try {
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = "ja-JP";
-      u.rate = 0.95;
-      window.speechSynthesis.speak(u);
-    } catch {
-      // ignore
-    }
   }
 
   function toggleReveal(id: number, e?: MouseEvent) {
@@ -320,6 +301,17 @@
     };
   }
 </script>
+
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape" && (goalModalOpen || logModalOpen)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      goalModalOpen = false;
+      logModalOpen = false;
+    }
+  }}
+/>
 
 <div class="immersion-page">
   <!-- Header -->
@@ -653,7 +645,7 @@
         <div class="vocab-split-layout">
           <!-- Left Leaderboard List -->
           <div class="vocab-list">
-            {#each filteredWords as word, idx (word.id)}
+            {#each visibleWords as word, idx (word.id)}
               {@const isSelected = selectedWord?.id === word.id}
               {@const isHidden = flashcardMode && !revealedIds.has(word.id)}
               {@const latestCtx = word.contexts[0] ?? null}
@@ -766,6 +758,18 @@
                 </div>
               </div>
             {/each}
+            {#if visibleWords.length < filteredWords.length}
+              <div class="vocab-more-row">
+                <button
+                  type="button"
+                  class="im-btn"
+                  onclick={() =>
+                    (vocabLimit = Math.min(filteredWords.length, vocabLimit + VOCAB_PAGE_SIZE))}
+                >
+                  Show more ({filteredWords.length - visibleWords.length} remaining)
+                </button>
+              </div>
+            {/if}
           </div>
 
           <!-- Right Yomitan Revision Inspector -->
@@ -781,7 +785,7 @@
                     Looked up {selectedWord.lookupCount}×
                   </span>
                   <span class="vi-seen-meta">
-                    Last looked up {formatRelativeTime(selectedWord.lastSeenAt)}
+                    Last looked up {relativeTime(selectedWord.lastSeenAt)}
                   </span>
                 </div>
 
@@ -953,7 +957,7 @@
                                 · Ep {ctx.epKey}
                               {/if}
                               {#if ctx.positionSec !== null}
-                                · {formatTimestamp(ctx.positionSec)}
+                                · {clock(ctx.positionSec)}
                               {/if}
                             </span>
                           </div>
@@ -1052,11 +1056,18 @@
       </label>
       <label class="modal-field">
         <span>Link to Anime in Library (optional)</span>
+        {#if app.cards.length > 50}
+          <input
+            type="search"
+            placeholder="Filter library anime…"
+            bind:value={logAnimeFilter}
+          />
+        {/if}
         <select bind:value={logAnilistId}>
           <option value={null}>— General / External Immersion —</option>
-          {#each app.cards as card (card.anilistId)}
+          {#each logAnimeOptions as card (card.anilistId)}
             <option value={card.anilistId}>
-              {card.titleEnglish || card.titleRomaji}
+              {displayTitle(card)}
             </option>
           {/each}
         </select>
@@ -1734,6 +1745,12 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .vocab-more-row {
+    display: flex;
+    justify-content: center;
+    padding-top: 6px;
   }
 
   .vocab-row {

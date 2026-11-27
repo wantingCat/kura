@@ -20,6 +20,9 @@
   } from "$lib/api";
   import { relativeTime } from "$lib/format";
   import { app } from "$lib/app.svelte";
+  import { evictExtensionWorker } from "$lib/extensions/host";
+  import { cleanExtensionError, installUnifiedExtension } from "$lib/extensions/install";
+  import { invalidateOnlinestreamCache } from "$lib/onlinestream.svelte";
   import { updater } from "$lib/updater.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import NewLibraryForm from "$lib/components/NewLibraryForm.svelte";
@@ -78,8 +81,7 @@
     torrentExtensions.length + app.installedExtensions.length,
   );
 
-  const torrentSources = $derived(torrentExtensions.filter((e) => e.kind !== "http-stream"));
-  const streamSources = $derived(torrentExtensions.filter((e) => e.kind === "http-stream"));
+  const torrentSources = $derived(torrentExtensions);
 
   function extHost(ext: TorrentExtension) {
     return (ext.url.split("://")[1] ?? ext.url).split("/")[0] || ext.url;
@@ -99,8 +101,6 @@
         return "Simulcast feed";
       case "animetosho-api":
         return "AnimeTosho AniDB API";
-      case "http-stream":
-        return "Direct stream";
       default:
         return "RSS indexer";
     }
@@ -123,76 +123,31 @@
     if (!val || extImporting) return;
     extImporting = true;
     try {
-      // 1. If user pasted a GitHub repo URL (e.g. `https://github.com/pal-droid/seanime-providers` or `gh:owner/repo`),
-      //    check if it contains Seanime anime extensions first and open the Marketplace Catalog!
-      const isRepoUrl =
-        !val.endsWith(".json") &&
-        !val.endsWith(".xml") &&
-        !val.endsWith(".rss") &&
-        (val.startsWith("gh:") || /^https?:\/\/github\.com\/[^/]+\/[^/]+(\/tree\/.*)?\/?$/i.test(val));
-      if (isRepoUrl) {
-        const items = await api.fetchMarketplaceExtensions(val).catch(() => []);
-        if (items.length > 0) {
-          marketplaceUrlInput = val;
-          await app.setExtensionMarketplaceUrl(val);
-          marketplaceItems = items;
-          extUrlInput = "";
-          app.toast(
-            `Found ${items.length} compatible anime extension(s) in repository — click + Install below!`,
-            "info",
-            5000,
-          );
-          return;
-        }
-      }
-
-      // 2. Try Seanime extension manifest if JSON or manifest/github blob URL
-      let handledAsSeanime = false;
-      if (
-        val.startsWith("{") ||
-        val.endsWith(".json") ||
-        val.includes("onlinestream") ||
-        val.includes("manifest") ||
-        val.includes("/blob/")
-      ) {
-        try {
-          const seanimeExt = await api.installExtension(val);
-          await app.refreshExtensions();
-          extUrlInput = "";
-          app.toast(`Installed Seanime extension "${seanimeExt.name}"`, "info", 4000);
-          handledAsSeanime = true;
-        } catch (seanimeErr) {
-          const errStr = String(seanimeErr);
-          // Surface explicit Seanime manifest errors (like `manga-provider`) instead of falling through!
-          if (
-            errStr.includes("UNSUPPORTED_SEANIME_TYPE") ||
-            errStr.includes("SEANIME_MANIFEST_ERR") ||
-            errStr.includes("Unsupported extension type")
-          ) {
-            throw new Error(errStr.replace(/^[A-Z_]+:\s*/, ""));
-          }
-          // What if they pasted a Seanime marketplace catalog JSON into the top box?
-          if (val.startsWith("http://") || val.startsWith("https://")) {
-            const items = await api.fetchMarketplaceExtensions(val).catch(() => []);
-            if (items.length > 0) {
-              marketplaceUrlInput = val;
-              await app.setExtensionMarketplaceUrl(val);
-              marketplaceItems = items;
-              extUrlInput = "";
-              app.toast(`Loaded ${items.length} extension(s) from catalog — click + Install below!`, "info", 4500);
-              return;
-            }
-          }
-          handledAsSeanime = false;
-        }
-      }
-      if (!handledAsSeanime) {
-        torrentExtensions = await api.importTorrentExtension(val);
+      const result = await installUnifiedExtension(val, {
+        allowCatalogBrowse: true,
+        allowNativeTorrentFallback: true,
+      });
+      if (result.kind === "marketplace_catalog") {
+        marketplaceUrlInput = result.url;
+        marketplaceItems = result.items;
         extUrlInput = "";
-        app.toast(`Imported source (${totalActiveExtensions} active)`, "info", 4000);
+        app.toast(
+          `Found ${result.items.length} compatible anime extension(s) — click + Install below!`,
+          "info",
+          5000,
+        );
+        return;
       }
+      if (result.kind === "seanime_installed") {
+        extUrlInput = "";
+        app.toast(`Installed Seanime extension "${result.extension.name}"`, "info", 4000);
+        return;
+      }
+      torrentExtensions = result.extensions;
+      extUrlInput = "";
+      app.toast(`Imported source (${totalActiveExtensions} active)`, "info", 4000);
     } catch (e) {
-      app.toast(e instanceof Error ? e.message : String(e), "error", 8000);
+      app.toast(cleanExtensionError(e), "error", 8000);
     } finally {
       extImporting = false;
     }
@@ -209,7 +164,7 @@
         app.toast("No compatible streaming or torrent extensions found at that URL.", "warn", 5000);
       }
     } catch (e) {
-      app.toast(String(e), "error", 6000);
+      app.toast(cleanExtensionError(e), "error", 6000);
     } finally {
       marketplaceLoading = false;
     }
@@ -220,10 +175,12 @@
     installingMarketId = item.id;
     try {
       const installed = await api.installExtension(item.manifestUri);
+      evictExtensionWorker(installed.id);
+      invalidateOnlinestreamCache();
       await app.refreshExtensions();
       app.toast(`Installed "${installed.name}" v${installed.version}`, "info", 4000);
     } catch (e) {
-      app.toast(String(e), "error", 6000);
+      app.toast(cleanExtensionError(e), "error", 6000);
     } finally {
       installingMarketId = null;
     }
@@ -232,6 +189,8 @@
   async function handleToggleSeanimeExt(ext: InstalledExtension) {
     try {
       await api.toggleExtension(ext.id, !ext.enabled);
+      evictExtensionWorker(ext.id);
+      invalidateOnlinestreamCache();
       await app.refreshExtensions();
     } catch (e) {
       app.toast(String(e), "error", 5000);
@@ -241,6 +200,8 @@
   async function handleRemoveSeanimeExt(ext: InstalledExtension) {
     try {
       await api.removeExtension(ext.id);
+      evictExtensionWorker(ext.id);
+      invalidateOnlinestreamCache();
       await app.refreshExtensions();
       app.toast(`Removed "${ext.name}"`, "info", 3500);
     } catch (e) {
@@ -271,6 +232,8 @@
     savingConfigExtId = ext.id;
     try {
       await api.setExtensionUserConfig(ext.id, vals);
+      evictExtensionWorker(ext.id);
+      invalidateOnlinestreamCache();
       await app.refreshExtensions();
       openConfigExtId = null;
       app.toast(`Saved settings for "${ext.name}"`, "info", 3500);
@@ -379,25 +342,62 @@
     threshold = app.playback.threshold;
   });
 
-  onMount(async () => {
-    try {
-      detected = await api.detectPlayers();
-    } catch {
-      detected = [];
-    }
-    try {
-      dictionaries = await api.listDictionaries();
-    } catch {
-      dictionaries = [];
-    }
-    void events.onDictionaryProgress((p) => {
-      dictStatusMsg = p.message;
-    });
-    try {
-      version = (await getVersion()).replace(/\.0$/, "");
-    } catch {
-      version = "0.6";
-    }
+  onMount(() => {
+    let disposed = false;
+    let unsubDict: (() => void) | undefined;
+    let unsubAnilist: (() => void) | undefined;
+
+    void (async () => {
+      try {
+        const d = await api.detectPlayers();
+        if (!disposed) detected = d;
+      } catch {
+        if (!disposed) detected = [];
+      }
+      try {
+        const list = await api.listDictionaries();
+        if (!disposed) dictionaries = list;
+      } catch {
+        if (!disposed) dictionaries = [];
+      }
+      try {
+        const v = (await getVersion()).replace(/\.0$/, "");
+        if (!disposed) version = v;
+      } catch {
+        if (!disposed) version = "0.6";
+      }
+    })();
+
+    events
+      .onDictionaryProgress((p) => {
+        if (!disposed) dictStatusMsg = p.message;
+      })
+      .then((u) => {
+        if (disposed) u();
+        else unsubDict = u;
+      })
+      .catch(() => {});
+
+    events
+      .onAnilistChanged(async (acct) => {
+        if (disposed) return;
+        stopAnilistPoll();
+        anilist = acct;
+        anilistConnecting = false;
+        await app.refresh();
+      })
+      .then((u) => {
+        if (disposed) u();
+        else unsubAnilist = u;
+      })
+      .catch(() => {});
+
+    return () => {
+      disposed = true;
+      stopAnilistPoll();
+      unsubDict?.();
+      unsubAnilist?.();
+    };
   });
 
   async function importYomitanZip() {
@@ -534,7 +534,14 @@
   let exporting = $state(false);
   let exported = $state<BackupSummary | null>(null);
   let preview = $state<BackupSummary | null>(null);
-  let importOpts = $state<ImportOptions>({ settings: true, libraries: true, history: true, trackPrefs: true, matches: true });
+  let importOpts = $state<ImportOptions>({
+    settings: true,
+    libraries: true,
+    history: true,
+    trackPrefs: true,
+    matches: true,
+    extensions: false,
+  });
   let importing = $state(false);
   let importReport = $state<ImportReport | null>(null);
 
@@ -586,6 +593,7 @@
         history: p.watched + p.progress > 0,
         trackPrefs: p.trackPrefs > 0,
         matches: p.manualMatches > 0,
+        extensions: false,
       };
       preview = p;
     } catch (e) {
@@ -598,6 +606,7 @@
     const p = preview;
     if (!p) return [];
     const folders = p.libraries.reduce((n, l) => n + l.folders, 0);
+    const extCount = p.extensions ?? 0;
     return [
       { key: "settings" as const, label: "Settings", count: p.settings, detail: `${plural(p.settings, "preference")} — theme, player, languages…` },
       {
@@ -616,6 +625,15 @@
       },
       { key: "trackPrefs" as const, label: "Per-show audio & subtitles", count: p.trackPrefs, detail: plural(p.trackPrefs, "show override") },
       { key: "matches" as const, label: "Fixed matches", count: p.manualMatches, detail: plural(p.manualMatches, "manual match", "manual matches") },
+      {
+        key: "extensions" as const,
+        label: "Extensions (disabled by default)",
+        count: extCount,
+        detail:
+          extCount > 0
+            ? `${plural(extCount, "extension")}: ${(p.extensionNames ?? []).join(", ")} — review code before enabling`
+            : "None in this backup",
+      },
     ];
   });
   const anySelected = $derived(importRows.some((r) => r.count > 0 && importOpts[r.key]));
@@ -624,8 +642,15 @@
     if (!preview) return;
     importing = true;
     try {
-      importReport = await api.importBackup(preview.path, $state.snapshot(importOpts));
-      if (importOpts.settings) await app.loadPrefs();
+      const optsSnapshot = $state.snapshot(importOpts);
+      importReport = await api.importBackup(preview.path, optsSnapshot);
+      if (optsSnapshot.settings) await app.loadPrefs();
+      if (optsSnapshot.extensions) {
+        evictExtensionWorker();
+        invalidateOnlinestreamCache();
+        await app.refreshExtensions();
+        await refreshTorrentExtensions();
+      }
       await app.refresh();
       preview = null;
       app.toast("Backup imported.", "info", 5000);
@@ -646,6 +671,7 @@
       r.progressAdded && plural(r.progressAdded, "resume point"),
       r.trackPrefs && plural(r.trackPrefs, "show override"),
       r.matches && plural(r.matches, "fixed match", "fixed matches"),
+      r.extensions && plural(r.extensions, "extension"),
     ].filter(Boolean);
     return parts.length ? parts.join(", ") : "nothing new — this library already had everything";
   };
@@ -780,20 +806,6 @@
     }
   }
 
-  onMount(() => {
-    let unsub: (() => void) | undefined;
-    events.onAnilistChanged(async (acct) => {
-      stopAnilistPoll();
-      anilist = acct;
-      anilistConnecting = false;
-      await app.refresh();
-    }).then((u) => (unsub = u));
-    return () => {
-      stopAnilistPoll();
-      unsub?.();
-    };
-  });
-
   async function startAnilistOauth() {
     anilistConnecting = true;
     stopAnilistPoll();
@@ -851,7 +863,7 @@
   async function toggleAnilistScrobble() {
     if (!anilist) return;
     const next = !anilist.autoScrobble;
-    await api.setPref("pref.anilist_auto_scrobble", next ? "1" : "0");
+    await api.setPref("anilist_auto_scrobble", next ? "1" : "0");
     anilist = { ...anilist, autoScrobble: next };
   }
 
@@ -866,9 +878,6 @@
       app.toast(String(e), "error", 6000);
     }
   }
-
-  $effect(() => {
-  });
 
   // Diagnostics -------------------------------------------------------------
   let diag = $state<Diagnostics | null>(null);
@@ -2132,13 +2141,6 @@
         <div class="ext-group">
           <h3 class="ext-group-title">Native Torrent &amp; Feed Sources</h3>
           {@render extList(torrentSources)}
-        </div>
-      {/if}
-
-      {#if streamSources.length > 0}
-        <div class="ext-group">
-          <h3 class="ext-group-title">Direct HTTP Stream Sources</h3>
-          {@render extList(streamSources)}
         </div>
       {/if}
     {/if}

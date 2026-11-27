@@ -429,19 +429,6 @@ export function installMock() {
             autoScrobble: true,
             queuedCount: 0,
             trackedCount: 0,
-            clientId: "",
-          };
-        case "anilist_login_token":
-          return {
-            connected: true,
-            userId: 1,
-            userName: "PreviewUser",
-            avatarUrl: null,
-            lastSyncAt: Math.floor(Date.now() / 1000),
-            autoScrobble: true,
-            queuedCount: 0,
-            trackedCount: SAMPLE.length,
-            clientId: "",
           };
         case "anilist_disconnect":
           return {
@@ -453,7 +440,6 @@ export function installMock() {
             autoScrobble: true,
             queuedCount: 0,
             trackedCount: 0,
-            clientId: "",
           };
         case "anilist_sync_now":
           return {
@@ -505,7 +491,43 @@ export function installMock() {
         case "list_torrent_extensions":
         case "fetch_marketplace_extensions":
         case "list_torrent_files":
+        case "browse_catalog":
+        case "list_dictionaries":
+        case "backup_status":
+        case "search_people":
+        case "get_tracked_surface_forms":
           return [];
+        case "get_extension_payload":
+          return "";
+        case "get_anilist_immersion_lists":
+          return {
+            selectedList: null,
+            syncedShowCount: 0,
+            syncedHours: 0,
+            lists: [],
+          };
+        case "get_immersion_overview":
+          return {
+            todayImmersionSec: 0,
+            weekImmersionSec: 0,
+            monthImmersionSec: 0,
+            totalImmersionSec: 0,
+            dailyGoalMinutes: 60,
+            currentStreakDays: 0,
+            bestStreakDays: 0,
+            totalEpisodesCompleted: 0,
+            totalLookups: 0,
+            uniqueWordsCount: 0,
+            learningWordsCount: 0,
+            knownWordsCount: 0,
+            ignoredWordsCount: 0,
+            dailyActivity: [],
+            topAnime: [],
+            recentSessions: [],
+            words: [],
+            anilistImmersionList: null,
+            anilistImmersionShowsCount: 0,
+          };
         case "check_episode_availability":
           return {};
         case "get_anidb_ids":

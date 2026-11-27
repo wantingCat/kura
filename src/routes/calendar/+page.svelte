@@ -41,18 +41,23 @@
   let scope = $state<"all" | "library" | "tracked">("all");
   let query = $state("");
   let nowSec = $state(Math.floor(Date.now() / 1000));
+  let reqSeq = 0;
 
   async function load(force = false, silent = false) {
+    const seq = ++reqSeq;
     if (force) refreshing = true;
     else if (!silent) loading = true;
     error = null;
     try {
-      cal = await api.getSeasonalCalendar({ season, year, refresh: force });
+      const res = await api.getSeasonalCalendar({ season, year, refresh: force });
+      if (seq === reqSeq) cal = res;
     } catch (e) {
-      error = String(e);
+      if (seq === reqSeq) error = String(e);
     } finally {
-      loading = false;
-      refreshing = false;
+      if (seq === reqSeq) {
+        loading = false;
+        refreshing = false;
+      }
     }
   }
 
@@ -86,6 +91,7 @@
   onMount(() => {
     load(false);
     const t = setInterval(() => {
+      if (app.builtinPlayer?.active) return;
       nowSec = Math.floor(Date.now() / 1000);
     }, 30_000);
     return () => clearInterval(t);

@@ -2,6 +2,7 @@
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { api, type Anime4kPreset, type BuiltinPlayerState, type LookupResult } from "$lib/api";
   import { app } from "$lib/app.svelte";
+  import { clock, formatBytes, formatDuration } from "$lib/format";
   import YomitanPopup from "./YomitanPopup.svelte";
 
   let {
@@ -35,6 +36,7 @@
   let popupPinned = $state<boolean>(false);
   let lookupReqCounter = 0;
   let lookupDwellTimer: ReturnType<typeof setTimeout> | null = null;
+  let hoverDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   let trackedForms = $state<string[]>([]);
 
   async function refreshTrackedForms() {
@@ -50,16 +52,6 @@
       void refreshTrackedForms();
     }
   });
-
-  function formatImmersionBadge(sec: number): string {
-    const mins = Math.max(0, Math.floor(sec / 60));
-    if (mins >= 60) {
-      const h = Math.floor(mins / 60);
-      const m = mins % 60;
-      return m > 0 ? `${h}h ${m}m` : `${h}h`;
-    }
-    return `${mins}m`;
-  }
 
   // Native libmpv playback state
   let lastLoadedPath = $state("");
@@ -87,14 +79,6 @@
     );
   });
 
-  function formatBytes(bytes: number): string {
-    if (!bytes || bytes <= 0) return "0 KB";
-    const mb = bytes / (1024 * 1024);
-    if (mb >= 1024) return `${(mb / 1024).toFixed(2)} GB`;
-    if (mb >= 1) return `${mb.toFixed(1)} MB`;
-    return `${(bytes / 1024).toFixed(0)} KB`;
-  }
-
   $effect(() => {
     const curPath = `${playerState.anilistId}:${playerState.epKey}:${playerState.path}`;
     if (curPath !== lastLoadedPath) {
@@ -111,21 +95,43 @@
     return Array.from(raw).map((ch, idx) => ({ ch, idx }));
   });
 
-  // Identify character indices belonging to tracked ('learning') Japanese words
-  let trackedCharIndices = $derived.by(() => {
-    const indices = new Set<number>();
-    const raw = playerState.subText || "";
-    if (!raw || trackedForms.length === 0) return indices;
-    const codepoints = Array.from(raw);
+  // Pre-index tracked Japanese surface forms once by first codepoint (longest-first)
+  let trackedPrefixIndex = $derived.by(() => {
+    const index = new Map<string, string[][]>();
     for (const form of trackedForms) {
       if (!form) continue;
-      const formChars = Array.from(form);
-      const fLen = formChars.length;
-      if (fLen === 0 || fLen > codepoints.length) continue;
-      for (let i = 0; i <= codepoints.length - fLen; i++) {
+      const chars = Array.from(form);
+      if (chars.length === 0) continue;
+      const first = chars[0];
+      let bucket = index.get(first);
+      if (!bucket) {
+        bucket = [];
+        index.set(first, bucket);
+      }
+      bucket.push(chars);
+    }
+    for (const bucket of index.values()) {
+      bucket.sort((a, b) => b.length - a.length);
+    }
+    return index;
+  });
+
+  // Identify character indices belonging to tracked ('learning') Japanese words in O(subLen * maxWordLen)
+  let trackedCharIndices = $derived.by(() => {
+    const indices = new Set<number>();
+    const chars = subChars;
+    const n = chars.length;
+    if (n === 0 || trackedPrefixIndex.size === 0) return indices;
+    for (let i = 0; i < n; i++) {
+      const bucket = trackedPrefixIndex.get(chars[i].ch);
+      if (!bucket) continue;
+      for (let b = 0; b < bucket.length; b++) {
+        const formChars = bucket[b];
+        const fLen = formChars.length;
+        if (i + fLen > n) continue;
         let match = true;
-        for (let j = 0; j < fLen; j++) {
-          if (codepoints[i + j] !== formChars[j]) {
+        for (let j = 1; j < fLen; j++) {
+          if (chars[i + j].ch !== formChars[j]) {
             match = false;
             break;
           }
@@ -134,6 +140,7 @@
           for (let j = 0; j < fLen; j++) {
             indices.add(i + j);
           }
+          break;
         }
       }
     }
@@ -182,7 +189,15 @@
     return () => window.removeEventListener("resize", onResize);
   });
 
+  function clearHoverTimer() {
+    if (hoverDebounceTimer) {
+      clearTimeout(hoverDebounceTimer);
+      hoverDebounceTimer = null;
+    }
+  }
+
   function clearLookup() {
+    clearHoverTimer();
     if (lookupDwellTimer) {
       clearTimeout(lookupDwellTimer);
       lookupDwellTimer = null;
@@ -297,11 +312,17 @@
   function handleCharHover(charIdx: number, e: MouseEvent) {
     if (!playerState.paused || popupPinned) return;
     const el = e.currentTarget as HTMLElement;
-    void triggerLookup(charIdx, el, false);
+    clearHoverTimer();
+    hoverDebounceTimer = setTimeout(() => {
+      hoverDebounceTimer = null;
+      if (!playerState.paused || popupPinned) return;
+      void triggerLookup(charIdx, el, false);
+    }, 50);
   }
 
   function handleCharClick(charIdx: number, e: MouseEvent) {
     e.stopPropagation();
+    clearHoverTimer();
     if (!playerState.paused) {
       void togglePlayPause();
       return;
@@ -315,6 +336,7 @@
   }
 
   function handleSubtitleMouseLeave() {
+    clearHoverTimer();
     if (!popupPinned) {
       clearLookup();
     }
@@ -428,18 +450,6 @@
     }, 120);
   }
 
-  function formatTime(sec: number): string {
-    if (!Number.isFinite(sec) || sec < 0) return "0:00";
-    const total = Math.floor(sec);
-    const h = Math.floor(total / 3600);
-    const m = Math.floor((total % 3600) / 60);
-    const s = total % 60;
-    if (h > 0) {
-      return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-    }
-    return `${m}:${String(s).padStart(2, "0")}`;
-  }
-
   function handleKeydown(e: KeyboardEvent) {
     if (!playerState.active) return;
     const tag = (e.target as HTMLElement | null)?.tagName;
@@ -450,48 +460,57 @@
       case "k":
       case "K":
         e.preventDefault();
+        e.stopImmediatePropagation();
         void togglePlayPause();
         break;
       case "ArrowLeft":
       case "j":
       case "J":
         e.preventDefault();
+        e.stopImmediatePropagation();
         void seekRelative(-5);
         break;
       case "ArrowRight":
       case "l":
       case "L":
         e.preventDefault();
+        e.stopImmediatePropagation();
         void seekRelative(5);
         break;
       case "ArrowUp":
         e.preventDefault();
+        e.stopImmediatePropagation();
         void setVolume(Math.min(100, playerState.volume + 5));
         break;
       case "ArrowDown":
         e.preventDefault();
+        e.stopImmediatePropagation();
         void setVolume(Math.max(0, playerState.volume - 5));
         break;
       case "m":
       case "M":
         e.preventDefault();
+        e.stopImmediatePropagation();
         void toggleMute();
         break;
       case "s":
       case "S":
         if (activeSkip) {
           e.preventDefault();
+          e.stopImmediatePropagation();
           void seekTo(activeSkip.target);
         }
         break;
       case "f":
       case "F":
         e.preventDefault();
+        e.stopImmediatePropagation();
         void toggleFullscreen();
         break;
       case "z":
       case "Z":
         e.preventDefault();
+        e.stopImmediatePropagation();
         void api.builtinPlayerCommand({
           type: "add_sub_offset",
           delta: e.shiftKey ? -0.5 : -0.1,
@@ -501,6 +520,7 @@
       case "x":
       case "X":
         e.preventDefault();
+        e.stopImmediatePropagation();
         void api.builtinPlayerCommand({
           type: "add_sub_offset",
           delta: e.shiftKey ? 0.5 : 0.1,
@@ -509,6 +529,7 @@
         break;
       case "Escape":
         e.preventDefault();
+        e.stopImmediatePropagation();
         if (lookupResult) {
           clearLookup();
         } else if (activeMenu !== "none") {
@@ -560,7 +581,7 @@
       <div class="top-right-badges">
         <div class="immersion-hud-pill" title="Active Japanese immersion time tracked today">
           <span class="im-dot"></span>
-          <span>Today: {formatImmersionBadge(playerState.todayImmersionSec ?? 0)}</span>
+          <span>Today: {formatDuration(playerState.todayImmersionSec ?? 0)}</span>
         </div>
         {#if activeTorrentSession}
           <div class="torrent-hud-pill" title={activeTorrentSession.fileName}>
@@ -618,6 +639,7 @@
                   item.idx >= highlightStart &&
                   item.idx < highlightEnd}
                 onmouseenter={(e) => handleCharHover(item.idx, e)}
+                onmouseleave={clearHoverTimer}
                 onclick={(e) => handleCharClick(item.idx, e)}
               >{item.ch}</span>
             {/if}
@@ -656,7 +678,7 @@
       >
         {#if hoverTime !== null && playerState.duration > 0}
           <div class="timeline-tooltip" style="left: {Math.max(4, Math.min(96, hoverPct))}%;">
-            <span class="tt-time">{formatTime(hoverTime)}</span>
+            <span class="tt-time">{clock(hoverTime)}</span>
             {#if hoverChapter}
               <span class="tt-chapter">{hoverChapter}</span>
             {/if}
@@ -755,9 +777,9 @@
           </div>
 
           <div class="time-readout">
-            <span class="cur">{formatTime(displayPosition)}</span>
+            <span class="cur">{clock(displayPosition)}</span>
             <span class="sep">/</span>
-            <span class="dur">{formatTime(playerState.duration)}</span>
+            <span class="dur">{clock(playerState.duration)}</span>
           </div>
         </div>
 
@@ -859,7 +881,7 @@
           </div>
 
           <!-- Anime4K Real-Time GPU Shaders Menu -->
-          {#if playerState.backend === "mpv"}
+          {#if playerState.backend === "libmpv"}
             <div class="menu-anchor">
               <button
                 type="button"

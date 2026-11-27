@@ -71,6 +71,13 @@
   /** Seasons of one show become a single item unless the user turned grouping off. */
   const present = (list: MediaCard[]) => groupCards(list, app.groupSeasons);
 
+  function countGrouped(list: MediaCard[], group: boolean): number {
+    if (!group || list.length <= 1) return list.length;
+    const seen = new Set<number>();
+    for (let i = 0; i < list.length; i++) seen.add(list[i].franchiseId);
+    return seen.size;
+  }
+
   const baseEntries = $derived.by(() => {
     const q = norm(app.query);
     const terms = q ? q.split(" ") : [];
@@ -84,28 +91,33 @@
     });
   });
 
-  const groupedBase = $derived(present(baseEntries));
-
   const watchCounts = $derived.by(() => {
-    const out = { watching: 0, planning: 0, completed: 0, paused: 0, dropped: 0, all: groupedBase.length };
-    if (!app.groupSeasons) {
+    const group = app.groupSeasons;
+    if (!group) {
+      const out = { watching: 0, planning: 0, completed: 0, paused: 0, dropped: 0, all: baseEntries.length };
       for (const c of baseEntries) out[watchBucket(c)]++;
       return out;
     }
-    const buckets: Record<Exclude<WatchFilter, "all">, MediaCard[]> = {
-      watching: [],
-      planning: [],
-      completed: [],
-      paused: [],
-      dropped: [],
+    const allIds = new Set<number>();
+    const byBucket: Record<Exclude<WatchFilter, "all">, Set<number>> = {
+      watching: new Set<number>(),
+      planning: new Set<number>(),
+      completed: new Set<number>(),
+      paused: new Set<number>(),
+      dropped: new Set<number>(),
     };
-    for (const c of baseEntries) buckets[watchBucket(c)].push(c);
-    out.watching = present(buckets.watching).length;
-    out.planning = present(buckets.planning).length;
-    out.completed = present(buckets.completed).length;
-    out.paused = buckets.paused.length ? present(buckets.paused).length : 0;
-    out.dropped = buckets.dropped.length ? present(buckets.dropped).length : 0;
-    return out;
+    for (const c of baseEntries) {
+      allIds.add(c.franchiseId);
+      byBucket[watchBucket(c)].add(c.franchiseId);
+    }
+    return {
+      watching: byBucket.watching.size,
+      planning: byBucket.planning.size,
+      completed: byBucket.completed.size,
+      paused: byBucket.paused.size,
+      dropped: byBucket.dropped.size,
+      all: allIds.size,
+    };
   });
 
   $effect(() => {
@@ -117,11 +129,17 @@
     }
   });
 
-  const filtered = $derived.by(() => {
-    const list =
+  /** Memoize the single `groupCards` call for the active watch tab so sorting never re-groups. */
+  const groupedActive = $derived.by(() =>
+    present(
       filters.watch === "all"
-        ? [...groupedBase]
-        : present(baseEntries.filter((c) => watchBucket(c) === filters.watch));
+        ? baseEntries
+        : baseEntries.filter((c) => watchBucket(c) === filters.watch),
+    ),
+  );
+
+  const filtered = $derived.by(() => {
+    const list = [...groupedActive];
     const dir = filters.desc ? -1 : 1;
     const tie = (a: LibraryItem, b: LibraryItem) => displayTitle(a).localeCompare(displayTitle(b));
     const by: Record<SortKey, (a: LibraryItem, b: LibraryItem) => number> = {
@@ -135,20 +153,59 @@
     return list.sort(by[filters.sort]);
   });
 
+  const GRID_INITIAL_LIMIT = 180;
+  const GRID_STEP = 120;
+  let gridLimit = $state(GRID_INITIAL_LIMIT);
+
+  $effect(() => {
+    void libId;
+    void formatParam;
+    void app.query;
+    void filters.watch;
+    void filters.format;
+    void filters.airing;
+    void filters.sort;
+    void filters.desc;
+    void filters.advancedCount;
+    gridLimit = GRID_INITIAL_LIMIT;
+  });
+
+  const visibleGrid = $derived(
+    filtered.length > gridLimit ? filtered.slice(0, gridLimit) : filtered,
+  );
+
+  function infiniteReveal(node: HTMLElement) {
+    if (typeof IntersectionObserver === "undefined") return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting) && gridLimit < filtered.length) {
+          gridLimit = Math.min(filtered.length, gridLimit + GRID_STEP);
+        }
+      },
+      { rootMargin: "420px" },
+    );
+    obs.observe(node);
+    return {
+      destroy() {
+        obs.disconnect();
+      },
+    };
+  }
+
   const browsing = $derived(!app.query && !filters.active && (filters.watch === "watching" || filters.watch === "all"));
   /** Hero + rows only on the plain Home view (not Series / Movies / My List). */
   const showHome = $derived(browsing && !modeHead);
 
   const counts = $derived.by(() => {
-    if (!filters.panelOpen) return { all: 0, tv: 0, movie: 0, extra: 0 };
+    const group = app.groupSeasons;
     const panelScoped = scoped.filter(
       (c) => filters.matches(c) && (filters.watch === "all" || watchBucket(c) === filters.watch),
     );
     return {
-      all: present(panelScoped).length,
-      tv: present(panelScoped.filter((c) => formatOk(c, "tv"))).length,
-      movie: present(panelScoped.filter((c) => formatOk(c, "movie"))).length,
-      extra: present(panelScoped.filter((c) => formatOk(c, "extra"))).length,
+      all: countGrouped(panelScoped, group),
+      tv: countGrouped(panelScoped.filter((c) => formatOk(c, "tv")), group),
+      movie: countGrouped(panelScoped.filter((c) => formatOk(c, "movie")), group),
+      extra: countGrouped(panelScoped.filter((c) => formatOk(c, "extra")), group),
     };
   });
 
@@ -364,8 +421,19 @@
 
       {#if filtered.length > 0}
         <div class="grid">
-          {#each filtered as m, i (m.anilistId)}<PosterCard {m} index={i} />{/each}
+          {#each visibleGrid as m, i (m.anilistId)}<PosterCard {m} index={i} />{/each}
         </div>
+        {#if visibleGrid.length < filtered.length}
+          <div class="grid-more" use:infiniteReveal>
+            <button
+              type="button"
+              class="btn btn-glass btn-pill"
+              onclick={() => (gridLimit = Math.min(filtered.length, gridLimit + GRID_STEP))}
+            >
+              Show more ({filtered.length - visibleGrid.length} remaining)
+            </button>
+          </div>
+        {/if}
       {:else if scoped.length === 0 && app.scanning}
         <div class="empty">
           <img class="mascot empty-cat" src="/brand/cat.png" alt="" width="150" />
@@ -670,6 +738,11 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
     gap: 28px 18px;
+  }
+  .grid-more {
+    display: flex;
+    justify-content: center;
+    padding: 28px 0 8px;
   }
 
   .empty {

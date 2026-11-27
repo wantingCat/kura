@@ -4,10 +4,12 @@
   import {
     api,
     type InstalledExtension,
+    type MarketplaceExtension,
     type MediaDetail,
   } from "$lib/api";
   import { app } from "$lib/app.svelte";
   import type { OnlinestreamSearchResult } from "$lib/extensions/host";
+  import { cleanExtensionError, installUnifiedExtension } from "$lib/extensions/install";
   import {
     invalidateOnlinestreamCache,
     launchResolvedWebOption,
@@ -54,6 +56,9 @@
   let showInstallBox = $state(false);
   let extSourceInput = $state("");
   let installingExt = $state(false);
+  let catalogChoices = $state<MarketplaceExtension[]>([]);
+  let reqSeq = 0;
+  let rematchSeq = 0;
 
   const activeProvider = $derived<InstalledExtension | null>(
     providers.find((p) => p.id === selectedProviderId) ?? providers[0] ?? null,
@@ -64,11 +69,14 @@
   );
 
   async function initProvidersAndLoad(forceRefresh = false) {
+    const seq = ++reqSeq;
     loading = true;
     error = null;
     try {
-      providers = await listEnabledOnlinestreamProviders();
+      const nextProviders = await listEnabledOnlinestreamProviders();
       await app.refreshExtensions();
+      if (seq !== reqSeq) return;
+      providers = nextProviders;
       if (providers.length === 0) {
         showInstallBox = true;
         options = [];
@@ -78,21 +86,23 @@
       if (!selectedProviderId || !providers.some((p) => p.id === selectedProviderId)) {
         selectedProviderId = providers[0].id;
       }
-      await loadForSelectedProvider(forceRefresh);
+      await loadForSelectedProvider(forceRefresh, seq);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (seq === reqSeq) error = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (seq === reqSeq) loading = false;
     }
   }
 
-  async function loadForSelectedProvider(forceRefresh = false) {
+  async function loadForSelectedProvider(forceRefresh = false, parentSeq?: number) {
     const ext = providers.find((p) => p.id === selectedProviderId) ?? providers[0];
     if (!ext) return;
+    const seq = parentSeq ?? ++reqSeq;
     loading = true;
     error = null;
     try {
       const manual = await api.getOnlinestreamMapping(ext.id, detail.anilistId);
+      if (seq !== reqSeq) return;
       hasManualMapping = Boolean(manual?.providerAnimeId);
       const res = await resolveEpisodeOptionsForProvider(
         ext,
@@ -101,6 +111,7 @@
         app.streamSoftSubOnly,
         forceRefresh,
       );
+      if (seq !== reqSeq) return;
       matchedId = res.matchedId;
       matchedTitle = res.matchedTitle;
       options = res.options;
@@ -109,10 +120,12 @@
         rematchQuery = detail.titleRomaji ?? detail.titleEnglish ?? "";
       }
     } catch (e) {
-      options = [];
-      error = e instanceof Error ? e.message : String(e);
+      if (seq === reqSeq) {
+        options = [];
+        error = e instanceof Error ? e.message : String(e);
+      }
     } finally {
-      loading = false;
+      if (seq === reqSeq) loading = false;
     }
   }
 
@@ -123,18 +136,20 @@
 
   async function handleRematchSearch() {
     if (!activeProvider) return;
+    const seq = ++rematchSeq;
     rematchLoading = true;
     error = null;
     try {
-      rematchResults = await searchProviderAnime(
+      const res = await searchProviderAnime(
         activeProvider,
         detail,
         rematchQuery.trim() || undefined,
       );
+      if (seq === rematchSeq) rematchResults = res;
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (seq === rematchSeq) error = e instanceof Error ? e.message : String(e);
     } finally {
-      rematchLoading = false;
+      if (seq === rematchSeq) rematchLoading = false;
     }
   }
 
@@ -170,21 +185,33 @@
     }
   }
 
-  async function handleQuickInstallExtension() {
-    const val = extSourceInput.trim();
+  async function handleQuickInstallExtension(manifestOverride?: string) {
+    const val = (manifestOverride ?? extSourceInput).trim();
     if (!val || installingExt) return;
     installingExt = true;
     error = null;
     try {
-      const installed = await api.installExtension(val);
-      extSourceInput = "";
-      showInstallBox = false;
-      await app.refreshExtensions();
-      app.toast(`Installed extension "${installed.name}"`, "info", 4500);
-      selectedProviderId = installed.id;
-      await initProvidersAndLoad(true);
+      const result = await installUnifiedExtension(val, {
+        preferredExtType: "onlinestream-provider",
+        allowNativeTorrentFallback: false,
+      });
+      if (result.kind === "marketplace_catalog") {
+        catalogChoices = result.items;
+        extSourceInput = "";
+        app.toast(`Found ${result.items.length} web stream extension(s) — select one to install`, "info", 4000);
+        return;
+      }
+      if (result.kind === "seanime_installed") {
+        const installed = result.extension;
+        extSourceInput = "";
+        catalogChoices = [];
+        showInstallBox = false;
+        app.toast(`Installed extension "${installed.name}"`, "info", 4500);
+        selectedProviderId = installed.id;
+        await initProvidersAndLoad(true);
+      }
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = cleanExtensionError(e);
     } finally {
       installingExt = false;
     }
@@ -211,10 +238,20 @@
     }
   }
 
+  function handleWindowKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      onclose();
+    }
+  }
+
   onMount(() => {
     void initProvidersAndLoad();
   });
 </script>
+
+<svelte:window onkeydown={handleWindowKeydown} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -290,7 +327,7 @@
         >
           <input
             class="input"
-            placeholder="Paste Seanime extension manifest URL (https://…/manifest.json)"
+            placeholder="Paste Seanime manifest URL or GitHub repo URL (https://…)"
             bind:value={extSourceInput}
           />
           <button
@@ -301,6 +338,23 @@
             {installingExt ? "Installing…" : "+ Install"}
           </button>
         </form>
+        {#if catalogChoices.length > 0}
+          <div class="rematch-list">
+            {#each catalogChoices as item (item.id + item.manifestUri)}
+              <div class="rematch-item">
+                <span class="rematch-item-title">{item.name}</span>
+                <button
+                  type="button"
+                  class="btn btn-primary btn-sm"
+                  disabled={installingExt || !item.manifestUri}
+                  onclick={() => void handleQuickInstallExtension(item.manifestUri)}
+                >
+                  Install
+                </button>
+              </div>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -529,8 +583,10 @@
     flex-direction: column;
     gap: 12px;
     padding: 20px;
-    background: var(--surface);
-    border: var(--bw) solid var(--line);
+    background: var(--glass-tn-strong);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
     border-radius: var(--r-xl);
     box-shadow: var(--sticker-lg);
   }
@@ -769,13 +825,7 @@
     font-size: 12px;
   }
 
-  /* Tokyo Night pass: glass surface + neon focus */
-  .modal {
-    background: var(--glass-tn-strong);
-    backdrop-filter: var(--blur-tn);
-    -webkit-backdrop-filter: var(--blur-tn);
-    border: 1px solid var(--glass-hairline);
-  }
+  /* Tokyo Night pass: neon focus */
   button:focus-visible,
   input:focus-visible,
   select:focus-visible {

@@ -78,7 +78,11 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (e.key === "Escape") onclose();
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      onclose();
+    }
   }
 </script>
 
@@ -252,8 +256,10 @@
     max-height: 86vh;
     display: flex;
     flex-direction: column;
-    background: var(--bg-elev);
-    border: var(--bw) solid var(--line);
+    background: var(--glass-tn-strong);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
     border-radius: var(--r-xl);
     box-shadow: var(--sticker-lg), var(--neon-glow);
   }
@@ -474,13 +480,7 @@
     flex: 1;
   }
 
-  /* Tokyo Night pass: glass surface + neon focus ------------------------ */
-  .dialog {
-    background: var(--glass-tn-strong);
-    backdrop-filter: var(--blur-tn);
-    -webkit-backdrop-filter: var(--blur-tn);
-    border: 1px solid var(--glass-hairline);
-  }
+  /* Tokyo Night pass: neon focus ---------------------------------------- */
   button:focus-visible,
   input:focus-visible,
   select:focus-visible {

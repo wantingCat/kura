@@ -14,16 +14,24 @@ import {
   type TorrentSessionStatus,
   type UnmatchedGroup,
 } from "./api";
+import { detailsModal } from "./detailsModal.svelte";
+import {
+  ensureCandidateMagnet,
+  registerInstalledExtensionsGetter,
+  searchInstalledTorrentExtensions,
+} from "./extensions/host";
+import {
+  clearCachedMediaDetails,
+  getCachedOrLoadMediaDetail,
+  registerMediaDetailHooks,
+} from "./mediaDetail.svelte";
 import {
   autoPlayWebEpisode,
-  getCachedOrLoadMediaDetail,
   preloadNextWebEpisode,
 } from "./onlinestream.svelte";
-import { searchInstalledTorrentExtensions } from "./extensions/host";
-import { detailsModal } from "./detailsModal.svelte";
 import { updater } from "./updater.svelte";
 
-export interface PlaybackPrefs {
+interface PlaybackPrefs {
   /** Empty = not chosen yet (the backend then uses the built-in player). */
   player: PlayerKind | "";
   playerPath: string;
@@ -37,26 +45,26 @@ export interface PlaybackPrefs {
   subFallback: string;
 }
 
-export interface DiscordPrefs {
+interface DiscordPrefs {
   enabled: boolean;
   spoilers: boolean;
   buttons: boolean;
   clientId: string;
 }
 
-export interface LaunchingEpisode {
+interface LaunchingEpisode {
   anilistId: number;
   epKey: string;
 }
 
-export interface Toast {
+interface Toast {
   id: number;
   kind: "info" | "warn" | "error";
   text: string;
   anilistId?: number;
 }
 
-export interface AppAlert {
+interface AppAlert {
   id: string;
   anilistId: number;
   title: string;
@@ -110,7 +118,6 @@ class AppStore {
   torrentQuality = $state<"1080p" | "720p" | "2160p" | "ask">("1080p");
   torrentAutoSubs = $state(true);
   torrentSeeding = $state(true);
-  nyaaUrl = $state("");
   /** Default stream backend for unowned episodes ("web" = Direct Soft-Sub Web Stream, "torrent" = BitTorrent Swarm). */
   streamSource = $state<"web" | "torrent">("web");
   /** Enforce clean soft-sub streams only (skip burned-in hardsub servers unless manually overridden). */
@@ -142,8 +149,13 @@ class AppStore {
   #refreshTimer: ReturnType<typeof setTimeout> | null = null;
   #launchTimer: ReturnType<typeof setTimeout> | null = null;
   #initialised = false;
+  #extensionsLoaded = false;
   #needsRefreshOnWake = false;
   #toastId = 0;
+
+  get extensionsLoaded(): boolean {
+    return this.#extensionsLoaded;
+  }
 
   async init() {
     if (this.#initialised) return;
@@ -197,13 +209,15 @@ class AppStore {
             new Notification(n.title, { body: n.message });
           } catch {}
         } else if (Notification.permission === "default") {
-          Notification.requestPermission().then((perm) => {
-            if (perm === "granted") {
-              try {
-                new Notification(n.title, { body: n.message });
-              } catch {}
-            }
-          }).catch(() => {});
+          Notification.requestPermission()
+            .then((perm) => {
+              if (perm === "granted") {
+                try {
+                  new Notification(n.title, { body: n.message });
+                } catch {}
+              }
+            })
+            .catch(() => {});
         }
       }
     });
@@ -224,7 +238,10 @@ class AppStore {
         this.scheduleRefresh();
       }
     });
-    api.listTorrentSessions().then((list) => (this.torrentSessions = Array.isArray(list) ? list : [])).catch(() => {});
+    api
+      .listTorrentSessions()
+      .then((list) => (this.torrentSessions = Array.isArray(list) ? list : []))
+      .catch(() => {});
     await events.onAnilistChanged((acct) => {
       const wasConnected = !!this.anilist?.connected;
       this.anilist = acct;
@@ -233,19 +250,17 @@ class AppStore {
       }
       this.scheduleRefresh();
     });
-    api.getAnilistAccount().then((a) => (this.anilist = a)).catch(() => {});
+    api
+      .getAnilistAccount()
+      .then((a) => (this.anilist = a))
+      .catch(() => {});
     await events.onBuiltinPlayerState((s) => {
+      const wasActive = Boolean(this.builtinPlayer?.active);
       this.builtinPlayer = s;
       if (s.active) {
         this.launching = null;
         if (this.#launchTimer) clearTimeout(this.#launchTimer);
-        if (typeof document !== "undefined") {
-          document.documentElement.classList.add("builtin-player-active");
-        }
-      } else {
-        if (typeof document !== "undefined") {
-          document.documentElement.classList.remove("builtin-player-active");
-        }
+      } else if (wasActive) {
         this.scheduleRefresh();
       }
     });
@@ -320,11 +335,12 @@ class AppStore {
             cands.find((c) => c.seeders > 0) ??
             cands[0];
           if (!best) throw new Error(`No torrent release found for Episode ${ev.nextEpisode}`);
+          const resolvedBest = await ensureCandidateMagnet(best);
           await api.startTorrentSession({
             anilistId: ev.anilistId,
             epKey: String(ev.nextEpisode),
             episodeNum: ev.nextEpisode,
-            candidate: best,
+            candidate: resolvedBest,
             modeOverride: this.torrentAction === "download" ? "stream" : this.torrentAction,
           });
         } catch (e) {
@@ -367,7 +383,6 @@ class AppStore {
           : "1080p";
       this.torrentAutoSubs = prefs.torrent_auto_subs !== "0";
       this.torrentSeeding = prefs.torrent_seeding !== "0";
-      this.nyaaUrl = prefs.nyaa_url ?? "";
       this.streamSource = prefs.stream_source === "torrent" ? "torrent" : "web";
       this.streamSoftSubOnly = prefs.stream_softsub_only !== "0";
       this.anime4kPreset =
@@ -386,8 +401,17 @@ class AppStore {
       this.torrentExclude = prefs.torrent_exclude ?? "";
       this.extensionMarketplaceUrl = prefs.extension_marketplace_url ?? "";
       const num = (v: string | undefined, d: number) => (v !== undefined && !isNaN(Number(v)) ? Number(v) : d);
+      const rawPlayer = prefs.player ?? "";
+      const validPlayer: PlayerKind | "" =
+        rawPlayer === "builtin" ||
+        rawPlayer === "system" ||
+        rawPlayer === "mpv" ||
+        rawPlayer === "vlc" ||
+        rawPlayer === "mpc"
+          ? rawPlayer
+          : "";
       this.playback = {
-        player: (prefs.player as PlayerKind) ?? "",
+        player: validPlayer,
         playerPath: prefs.player_path ?? "",
         threshold: Math.min(100, Math.max(50, num(prefs.watched_threshold, 90))),
         resume: prefs.resume !== "0",
@@ -418,11 +442,13 @@ class AppStore {
   }
 
   async refresh() {
+    clearCachedMediaDetails();
     const [libraries, cards, unmatched] = await Promise.all([
       api.listLibraries(),
       api.getLibrary(null),
       api.getUnmatched(),
     ]);
+    clearCachedMediaDetails();
     this.libraries = libraries;
     this.cards = cards;
     this.unmatched = unmatched;
@@ -521,15 +547,10 @@ class AppStore {
     await api.setPref("torrent_seeding", on ? "1" : "0");
   }
 
-  async setNyaaUrl(url: string) {
-    const clean = url.trim().replace(/\/+$/, "");
-    this.nyaaUrl = clean;
-    await api.setPref("nyaa_url", clean);
-  }
-
   async refreshExtensions() {
     try {
       this.installedExtensions = await api.listExtensions();
+      this.#extensionsLoaded = true;
     } catch {
       this.installedExtensions = [];
     }
@@ -664,7 +685,7 @@ class AppStore {
 
   /** Play an episode with the configured player; errors become a toast. */
   async play(anilistId: number, epKey: string, path: string) {
-    if (!path && this.appMode === "streaming") {
+    if (!path) {
       try {
         const detail = await getCachedOrLoadMediaDetail(anilistId);
         const epNum = Number(epKey.replace(/^\D+/, "")) || 1;
@@ -779,3 +800,11 @@ class AppStore {
 }
 
 export const app = new AppStore();
+
+registerInstalledExtensionsGetter(() =>
+  app.extensionsLoaded ? app.installedExtensions : null,
+);
+registerMediaDetailHooks({
+  refresh: () => app.refresh(),
+  toast: (text, kind, ms) => app.toast(text, kind, ms),
+});

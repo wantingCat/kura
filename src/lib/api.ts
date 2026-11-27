@@ -579,7 +579,7 @@ export interface UpNextItem {
   newCount: number;
 }
 
-export type PlayerKind = "builtin" | "system" | "mpv" | "vlc" | "mpc" | "memento";
+export type PlayerKind = "builtin" | "system" | "mpv" | "vlc" | "mpc";
 
 export interface DetectedPlayer {
   kind: PlayerKind;
@@ -624,6 +624,8 @@ export interface BackupSummary {
   progress: number;
   trackPrefs: number;
   manualMatches: number;
+  extensions: number;
+  extensionNames: string[];
 }
 
 export interface ImportOptions {
@@ -632,6 +634,7 @@ export interface ImportOptions {
   history: boolean;
   trackPrefs: boolean;
   matches: boolean;
+  extensions: boolean;
 }
 
 export interface ImportReport {
@@ -643,6 +646,7 @@ export interface ImportReport {
   trackPrefs: number;
   matches: number;
   matchesSkipped: number;
+  extensions: number;
 }
 
 export interface SafetyCopy {
@@ -668,7 +672,7 @@ export interface AnilistAccount {
   autoScrobble: boolean;
   queuedCount: number;
   trackedCount: number;
-  clientId: string;
+  clientId?: string;
 }
 
 export interface AnilistSyncReport {
@@ -740,12 +744,11 @@ export interface ChapterItem {
 
 export interface BuiltinPlayerState {
   active: boolean;
-  backend: "mpv" | "html5" | string;
+  backend: "libmpv" | string;
   anilistId: number;
   epKey: string;
   path: string;
   streamUrl: string;
-  transcodeBaseUrl: string | null;
   showTitle: string;
   episodeTitle: string;
   paused: boolean;
@@ -774,10 +777,7 @@ export interface BuiltinPlayerState {
 
 export type BuiltinCommand =
   | { type: "play_pause" }
-  | { type: "pause" }
-  | { type: "resume" }
   | { type: "seek"; position: number }
-  | { type: "seek_relative"; delta: number }
   | { type: "set_volume"; volume: number }
   | { type: "toggle_mute" }
   | { type: "set_speed"; speed: number }
@@ -787,8 +787,6 @@ export type BuiltinCommand =
   | { type: "load_sub_file"; path: string }
   | { type: "set_shader_preset"; preset: Anime4kPreset | string }
   | { type: "next_episode" }
-  | { type: "open_external_mpv" }
-  | { type: "html5_tick"; position: number; duration: number; paused: boolean; ended: boolean }
   | { type: "sync_bounds" }
   | { type: "stop" };
 
@@ -1018,7 +1016,6 @@ export const api = {
     invoke<void>("play_episode", { anilistId, epKey, path }),
   getUpNext: (limit = 6) => invoke<UpNextItem[]>("get_up_next", { limit }),
   getNewEpisodes: (limit = 6) => invoke<UpNextItem[]>("get_new_episodes", { limit }),
-  getMediaTrackPref: (anilistId: number) => invoke<MediaTrackPref | null>("get_media_track_pref", { anilistId }),
   setMediaTrackPref: (anilistId: number, pref: MediaTrackPref | null) =>
     invoke<void>("set_media_track_pref", { anilistId, pref }),
   rebuildMetadata: () => invoke<void>("rebuild_metadata"),
@@ -1036,7 +1033,6 @@ export const api = {
       score: opts.score ?? null,
     }),
   anilistStartOauth: (clientId?: string) => invoke<string>("anilist_start_oauth", { clientId: clientId ?? null }),
-  anilistLoginToken: (token: string) => invoke<AnilistAccount>("anilist_login_token", { token }),
   anilistDisconnect: () => invoke<AnilistAccount>("anilist_disconnect"),
   anilistSyncNow: () => invoke<AnilistSyncReport>("anilist_sync_now"),
   getSeasonalCalendar: (opts?: { season?: string; year?: number; refresh?: boolean }) =>
@@ -1119,7 +1115,6 @@ export const api = {
     invoke<TorrentExtension[]>("toggle_torrent_extension", { id, enabled }),
   removeTorrentExtension: (id: string) =>
     invoke<TorrentExtension[]>("remove_torrent_extension", { id }),
-  builtinPlayerGetState: () => invoke<BuiltinPlayerState>("builtin_player_get_state"),
   builtinPlayerCommand: (command: BuiltinCommand) =>
     invoke<BuiltinPlayerState>("builtin_player_command", { command }),
   lookupJapaneseAt: (text: string, charOffset: number) =>
@@ -1156,6 +1151,7 @@ export const api = {
   setAnilistImmersionList: (listName: string | null) =>
     invoke<AnilistImmersionListsResponse>("set_anilist_immersion_list", { listName }),
   listExtensions: () => invoke<InstalledExtension[]>("list_extensions"),
+  getExtensionPayload: (id: string) => invoke<string>("get_extension_payload", { id }),
   fetchMarketplaceExtensions: (url: string) =>
     invoke<MarketplaceExtension[]>("fetch_marketplace_extensions", { url }),
   installExtension: (source: string) =>

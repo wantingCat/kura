@@ -3,8 +3,13 @@
   import Icon from "./Icon.svelte";
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape" && !mpvModal.installing) {
-      mpvModal.close();
+    if (!mpvModal.visible) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (!mpvModal.installing) {
+        mpvModal.close();
+      }
     }
   }
 </script>
@@ -167,8 +172,10 @@
     max-height: calc(100vh - 48px);
     display: flex;
     flex-direction: column;
-    background: var(--bg-elev);
-    border: var(--bw) solid var(--line);
+    background: var(--glass-tn-strong);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
     border-radius: var(--r-xl);
     box-shadow: var(--sticker-lg), var(--neon-glow);
     animation: pop 320ms var(--bounce);
@@ -419,13 +426,7 @@
     color: var(--text-2);
   }
 
-  /* Tokyo Night pass: glass surface + neon focus ------------------------ */
-  .dialog {
-    background: var(--glass-tn-strong);
-    backdrop-filter: var(--blur-tn);
-    -webkit-backdrop-filter: var(--blur-tn);
-    border: 1px solid var(--glass-hairline);
-  }
+  /* Tokyo Night pass: neon focus ---------------------------------------- */
   button:focus-visible {
     outline: 2px solid var(--neon-violet);
     outline-offset: 2px;

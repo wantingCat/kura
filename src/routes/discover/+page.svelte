@@ -17,7 +17,6 @@
   } from "$lib/format";
   import Icon from "$lib/components/Icon.svelte";
   import PersonModal from "$lib/components/PersonModal.svelte";
-  import TorrentPickerDialog from "$lib/components/TorrentPickerDialog.svelte";
   import Ja from "$lib/components/Ja.svelte";
   import { JA, jaFormat, jaGenre, jaSeason, jaStatus } from "$lib/ja";
 
@@ -85,7 +84,8 @@
   let peopleResults = $state<PersonSearchResult[]>([]);
   let peopleLoading = $state(false);
   let selectedPerson = $state<{ id: number; name: string } | null>(null);
-  let streamTarget = $state<{ anilistId: number; title: string } | null>(null);
+  let catalogReqSeq = 0;
+  let peopleReqSeq = 0;
 
   const heroItems = $derived(items.slice(0, 6));
   const hero = $derived(heroItems[heroIdx] ?? null);
@@ -93,6 +93,7 @@
   async function fetchCatalog(reset = true) {
     if (reset) {
       loading = true;
+      loadingMore = false;
       pageNum = 1;
       hasMore = true;
       heroIdx = 0;
@@ -100,6 +101,8 @@
       if (loadingMore || !hasMore) return;
       loadingMore = true;
     }
+    const seq = ++catalogReqSeq;
+    const reqPage = pageNum;
     error = null;
     try {
       const res = await api.browseCatalog({
@@ -110,8 +113,9 @@
         season: season || null,
         year: year ? Number(year) : null,
         sort: search.trim() && sort === "TRENDING_DESC" ? "SEARCH_MATCH" : sort,
-        page: pageNum,
+        page: reqPage,
       });
+      if (seq !== catalogReqSeq) return;
       if (res.length < 18) {
         hasMore = false;
       }
@@ -127,10 +131,12 @@
         }
       }
     } catch (e) {
-      error = String(e);
+      if (seq === catalogReqSeq) error = String(e);
     } finally {
-      loading = false;
-      loadingMore = false;
+      if (seq === catalogReqSeq) {
+        loading = false;
+        loadingMore = false;
+      }
     }
   }
 
@@ -152,17 +158,20 @@
 
   async function runPeopleSearch(q: string) {
     peopleQuery = q;
+    const seq = ++peopleReqSeq;
     if (!q.trim()) {
       peopleResults = [];
+      peopleLoading = false;
       return;
     }
     peopleLoading = true;
     try {
-      peopleResults = await api.searchPeople(q);
+      const res = await api.searchPeople(q);
+      if (seq === peopleReqSeq) peopleResults = res;
     } catch (e) {
-      app.toast(String(e), "error", 5000);
+      if (seq === peopleReqSeq) app.toast(String(e), "error", 5000);
     } finally {
-      peopleLoading = false;
+      if (seq === peopleReqSeq) peopleLoading = false;
     }
   }
 
@@ -210,7 +219,7 @@
     <div class="title-block">
       <h1>Discover Anime <Ja text={JA.pages.discover.ja} class="ja-sub" /></h1>
       <p class="muted">
-        Browse the entire AniList catalog, filter by genre or voice actor (seiyuu), add shows to your unified library, and stream or download any episode in <strong>mpv</strong> or <strong>Memento</strong>.
+        Browse the entire AniList catalog, filter by genre or voice actor (seiyuu), add shows to your unified library, and stream or download any episode in <strong>Built-In Player / mpv</strong>.
       </p>
     </div>
     <div class="tab-switch">
@@ -274,9 +283,14 @@
           <div class="hero-actions">
             <button
               class="btn btn-cta"
-              onclick={() => (streamTarget = { anilistId: hero.anilistId, title: displayTitle(hero) })}
+              disabled={app.isLaunching(hero.anilistId, "1")}
+              onclick={() => void app.play(hero.anilistId, "1", "")}
             >
-              <Icon name="play" size={15} fill /> Watch Ep 1
+              {#if app.isLaunching(hero.anilistId, "1")}
+                <span class="spinner"></span> Launching…
+              {:else}
+                <Icon name="play" size={15} fill /> Watch Ep 1
+              {/if}
             </button>
             <button class="btn btn-glass" onclick={() => goto(`/anime/${hero.anilistId}`)}>
               View Details
@@ -538,17 +552,6 @@
     staffId={selectedPerson.id}
     initialName={selectedPerson.name}
     onclose={() => (selectedPerson = null)}
-  />
-{/if}
-
-{#if streamTarget}
-  <TorrentPickerDialog
-    anilistId={streamTarget.anilistId}
-    title={streamTarget.title}
-    epKey="1"
-    episodeNumber={1}
-    autoStart={app.torrentQuality !== "ask"}
-    onclose={() => (streamTarget = null)}
   />
 {/if}
 

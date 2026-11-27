@@ -90,6 +90,7 @@
   }
 
   .shell.player-hidden {
+    display: none;
     visibility: hidden;
     pointer-events: none;
     background: transparent;

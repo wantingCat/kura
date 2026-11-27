@@ -4,6 +4,115 @@ import * as cheerio from "cheerio";
 import CryptoJSOrig from "crypto-js";
 import { transform } from "sucrase";
 import type { ExtensionFetchReq, ExtensionFetchResp } from "../api";
+import {
+  compareTitles,
+  extractPartNumber,
+  extractSeasonNumber,
+  extractYear,
+  normalizeTitle,
+  parseEpisodeNumber,
+  sanitizeQuery,
+} from "../titleMatch";
+
+// ---------------------------------------------------------------------------
+// Capture Trusted Worker Primitives & Lock Down Ambient Browser APIs (`C-01`)
+// ---------------------------------------------------------------------------
+
+const workerPostMessage = self.postMessage.bind(self);
+const workerSetTimeout = self.setTimeout.bind(self);
+
+function lockdownAmbientGlobals() {
+  const blocked = [
+    "XMLHttpRequest",
+    "WebSocket",
+    "EventSource",
+    "Worker",
+    "SharedWorker",
+    "importScripts",
+    "indexedDB",
+    "IDBFactory",
+    "IDBDatabase",
+    "IDBKeyRange",
+    "caches",
+    "CacheStorage",
+    "BroadcastChannel",
+    "WebTransport",
+    "RTCPeerConnection",
+    "RTCDataChannel",
+    "postMessage",
+    "MessageChannel",
+    "MessagePort",
+    "FontFace",
+    "FontFaceSet",
+  ];
+
+  // Scrub prototype chain first so inherited getters/methods (postMessage, indexedDB, caches, importScripts) cannot be reached
+  let proto: unknown = Object.getPrototypeOf(self);
+  while (proto && proto !== Object.prototype) {
+    const rec = proto as Record<string, unknown>;
+    for (const key of [...blocked, "fetch"]) {
+      try {
+        delete rec[key];
+      } catch {
+        try {
+          Object.defineProperty(rec, key, {
+            value: undefined,
+            writable: false,
+            configurable: false,
+          });
+        } catch {
+          // ignore non-configurable host prototype slots
+        }
+      }
+    }
+    proto = Object.getPrototypeOf(proto);
+  }
+
+  const g = globalThis as Record<string, unknown>;
+  for (const key of blocked) {
+    try {
+      delete g[key];
+    } catch {
+      // ignore
+    }
+    try {
+      Object.defineProperty(g, key, {
+        value: undefined,
+        writable: false,
+        configurable: false,
+      });
+    } catch {
+      g[key] = undefined;
+    }
+  }
+
+  const navBlocked = ["sendBeacon", "storage", "locks", "credentials", "serviceWorker"];
+  if (typeof self.navigator === "object" && self.navigator !== null) {
+    let navObj: unknown = self.navigator;
+    while (navObj && navObj !== Object.prototype) {
+      const rec = navObj as Record<string, unknown>;
+      for (const key of navBlocked) {
+        try {
+          delete rec[key];
+        } catch {
+          // ignore
+        }
+        try {
+          Object.defineProperty(rec, key, {
+            value: undefined,
+            writable: false,
+            configurable: false,
+          });
+        } catch {
+          // ignore non-configurable host slot
+        }
+      }
+      navObj = Object.getPrototypeOf(navObj);
+    }
+  }
+}
+
+lockdownAmbientGlobals();
 
 // ---------------------------------------------------------------------------
 // Worker <-> Main Thread RPC Protocol
@@ -49,7 +158,9 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 function base64ToBytes(b64: string): Uint8Array {
+  if (!b64) return new Uint8Array(0);
   const normalized = b64.replace(/-/g, "+").replace(/_/g, "/").replace(/\s+/g, "");
+  if (!normalized) return new Uint8Array(0);
   const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
   const bin = atob(padded);
   const out = new Uint8Array(bin.length);
@@ -375,7 +486,7 @@ class Doc {
 }
 
 // ---------------------------------------------------------------------------
-// CORS-Free `fetch` Shim (`res.text()` and `res.json()` synchronous!)
+// Sandboxed `fetch` Shim (`res.text()`, `res.json()`, `res.bytes()` lazy!)
 // ---------------------------------------------------------------------------
 
 function makeCaseInsensitiveMap<V>(raw: Record<string, V>): Record<string, V> {
@@ -413,6 +524,8 @@ async function seanimeFetch(url: string, options?: any) {
       bodyStr = b.toString();
     } else if (b instanceof Uint8Array) {
       bodyBase64 = bytesToBase64(b);
+    } else if (ArrayBuffer.isView(b)) {
+      bodyBase64 = bytesToBase64(new Uint8Array(b.buffer, b.byteOffset, b.byteLength));
     } else if (b instanceof ArrayBuffer) {
       bodyBase64 = bytesToBase64(new Uint8Array(b));
     } else if (typeof b === "object") {
@@ -424,8 +537,20 @@ async function seanimeFetch(url: string, options?: any) {
 
   const headers: Record<string, string> = {};
   if (options?.headers && typeof options.headers === "object") {
-    for (const [k, v] of Object.entries(options.headers)) {
-      if (v !== undefined && v !== null) headers[k] = String(v);
+    if (typeof Headers !== "undefined" && options.headers instanceof Headers) {
+      options.headers.forEach((v: string, k: string) => {
+        headers[k] = String(v);
+      });
+    } else if (Array.isArray(options.headers)) {
+      for (const pair of options.headers) {
+        if (Array.isArray(pair) && pair.length >= 2 && pair[1] !== undefined && pair[1] !== null) {
+          headers[String(pair[0])] = String(pair[1]);
+        }
+      }
+    } else {
+      for (const [k, v] of Object.entries(options.headers)) {
+        if (v !== undefined && v !== null) headers[k] = String(v);
+      }
     }
   }
 
@@ -441,11 +566,37 @@ async function seanimeFetch(url: string, options?: any) {
 
   const resp = await new Promise<ExtensionFetchResp>((resolve, reject) => {
     pendingFetches.set(reqId, { resolve, reject });
-    self.postMessage({ kind: "http_fetch", reqId, req });
+    workerPostMessage({ kind: "http_fetch", reqId, req });
   });
 
   const ciHeaders = makeCaseInsensitiveMap(resp.headers);
   const ciRawHeaders = makeCaseInsensitiveMap(resp.rawHeaders);
+
+  // Backend populates ONLY `bodyText` (valid UTF-8) OR `bodyBase64` (binary) — decode/encode lazily!
+  let cachedBytes: Uint8Array | null = null;
+  let cachedText: string | null = null;
+
+  function getBytes(): Uint8Array {
+    if (cachedBytes) return cachedBytes;
+    if (resp.bodyBase64) {
+      cachedBytes = base64ToBytes(resp.bodyBase64);
+    } else if (resp.bodyText) {
+      cachedBytes = textEncoder.encode(resp.bodyText);
+    } else {
+      cachedBytes = new Uint8Array(0);
+    }
+    return cachedBytes;
+  }
+
+  function getText(): string {
+    if (cachedText !== null) return cachedText;
+    if (resp.bodyText || !resp.bodyBase64) {
+      cachedText = resp.bodyText ?? "";
+    } else {
+      cachedText = textDecoder.decode(getBytes());
+    }
+    return cachedText;
+  }
 
   return {
     status: resp.status,
@@ -460,14 +611,14 @@ async function seanimeFetch(url: string, options?: any) {
     contentType: resp.contentType,
     contentLength: resp.contentLength,
     text(): string {
-      return resp.bodyText;
+      return getText();
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     json<T = any>(): T {
-      return JSON.parse(resp.bodyText) as T;
+      return JSON.parse(getText()) as T;
     },
     bytes(): Uint8Array {
-      return base64ToBytes(resp.bodyBase64);
+      return getBytes();
     },
   };
 }
@@ -578,25 +729,22 @@ const $habari = {
     const withoutExt = extMatch ? raw.slice(0, -extMatch[0].length) : raw;
     const groupMatch = withoutExt.match(/^\[([^\]]+)\]/);
     const release_group = groupMatch ? groupMatch[1].trim() : undefined;
-    const resMatch = withoutExt.match(/\b(2160p|4k|1080p|720p|540p|480p)\b/i);
+    const resMatch = withoutExt.match(/\b(2160p|4k|1440p|1080p|720p|576p|540p|480p)\b/i);
     const video_resolution = resMatch ? resMatch[1] : undefined;
     const crcMatch = withoutExt.match(/\[([0-9A-Fa-f]{8})\]/);
     const file_checksum = crcMatch ? crcMatch[1] : undefined;
 
-    const seasonMatch = withoutExt.match(/\bS(\d{1,2})(?:E\d+|\b)|\bSeason\s*(\d{1,2})\b/i);
-    const season_number = seasonMatch ? [seasonMatch[1] ?? seasonMatch[2]] : undefined;
-    const partMatch = withoutExt.match(/\b(?:Part|Cour)\s*(\d{1,2})\b/i);
-    const part_number = partMatch ? [partMatch[1]] : undefined;
-    const epMatch =
-      withoutExt.match(/\bS\d{1,2}E(\d{1,4})\b/i) ??
-      withoutExt.match(/-\s*(\d{1,4})(?:v\d)?\b/) ??
-      withoutExt.match(/\b(?:EP|Episode)\s*(\d{1,4})\b/i);
-    const episode_number = epMatch ? [String(Number(epMatch[1]))] : undefined;
+    const seasonNum = extractSeasonNumber(withoutExt);
+    const season_number = seasonNum > 0 ? [String(seasonNum)] : undefined;
+    const partNum = extractPartNumber(withoutExt);
+    const part_number = partNum > 0 ? [String(partNum)] : undefined;
+    const parsedEp = parseEpisodeNumber(withoutExt);
+    const episode_number = parsedEp !== null ? [String(parsedEp)] : undefined;
 
     const cleanTitle = withoutExt
       .replace(/^\[[^\]]+\]\s*/, "")
       .replace(/\[[^\]]*\]|\([^)]*\)/g, " ")
-      .replace(/-\s*\d{1,4}(?:v\d)?.*$/, "")
+      .replace(/-\s*\d{1,4}(?:v\d)?(?=$|[\s\[\(_.-]).*$/, "")
       .replace(/\bS\d{1,2}E\d{1,4}.*$/i, "")
       .replace(/[._]+/g, " ")
       .replace(/\s+/g, " ")
@@ -644,7 +792,7 @@ const $goFeed = {
       const custom: Record<string, string> = {};
       const extensions: Record<string, Record<string, { value: string }[]>> = {};
       node.children().each((__, child) => {
-        const tagName = ("tagName" in child && child.tagName) ? String(child.tagName) : "";
+        const tagName = "tagName" in child && child.tagName ? String(child.tagName) : "";
         if (!tagName) return;
         const val = $(child).text().trim();
         if (tagName.includes(":")) {
@@ -689,92 +837,6 @@ const $goFeed = {
     };
   },
 };
-
-const STOP_WORDS = new Set(["the", "a", "an", "and", "of", "in", "on", "to", "for", "tv", "animation"]);
-
-function normalizeRomajiMacrons(s: string): string {
-  return s
-    .replace(/[āâ]/gi, "a")
-    .replace(/[īî]/gi, "i")
-    .replace(/[ūû]/gi, "u")
-    .replace(/[ēê]/gi, "e")
-    .replace(/[ōô]/gi, "o");
-}
-
-function extractSeasonNumber(title: string): number {
-  const s = String(title ?? "");
-  const m1 = s.match(/\b(?:Season\s*|S)(\d{1,2})\b/i);
-  if (m1) return Number(m1[1]);
-  const m2 = s.match(/\b(\d{1,2})(?:st|nd|rd|th)\s+Season\b/i);
-  if (m2) return Number(m2[1]);
-  const m3 = s.match(/(\d{1,2})期/);
-  if (m3) return Number(m3[1]);
-  const m4 = s.match(/\s+(II|III|IV|V)\s*$/);
-  if (m4) return { II: 2, III: 3, IV: 4, V: 5 }[m4[1]] ?? -1;
-  return -1;
-}
-
-function extractPartNumber(title: string): number {
-  const s = String(title ?? "");
-  const m1 = s.match(/\b(?:Part|Cour)\s*(\d{1,2})\b/i);
-  if (m1) return Number(m1[1]);
-  const m2 = s.match(/\b(\d{1,2})(?:st|nd|rd|th)\s+(?:Part|Cour)\b/i);
-  if (m2) return Number(m2[1]);
-  const m3 = s.match(/\bPart\s+(II|III|IV)\b/i);
-  if (m3) return { ii: 2, iii: 3, iv: 4 }[m3[1].toLowerCase()] ?? -1;
-  return -1;
-}
-
-function extractYear(title: string): number {
-  const m = String(title ?? "").match(/\b(19\d{2}|20\d{2})\b/);
-  return m ? Number(m[1]) : -1;
-}
-
-function sanitizeQuery(query: string): string {
-  return normalizeRomajiMacrons(String(query ?? ""))
-    .replace(/['’]s\b/gi, "")
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function normalizeTitle(title: string) {
-  const original = String(title ?? "");
-  const season = extractSeasonNumber(original);
-  const part = extractPartNumber(original);
-  const year = extractYear(original);
-  const cleanBase = sanitizeQuery(
-    original
-      .replace(/\b(?:Season\s*\d+|\d+(?:st|nd|rd|th)\s+Season|S\d{1,2})\b/gi, " ")
-      .replace(/\b(?:Part|Cour)\s*(?:\d+|II|III|IV)\b/gi, " ")
-      .replace(/\((?:TV|ONA|OVA|Movie|Special|19\d{2}|20\d{2})\)/gi, " "),
-  );
-  const normalized = sanitizeQuery(original).toLowerCase();
-  const tokens = normalized.split(/\s+/).filter((t) => t.length > 1 && !STOP_WORDS.has(t));
-  return {
-    original,
-    normalized,
-    cleanBaseTitle: cleanBase,
-    denoisedTitle: cleanBase,
-    tokens,
-    season,
-    part,
-    year,
-    isMain: season <= 1 && part <= 1,
-  };
-}
-
-function compareTitles(t1: string, t2: string): number {
-  const a = normalizeTitle(t1);
-  const b = normalizeTitle(t2);
-  if (!a.tokens.length || !b.tokens.length) return a.normalized === b.normalized ? 1 : 0;
-  const setB = new Set(b.tokens);
-  let hits = 0;
-  for (const tok of a.tokens) {
-    if (setB.has(tok)) hits++;
-  }
-  return (2 * hits) / (a.tokens.length + b.tokens.length);
-}
 
 const $scannerUtils = {
   normalizeTitle,
@@ -835,49 +897,102 @@ const $scannerUtils = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Safe Bencode Root-Dict `4:info` Span Parser (`M-01`)
+// ---------------------------------------------------------------------------
+
+const MAX_BENCODE_DEPTH = 64;
+
+function parseBencodeStringSpan(
+  bytes: Uint8Array,
+  pos: number,
+): { dataStart: number; nextPos: number } | null {
+  if (pos < 0 || pos >= bytes.length) return null;
+  const first = bytes[pos];
+  if (first < 0x30 || first > 0x39) return null;
+
+  let colon = pos;
+  let len = 0;
+  while (colon < bytes.length && bytes[colon] !== 0x3a) {
+    const d = bytes[colon];
+    if (d < 0x30 || d > 0x39) return null;
+    len = len * 10 + (d - 0x30);
+    if (len > bytes.length) return null;
+    colon++;
+  }
+  if (colon >= bytes.length || bytes[colon] !== 0x3a) return null;
+  const dataStart = colon + 1;
+  const nextPos = dataStart + len;
+  if (nextPos > bytes.length) return null;
+  return { dataStart, nextPos };
+}
+
+function skipBencode(bytes: Uint8Array, pos: number, depth = 0): number {
+  if (depth > MAX_BENCODE_DEPTH || pos < 0 || pos >= bytes.length) return -1;
+  const c = bytes[pos];
+  if (c === 0x69) {
+    // 'i' <int> 'e'
+    const end = bytes.indexOf(0x65, pos + 1);
+    if (end < 0) return -1;
+    return end + 1;
+  }
+  if (c === 0x6c) {
+    // 'l' <items> 'e'
+    let cur = pos + 1;
+    while (cur < bytes.length && bytes[cur] !== 0x65) {
+      const next = skipBencode(bytes, cur, depth + 1);
+      if (next <= cur) return -1;
+      cur = next;
+    }
+    return cur < bytes.length && bytes[cur] === 0x65 ? cur + 1 : -1;
+  }
+  if (c === 0x64) {
+    // 'd' <str-key><val> 'e'
+    let cur = pos + 1;
+    while (cur < bytes.length && bytes[cur] !== 0x65) {
+      const keySpan = parseBencodeStringSpan(bytes, cur);
+      if (!keySpan) return -1;
+      const next = skipBencode(bytes, keySpan.nextPos, depth + 1);
+      if (next <= keySpan.nextPos) return -1;
+      cur = next;
+    }
+    return cur < bytes.length && bytes[cur] === 0x65 ? cur + 1 : -1;
+  }
+  const strSpan = parseBencodeStringSpan(bytes, pos);
+  return strSpan ? strSpan.nextPos : -1;
+}
+
 const $torrentUtils = {
   getMagnetLinkFromTorrentData(b64: string): string {
-    // Parse bencode `4:info` dict span and SHA-1 it via CryptoJS
     const bytes = base64ToBytes(b64);
-    const marker = [0x34, 0x3a, 0x69, 0x6e, 0x66, 0x6f]; // "4:info"
+    // Must start with a root bencode dictionary 'd'
+    if (bytes.length < 2 || bytes[0] !== 0x64) return "";
+
+    let cur = 1;
     let infoStart = -1;
-    for (let i = 0; i + marker.length < bytes.length; i++) {
-      let ok = true;
-      for (let j = 0; j < marker.length; j++) {
-        if (bytes[i + j] !== marker[j]) {
-          ok = false;
-          break;
-        }
-      }
-      if (ok) {
-        infoStart = i + marker.length;
+    let infoEnd = -1;
+    while (cur < bytes.length && bytes[cur] !== 0x65) {
+      const keySpan = parseBencodeStringSpan(bytes, cur);
+      if (!keySpan) return "";
+      const keyLen = keySpan.nextPos - keySpan.dataStart;
+      const isInfo =
+        keyLen === 4 &&
+        bytes[keySpan.dataStart] === 0x69 && // 'i'
+        bytes[keySpan.dataStart + 1] === 0x6e && // 'n'
+        bytes[keySpan.dataStart + 2] === 0x66 && // 'f'
+        bytes[keySpan.dataStart + 3] === 0x6f; // 'o'
+      const valStart = keySpan.nextPos;
+      const valEnd = skipBencode(bytes, valStart, 1);
+      if (valEnd <= valStart) return "";
+      if (isInfo) {
+        infoStart = valStart;
+        infoEnd = valEnd;
         break;
       }
+      cur = valEnd;
     }
-    if (infoStart < 0) return "";
+    if (infoStart < 0 || infoEnd <= infoStart) return "";
 
-    function skipBencode(pos: number): number {
-      const c = bytes[pos];
-      if (c === 0x69) {
-        // 'i'
-        const end = bytes.indexOf(0x65, pos + 1);
-        return end < 0 ? bytes.length : end + 1;
-      }
-      if (c === 0x6c || c === 0x64) {
-        // 'l' or 'd'
-        let cur = pos + 1;
-        while (cur < bytes.length && bytes[cur] !== 0x65) {
-          cur = skipBencode(cur);
-        }
-        return cur + 1;
-      }
-      let colon = pos;
-      while (colon < bytes.length && bytes[colon] !== 0x3a) colon++;
-      const len = Number(textDecoder.decode(bytes.subarray(pos, colon))) || 0;
-      return colon + 1 + len;
-    }
-
-    const infoEnd = skipBencode(infoStart);
     const infoSlice = bytes.subarray(infoStart, infoEnd);
     const wa = CryptoJSOrig.lib.WordArray.create(infoSlice as unknown as number[]);
     const hex = CryptoJSOrig.SHA1(wa).toString(CryptoJSOrig.enc.Hex);
@@ -892,7 +1007,15 @@ const $torrentUtils = {
 function installSeanimeGlobals() {
   const g = globalThis as Record<string, unknown>;
   g.__isOffline__ = false;
-  g.fetch = seanimeFetch;
+  try {
+    Object.defineProperty(g, "fetch", {
+      value: seanimeFetch,
+      writable: false,
+      configurable: false,
+    });
+  } catch {
+    g.fetch = seanimeFetch;
+  }
   g.LoadDoc = LoadDoc;
   g.Doc = Doc;
   g.CryptoJS = KuraCryptoJS;
@@ -917,8 +1040,7 @@ function installSeanimeGlobals() {
     return textEncoder.encode(JSON.stringify(v ?? ""));
   };
   g.$sleep = (ms: number) => {
-    // Non-blocking busy-free wait is async in JS; extensions that await it get a Promise
-    return new Promise((r) => setTimeout(r, Math.max(0, Number(ms) || 0)));
+    return new Promise((r) => workerSetTimeout(r, Math.max(0, Number(ms) || 0)));
   };
   g.$getUserPreference = (key: string): string | undefined => {
     const v = userPreferences[key];
@@ -968,6 +1090,7 @@ self.onmessage = async (ev: MessageEvent<IncomingMsg>) => {
 
   if (msg.kind === "init") {
     try {
+      lockdownAmbientGlobals();
       userPreferences = msg.data.userPrefs ?? {};
       let jsCode = msg.data.payload;
       if (msg.data.language.toLowerCase() === "typescript" || msg.data.language.toLowerCase() === "ts") {
@@ -986,9 +1109,9 @@ self.onmessage = async (ev: MessageEvent<IncomingMsg>) => {
         throw new Error(`Extension '${msg.data.id}' did not define a Provider class`);
       }
       ProviderCtor = ctor;
-      self.postMessage({ kind: "result", callId: msg.callId, ok: true, value: true });
+      workerPostMessage({ kind: "result", callId: msg.callId, ok: true, value: true });
     } catch (e) {
-      self.postMessage({
+      workerPostMessage({
         kind: "result",
         callId: msg.callId,
         ok: false,
@@ -1011,9 +1134,9 @@ self.onmessage = async (ev: MessageEvent<IncomingMsg>) => {
       const rawResult = await fn.apply(instance, msg.args ?? []);
       // Clone to plain JSON-serializable data before posting across StructuredClone boundary
       const cleanResult = rawResult === undefined ? null : JSON.parse(JSON.stringify(rawResult));
-      self.postMessage({ kind: "result", callId: msg.callId, ok: true, value: cleanResult });
+      workerPostMessage({ kind: "result", callId: msg.callId, ok: true, value: cleanResult });
     } catch (e) {
-      self.postMessage({
+      workerPostMessage({
         kind: "result",
         callId: msg.callId,
         ok: false,

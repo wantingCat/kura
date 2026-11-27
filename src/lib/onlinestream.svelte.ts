@@ -6,12 +6,20 @@ import {
 } from "./api";
 import {
   buildSeanimeMedia,
+  getInstalledExtensions,
   onlinestreamProviderHost,
   type OnlinestreamEpisodeDetails,
   type OnlinestreamEpisodeServer,
   type OnlinestreamSearchResult,
   type OnlinestreamVideoSource,
 } from "./extensions/host";
+import { getCachedOrLoadMediaDetail } from "./mediaDetail.svelte";
+import {
+  diceBigrams,
+  effectiveSeasonNumber,
+  normalizeMatchText,
+  normalizeTitle,
+} from "./titleMatch";
 
 // ---------------------------------------------------------------------------
 // Caches (24h Episode List TTL, 12m Resolved Stream TTL)
@@ -34,7 +42,6 @@ interface CachedServerResult {
 
 const episodeListCache = new Map<string, CachedEpisodeContainer>();
 const serverSourceCache = new Map<string, CachedServerResult>();
-const mediaDetailCache = new Map<number, MediaDetail>();
 
 export function invalidateOnlinestreamCache(anilistId?: number) {
   if (anilistId === undefined) {
@@ -55,52 +62,7 @@ export function invalidateOnlinestreamCache(anilistId?: number) {
 // Title Similarity Scorer (AniList -> Provider Search Result)
 // ---------------------------------------------------------------------------
 
-function normalizeMatchText(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[āâ]/g, "a")
-    .replace(/[īî]/g, "i")
-    .replace(/[ūû]/g, "u")
-    .replace(/[ēê]/g, "e")
-    .replace(/[ōô]/g, "o")
-    .replace(/['’]s\b/g, "")
-    .replace(/\((?:tv|ona|ova|movie|special|sub|dub)\)/g, " ")
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function extractSeasonTag(s: string): number {
-  const m1 = s.match(/\b(?:season\s*|s)(\d{1,2})\b/i);
-  if (m1) return Number(m1[1]);
-  const m2 = s.match(/\b(\d{1,2})(?:st|nd|rd|th)\s+season\b/i);
-  if (m2) return Number(m2[1]);
-  const m3 = s.match(/\s+(II|III|IV|V)\s*$/);
-  if (m3) return { II: 2, III: 3, IV: 4, V: 5 }[m3[1]] ?? 1;
-  return 1;
-}
-
-function diceBigrams(a: string, b: string): number {
-  if (a === b) return 1;
-  if (a.length < 2 || b.length < 2) return 0;
-  const counts = new Map<string, number>();
-  for (let i = 0; i < a.length - 1; i++) {
-    const bg = a.slice(i, i + 2);
-    counts.set(bg, (counts.get(bg) ?? 0) + 1);
-  }
-  let inter = 0;
-  for (let i = 0; i < b.length - 1; i++) {
-    const bg = b.slice(i, i + 2);
-    const c = counts.get(bg) ?? 0;
-    if (c > 0) {
-      counts.set(bg, c - 1);
-      inter++;
-    }
-  }
-  return (2 * inter) / (a.length - 1 + (b.length - 1));
-}
-
-export function scoreProviderCandidate(candTitle: string, detail: MediaDetail): number {
+function scoreProviderCandidate(candTitle: string, detail: MediaDetail): number {
   const targets = [
     detail.titleRomaji,
     detail.titleEnglish,
@@ -109,18 +71,25 @@ export function scoreProviderCandidate(candTitle: string, detail: MediaDetail): 
 
   if (targets.length === 0) return 0;
   const candNorm = normalizeMatchText(candTitle);
-  const candSeason = extractSeasonTag(candTitle);
+  const candBase = normalizeTitle(candTitle).cleanBaseTitle.toLowerCase();
+  const candSeason = effectiveSeasonNumber(candTitle);
   const targetSeason = Math.max(
-    extractSeasonTag(detail.titleRomaji ?? ""),
-    extractSeasonTag(detail.titleEnglish ?? ""),
+    effectiveSeasonNumber(detail.titleRomaji ?? ""),
+    effectiveSeasonNumber(detail.titleEnglish ?? ""),
+    effectiveSeasonNumber(detail.titleNative ?? ""),
   );
 
   let best = 0;
   for (const t of targets) {
     const tNorm = normalizeMatchText(t);
-    if (!tNorm) continue;
-    let sim = diceBigrams(candNorm, tNorm);
-    if (candNorm === tNorm) sim += 0.25;
+    const tBase = normalizeTitle(t).cleanBaseTitle.toLowerCase();
+    if (!tNorm && !tBase) continue;
+    const rawSim = tNorm ? diceBigrams(candNorm, tNorm) : 0;
+    const baseSim = candBase && tBase ? diceBigrams(candBase, tBase) : 0;
+    let sim = Math.max(rawSim, baseSim);
+    if (candNorm === tNorm || (candBase && candBase === tBase && candSeason === targetSeason)) {
+      sim += 0.25;
+    }
     if (sim > best) best = sim;
   }
 
@@ -138,7 +107,7 @@ export function scoreProviderCandidate(candTitle: string, detail: MediaDetail): 
 // Soft-Sub Inspection & Quality Ranking
 // ---------------------------------------------------------------------------
 
-export function extractValidSubtitles(src: OnlinestreamVideoSource): WebStreamSubtitleTrack[] {
+function extractValidSubtitles(src: OnlinestreamVideoSource): WebStreamSubtitleTrack[] {
   const out: WebStreamSubtitleTrack[] = [];
   for (const s of src.subtitles ?? []) {
     if (!s?.url) continue;
@@ -155,10 +124,6 @@ export function extractValidSubtitles(src: OnlinestreamVideoSource): WebStreamSu
     });
   }
   return out;
-}
-
-export function isCleanSoftSubSource(src: OnlinestreamVideoSource): boolean {
-  return extractValidSubtitles(src).length > 0;
 }
 
 function qualityScore(q: string): number {
@@ -191,12 +156,8 @@ export interface ResolvedWebStreamOption {
 }
 
 export async function listEnabledOnlinestreamProviders(): Promise<InstalledExtension[]> {
-  try {
-    const all = await api.listExtensions();
-    return all.filter((e) => e.enabled && e.extType === "onlinestream-provider");
-  } catch {
-    return [];
-  }
+  const all = await getInstalledExtensions();
+  return all.filter((e) => e.enabled && e.extType === "onlinestream-provider");
 }
 
 export async function searchProviderAnime(
@@ -242,12 +203,11 @@ export async function searchProviderAnime(
   return list;
 }
 
-export async function resolveProviderEpisodes(
+async function resolveProviderEpisodes(
   ext: InstalledExtension,
   detail: MediaDetail,
   forceRefresh = false,
 ): Promise<CachedEpisodeContainer> {
-  mediaDetailCache.set(detail.anilistId, detail);
   const cacheKey = `${ext.id}:${detail.anilistId}`;
   if (!forceRefresh) {
     const hit = episodeListCache.get(cacheKey);
@@ -314,8 +274,6 @@ export async function resolveEpisodeOptionsForProvider(
   const options: ResolvedWebStreamOption[] = [];
   let hardsubSkippedCount = 0;
 
-  // Query servers sequentially with early satisfaction so we don't hammer CDNs unnecessarily,
-  // or query up to 3 servers in parallel for fast picker results!
   const topServers = servers.slice(0, 4);
   const serverResults = await Promise.allSettled(
     topServers.map(async (srv) => {
@@ -387,7 +345,6 @@ export async function autoPlayWebEpisode(
   episodeNum: number,
   softSubOnly = true,
 ): Promise<ResolvedWebStreamOption> {
-  mediaDetailCache.set(detail.anilistId, detail);
   const providers = await listEnabledOnlinestreamProviders();
   if (providers.length === 0) {
     throw new Error(
@@ -447,8 +404,7 @@ export async function preloadNextWebEpisode(
   softSubOnly = true,
 ): Promise<boolean> {
   try {
-    const detail = mediaDetailCache.get(anilistId) ?? (await api.getMediaDetail(anilistId));
-    mediaDetailCache.set(anilistId, detail);
+    const detail = await getCachedOrLoadMediaDetail(anilistId);
     const providers = await listEnabledOnlinestreamProviders();
     for (const ext of providers) {
       try {
@@ -473,8 +429,4 @@ export async function preloadNextWebEpisode(
     /* ignore background preload failure */
   }
   return false;
-}
-
-export async function getCachedOrLoadMediaDetail(anilistId: number): Promise<MediaDetail> {
-  return mediaDetailCache.get(anilistId) ?? (await api.getMediaDetail(anilistId));
 }

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, type LookupResult, type TermEntry } from "$lib/api";
+  import { isMoraHigh, speakJapanese, splitMoras } from "$lib/ja";
 
   let {
     result,
@@ -96,44 +97,6 @@
     const fromBottom = vh - anchorY + 18;
     return Math.max(24, Math.min(fromBottom, vh - 360));
   });
-
-  function splitMoras(reading: string): string[] {
-    const small = new Set(["ゃ", "ゅ", "ょ", "ぁ", "ぃ", "ぅ", "ぇ", "ぉ", "ャ", "ュ", "ョ", "ァ", "ィ", "ゥ", "ェ", "ォ"]);
-    const chars = Array.from(reading);
-    const out: string[] = [];
-    for (let i = 0; i < chars.length; i++) {
-      if (i + 1 < chars.length && small.has(chars[i + 1])) {
-        out.push(chars[i] + chars[i + 1]);
-        i++;
-      } else {
-        out.push(chars[i]);
-      }
-    }
-    return out;
-  }
-
-  function isMoraHigh(moraIndex: number, downstep: number): boolean {
-    if (downstep === 0) {
-      return moraIndex > 0;
-    }
-    if (downstep === 1) {
-      return moraIndex === 0;
-    }
-    return moraIndex > 0 && moraIndex < downstep;
-  }
-
-  function speakJapanese(text: string) {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    try {
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = "ja-JP";
-      u.rate = 0.95;
-      window.speechSynthesis.speak(u);
-    } catch {
-      // ignore if speech synthesis unavailable
-    }
-  }
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -337,9 +300,7 @@
     max-height: 340px;
     display: flex;
     flex-direction: column;
-    background: rgba(14, 16, 26, 0.94);
-    backdrop-filter: blur(20px) saturate(140%);
-    -webkit-backdrop-filter: blur(20px) saturate(140%);
+    background: rgba(12, 14, 24, 0.98);
     font-family: var(--font-jp, "Noto Sans JP"), var(--font, system-ui), sans-serif;
     border: 1px solid rgba(139, 92, 246, 0.35);
     border-radius: 12px;

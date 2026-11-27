@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import {
     api,
+    type MarketplaceExtension,
     type MediaDetail,
     type RememberedBatch,
     type TorrentCandidate,
@@ -10,9 +11,13 @@
     type TorrentSessionStatus,
   } from "$lib/api";
   import { app } from "$lib/app.svelte";
-  import { searchInstalledTorrentExtensions } from "$lib/extensions/host";
+  import {
+    ensureCandidateMagnet,
+    searchInstalledTorrentExtensions,
+  } from "$lib/extensions/host";
+  import { cleanExtensionError, installUnifiedExtension } from "$lib/extensions/install";
   import { formatBytes } from "$lib/format";
-  import { getCachedOrLoadMediaDetail } from "$lib/onlinestream.svelte";
+  import { getCachedOrLoadMediaDetail } from "$lib/mediaDetail.svelte";
   import Icon from "./Icon.svelte";
 
   let {
@@ -51,6 +56,8 @@
   let showExtensions = $state(false);
   let extInput = $state("");
   let importingExt = $state(false);
+  let catalogChoices = $state<MarketplaceExtension[]>([]);
+  let lastFailedSessionId = "";
 
   // Batch memory & explicit batch file picker state
   let rememberedBatch = $state<RememberedBatch | null>(null);
@@ -95,15 +102,17 @@
 
   // Automatic failover if the active torrent has dead/unreachable seeders
   $effect(() => {
-    if (
-      liveSession &&
-      liveSession.state === "error" &&
-      failoverCount < 4 &&
-      nextUntriedCandidate
-    ) {
-      failoverCount += 1;
-      void tryNextCandidate();
-    }
+    const s = liveSession;
+    if (!s || s.state !== "error") return;
+    const failedId = s.sessionId;
+    if (failedId === lastFailedSessionId) return;
+    lastFailedSessionId = failedId;
+    untrack(() => {
+      if (failoverCount < 4 && nextUntriedCandidate) {
+        failoverCount += 1;
+        void tryNextCandidate();
+      }
+    });
   });
 
   async function search(q?: string) {
@@ -210,30 +219,33 @@
     }
   }
 
-  async function handleImportExtension() {
-    const val = extInput.trim();
+  async function handleImportExtension(manifestOverride?: string) {
+    const val = (manifestOverride ?? extInput).trim();
     if (!val || importingExt) return;
     importingExt = true;
     error = null;
     try {
-      if (val.startsWith("{") || val.endsWith(".json") || val.includes("manifest") || val.includes("/blob/")) {
-        try {
-          const installed = await api.installExtension(val);
-          await app.refreshExtensions();
-          extInput = "";
-          showExtensions = false;
-          app.toast(`Installed "${installed.name}" (${installed.extType})`, "info", 4500);
-          await search(customQuery || undefined);
-          return;
-        } catch (seErr) {
-          const s = String(seErr);
-          if (s.includes("UNSUPPORTED_SEANIME_TYPE") || s.includes("SEANIME_MANIFEST_ERR")) {
-            throw new Error(s.replace(/^[A-Z_]+:\s*/, ""));
-          }
-        }
+      const result = await installUnifiedExtension(val, {
+        preferredExtType: "anime-torrent-provider",
+        allowNativeTorrentFallback: true,
+      });
+      if (result.kind === "seanime_installed") {
+        extInput = "";
+        catalogChoices = [];
+        showExtensions = false;
+        app.toast(`Installed "${result.extension.name}" (${result.extension.extType})`, "info", 4500);
+        await search(customQuery || undefined);
+        return;
       }
-      extensions = await api.importTorrentExtension(val);
+      if (result.kind === "marketplace_catalog") {
+        catalogChoices = result.items;
+        extInput = "";
+        app.toast(`Found ${result.items.length} extension(s) — select one to install`, "info", 4000);
+        return;
+      }
+      extensions = result.extensions;
       extInput = "";
+      catalogChoices = [];
       showExtensions = false;
       app.toast(
         `Enabled ${extensions.filter((e) => e.enabled).length} torrent extension(s)`,
@@ -241,7 +253,7 @@
       );
       await search(customQuery || undefined);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = cleanExtensionError(e);
     } finally {
       importingExt = false;
     }
@@ -278,14 +290,16 @@
     }
     try {
       if (activeSessionId) {
-        await api.cancelTorrentSession(activeSessionId).catch(() => {});
+        const prevId = activeSessionId;
         activeSessionId = null;
+        await api.cancelTorrentSession(prevId).catch(() => {});
       }
+      const resolvedCandidate = await ensureCandidateMagnet(c);
       const status = await api.startTorrentSession({
         anilistId,
         epKey,
         episodeNum: episodeNumber,
-        candidate: c,
+        candidate: resolvedCandidate,
         modeOverride: chosenMode,
         fileIndex: explicitFileIndex ?? null,
       });
@@ -317,7 +331,8 @@
     loadingBatchFiles = true;
     error = null;
     try {
-      const files = await api.listTorrentFiles(c);
+      const resolvedCandidate = await ensureCandidateMagnet(c);
+      const files = await api.listTorrentFiles(resolvedCandidate);
       batchFilesByKey = { ...batchFilesByKey, [key]: files };
     } catch (e) {
       error = String(e);
@@ -340,8 +355,9 @@
   async function tryNextCandidate() {
     if (!nextUntriedCandidate) {
       if (activeSessionId) {
-        await api.cancelTorrentSession(activeSessionId).catch(() => {});
+        const prevId = activeSessionId;
         activeSessionId = null;
+        await api.cancelTorrentSession(prevId).catch(() => {});
       }
       return;
     }
@@ -350,8 +366,9 @@
 
   async function backToCandidateList() {
     if (activeSessionId) {
-      await api.cancelTorrentSession(activeSessionId).catch(() => {});
+      const prevId = activeSessionId;
       activeSessionId = null;
+      await api.cancelTorrentSession(prevId).catch(() => {});
     }
   }
 
@@ -380,12 +397,37 @@
 
   async function cancelActive() {
     if (activeSessionId) {
-      await api.cancelTorrentSession(activeSessionId);
+      const prevId = activeSessionId;
       activeSessionId = null;
+      await api.cancelTorrentSession(prevId).catch(() => {});
     }
     onclose();
   }
+
+  function dismissModal() {
+    if (
+      activeSessionId &&
+      (chosenMode === "stream" || chosenMode === "hybrid") &&
+      (!liveSession ||
+        (liveSession.state !== "streaming" && liveSession.state !== "completed"))
+    ) {
+      const prevId = activeSessionId;
+      activeSessionId = null;
+      void api.cancelTorrentSession(prevId).catch(() => {});
+    }
+    onclose();
+  }
+
+  function handleWindowKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      dismissModal();
+    }
+  }
 </script>
+
+<svelte:window onkeydown={handleWindowKeydown} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -394,7 +436,7 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
-  onclick={(e) => e.target === e.currentTarget && onclose()}
+  onclick={(e) => e.target === e.currentTarget && dismissModal()}
 >
   <div class="modal card">
     <header class="modal-head">
@@ -411,7 +453,7 @@
             class="btn btn-ghost btn-sm"
             onclick={() => {
               onswitchtoweb();
-              onclose();
+              dismissModal();
             }}
             title="Switch to Direct Soft-Sub Web Stream for this episode"
           >
@@ -427,7 +469,7 @@
         </button>
         <button
           class="btn btn-ghost btn-icon"
-          onclick={onclose}
+          onclick={dismissModal}
           aria-label="Close"
         >
           <Icon name="x" size={16} />
@@ -454,7 +496,7 @@
         >
           <input
             class="input"
-            placeholder="Paste extension manifest URL or source URL (e.g. https://…)"
+            placeholder="Paste manifest URL, GitHub repo URL, or RSS/API source URL"
             bind:value={extInput}
           />
           <button
@@ -465,6 +507,26 @@
             {importingExt ? "Importing…" : "+ Add Extension"}
           </button>
         </form>
+        {#if catalogChoices.length > 0}
+          <div class="ext-list">
+            {#each catalogChoices as item (item.id + item.manifestUri)}
+              <div class="ext-item">
+                <div class="ext-toggle">
+                  <strong>{item.name}</strong>
+                  <span class="badge">{item.type}</span>
+                </div>
+                <button
+                  type="button"
+                  class="btn btn-primary btn-sm"
+                  disabled={importingExt || !item.manifestUri}
+                  onclick={() => void handleImportExtension(item.manifestUri)}
+                >
+                  Install
+                </button>
+              </div>
+            {/each}
+          </div>
+        {/if}
         {#if extensions.length > 0}
           <div class="ext-list">
             {#each extensions as ext (ext.id)}
@@ -565,9 +627,11 @@
               Try Next Release ⏭
             </button>
           {/if}
-          <button class="btn btn-ghost" onclick={onclose}>
-            Keep running in background
-          </button>
+          {#if chosenMode !== "stream"}
+            <button class="btn btn-ghost" onclick={onclose}>
+              Keep running in background
+            </button>
+          {/if}
           <button class="btn btn-danger" onclick={cancelActive}>
             Cancel torrent
           </button>
@@ -584,7 +648,7 @@
             class="mode-pill"
             class:on={chosenMode === "stream"}
             onclick={() => (chosenMode = "stream")}
-            title="Stream into mpv/Memento using temporary cache (cleaned up after playback)"
+            title="Stream into Built-In Player / mpv using temporary cache (cleaned up after playback)"
           >
             Stream Only
           </button>
@@ -592,7 +656,7 @@
             class="mode-pill"
             class:on={chosenMode === "hybrid"}
             onclick={() => (chosenMode = "hybrid")}
-            title="Play immediately in mpv/Memento while saving permanently into your Kura library"
+            title="Play immediately in Built-In Player / mpv while saving permanently into your Kura library"
           >
             Stream & Save to Library
           </button>
@@ -694,7 +758,7 @@
                   </div>
                 </div>
                 <div class="cand-actions">
-                  {#if c.isBatch && (c.torrentUrl || c.magnetUri)}
+                  {#if c.isBatch}
                     <button
                       type="button"
                       class="btn btn-ghost btn-sm"
@@ -794,8 +858,10 @@
     flex-direction: column;
     gap: 14px;
     padding: 20px;
-    background: var(--surface);
-    border: var(--bw) solid var(--line);
+    background: var(--glass-tn-strong);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
     border-radius: var(--r-xl);
     box-shadow: var(--sticker-lg);
   }
@@ -1109,13 +1175,7 @@
     white-space: nowrap;
   }
 
-  /* Tokyo Night pass: glass surface + neon focus ------------------------ */
-  .modal {
-    background: var(--glass-tn-strong);
-    backdrop-filter: var(--blur-tn);
-    -webkit-backdrop-filter: var(--blur-tn);
-    border: 1px solid var(--glass-hairline);
-  }
+  /* Tokyo Night pass: neon focus ----------------------------------------- */
   button:focus-visible,
   input:focus-visible {
     outline: 2px solid var(--neon-violet);

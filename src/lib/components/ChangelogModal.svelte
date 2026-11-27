@@ -5,7 +5,10 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape" && changelogModal.visible) {
+    if (!changelogModal.visible) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopImmediatePropagation();
       changelogModal.close();
     }
   }
@@ -109,9 +112,11 @@
     transform: translate(-50%, -50%);
     width: min(640px, calc(100vw - 32px));
     max-height: calc(100vh - 64px);
-    background: var(--surface, #1e1416);
-    border: 1px solid rgba(139, 92, 246, 0.3);
-    border-radius: 20px;
+    background: var(--glass-tn-strong);
+    backdrop-filter: var(--blur-tn);
+    -webkit-backdrop-filter: var(--blur-tn);
+    border: 1px solid var(--glass-hairline);
+    border-radius: var(--r-xl);
     box-shadow:
       0 24px 70px rgba(0, 0, 0, 0.75),
       0 0 0 1px rgba(255, 255, 255, 0.05),
@@ -390,14 +395,7 @@
     transform: translateY(0);
   }
 
-  /* Tokyo Night pass: glass surface + neon focus ------------------------ */
-  .dialog {
-    background: var(--glass-tn-strong);
-    backdrop-filter: var(--blur-tn);
-    -webkit-backdrop-filter: var(--blur-tn);
-    border: 1px solid var(--glass-hairline);
-    border-radius: var(--r-xl);
-  }
+  /* Tokyo Night pass: neon focus ---------------------------------------- */
   button:focus-visible {
     outline: 2px solid var(--neon-violet);
     outline-offset: 2px;

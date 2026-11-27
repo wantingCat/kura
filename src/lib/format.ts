@@ -1,4 +1,5 @@
-import type { MediaCard, MediaDetail } from "./api";
+import type { EpisodeRow, FranchiseEntry, MediaCard, MediaDetail } from "./api";
+import { jaCour, jaFormat } from "./ja";
 
 type Titled = Pick<MediaCard, "titleEnglish" | "titleRomaji" | "titleNative">;
 
@@ -55,14 +56,52 @@ export const seasonLabel = (season: string | null, year: number | null) => {
   return [s, year].filter(Boolean).join(" ");
 };
 
+const HTML_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+  ndash: "–",
+  mdash: "—",
+  hellip: "…",
+  rsquo: "’",
+  lsquo: "‘",
+  rdquo: "”",
+  ldquo: "“",
+};
+
+function decodeHtmlEntities(s: string): string {
+  return s.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (full, ent: string) => {
+    if (ent[0] === "#") {
+      const code =
+        ent[1] === "x" || ent[1] === "X"
+          ? parseInt(ent.slice(2), 16)
+          : parseInt(ent.slice(1), 10);
+      if (Number.isFinite(code) && code > 0 && code <= 0x10ffff) {
+        try {
+          return String.fromCodePoint(code);
+        } catch {
+          return full;
+        }
+      }
+      return full;
+    }
+    return HTML_ENTITIES[ent.toLowerCase()] ?? full;
+  });
+}
+
 /** AniList descriptions contain light HTML (<br>, <i>) even in plain mode. */
 export function cleanDescription(d: string | null | undefined): string {
   if (!d) return "";
-  const withBreaks = d.replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>/gi, "\n");
-  const doc = new DOMParser().parseFromString(withBreaks, "text/html");
-  const text = doc.body.textContent ?? "";
-  return text
+  const stripped = d
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]*>/g, "");
+  return decodeHtmlEntities(stripped)
     .replace(/\(Source:[^)]*\)/gi, "")
+    .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -73,12 +112,27 @@ export function totalEpisodes(m: Pick<MediaCard, "episodes" | "format"> & { owne
   return null;
 }
 
+export function epTitle(e: EpisodeRow): string {
+  return e.titleEn || e.titleRomaji || e.titleJa || (e.isSpecial ? `Special ${e.number}` : `Episode ${e.number}`);
+}
+
+export function episodeProgressPct(e: EpisodeRow): number {
+  return e.progressPos && e.progressDur ? Math.min(100, (e.progressPos / e.progressDur) * 100) : 0;
+}
+
 // ---------------------------------------------------------------------------
 // Franchise grouping
 // ---------------------------------------------------------------------------
 
 const SERIES_FORMATS = ["TV", "TV_SHORT", "ONA"];
-export const isSeriesFormat = (f: string | null | undefined) => SERIES_FORMATS.includes(f ?? "");
+const isSeriesFormat = (f: string | null | undefined) => SERIES_FORMATS.includes(f ?? "");
+
+/** 第1期 for TV cours, otherwise the Japanese format (劇場版, OVA…). */
+export function seasonJa(s: FranchiseEntry, list: FranchiseEntry[]): string {
+  const tvish = (x: FranchiseEntry) => !x.format || isSeriesFormat(x.format);
+  if (!tvish(s)) return jaFormat(s.format);
+  return jaCour(list.filter(tvish).findIndex((x) => x.anilistId === s.anilistId) + 1);
+}
 
 /** A library card that may stand for several AniList entries of one franchise. */
 export interface LibraryItem extends MediaCard {
@@ -201,8 +255,21 @@ export function franchiseLabel(entry: Labelled, root: Labelled): string {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Cached Intl Formatters & Time / Byte Helpers
+// ---------------------------------------------------------------------------
+
+const DATE_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+});
+const SHORT_DATE_FORMATTER = new Intl.DateTimeFormat();
+const RELATIVE_TIME_FORMATTER = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+
 export function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  if (n < 1024) return `${Math.round(n)} B`;
   const units = ["KB", "MB", "GB", "TB"];
   let v = n / 1024;
   let i = 0;
@@ -217,26 +284,40 @@ export function formatDate(d: string | null | undefined): string {
   if (!d) return "";
   const date = new Date(d.length === 10 ? d + "T00:00:00" : d);
   if (isNaN(date.getTime())) return d;
-  return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  return DATE_FORMATTER.format(date);
 }
 
 /** Playback position as m:ss (or h:mm:ss). */
-export function clock(seconds: number): string {
-  const t = Math.max(0, Math.floor(seconds));
+export function clock(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) {
+    return "0:00";
+  }
+  const t = Math.floor(seconds);
   const h = Math.floor(t / 3600);
   const m = Math.floor((t % 3600) / 60);
   const s = String(t % 60).padStart(2, "0");
   return h ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
 }
 
+/** Human-readable active duration (e.g. "1h 24m", "24m", "45s", "0m"). */
+export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0m";
+  const sec = Math.floor(seconds);
+  const hrs = Math.floor(sec / 3600);
+  const mins = Math.floor((sec % 3600) / 60);
+  if (hrs > 0) return `${hrs}h ${mins}m`;
+  if (mins > 0) return `${mins}m`;
+  return `${sec}s`;
+}
+
 export function relativeTime(unixSecs: number): string {
+  if (!Number.isFinite(unixSecs)) return "";
   const diff = Date.now() / 1000 - unixSecs;
-  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
   if (diff < 60) return "just now";
-  if (diff < 3600) return rtf.format(-Math.round(diff / 60), "minute");
-  if (diff < 86400) return rtf.format(-Math.round(diff / 3600), "hour");
-  if (diff < 86400 * 30) return rtf.format(-Math.round(diff / 86400), "day");
-  return new Date(unixSecs * 1000).toLocaleDateString();
+  if (diff < 3600) return RELATIVE_TIME_FORMATTER.format(-Math.round(diff / 60), "minute");
+  if (diff < 86400) return RELATIVE_TIME_FORMATTER.format(-Math.round(diff / 3600), "hour");
+  if (diff < 86400 * 30) return RELATIVE_TIME_FORMATTER.format(-Math.round(diff / 86400), "day");
+  return SHORT_DATE_FORMATTER.format(new Date(unixSecs * 1000));
 }
 
 export function untilTime(unixSecs: number): string {
@@ -261,27 +342,4 @@ export function norm(s: string): string {
 
 export function searchHaystack(m: MediaCard | MediaDetail): string {
   return norm([m.titleEnglish, m.titleRomaji, m.titleNative, ...m.synonyms].filter(Boolean).join(" | "));
-}
-
-/** Readable text colour on top of AniList's cover colour. */
-export function accentFrom(hex: string | null | undefined): string {
-  if (!hex || !/^#[0-9a-f]{6}$/i.test(hex)) return "hsl(340 100% 74%)";
-  const r = parseInt(hex.slice(1, 3), 16) / 255;
-  const g = parseInt(hex.slice(3, 5), 16) / 255;
-  const b = parseInt(hex.slice(5, 7), 16) / 255;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  let h = 0;
-  const l = (max + min) / 2;
-  const d = max - min;
-  const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
-  if (d !== 0) {
-    if (max === r) h = ((g - b) / d) % 6;
-    else if (max === g) h = (b - r) / d + 2;
-    else h = (r - g) / d + 4;
-  }
-  h = Math.round(h * 60);
-  if (h < 0) h += 360;
-  // Force a bright, saturated variant so it reads well on dark backgrounds.
-  return `hsl(${h} ${Math.max(55, Math.round(s * 100))}% 72%)`;
 }
