@@ -8,7 +8,10 @@ use crate::db;
 use crate::extensions::{base64_decode, base64_encode};
 use crate::klog;
 use anyhow::{anyhow, bail, Context, Result};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE, USER_AGENT};
+use reqwest::header::{
+    HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, COOKIE, LOCATION, PROXY_AUTHORIZATION,
+    RANGE, USER_AGENT,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -38,7 +41,6 @@ pub fn get_mapping(
     provider_id: &str,
     anilist_id: i64,
 ) -> Result<Option<OnlinestreamMapping>> {
-    let _ = conn.execute_batch(db::SCHEMA_V9);
     conn.query_row(
         "SELECT provider_id, anilist_id, provider_anime_id, provider_title, updated_at
          FROM onlinestream_mappings
@@ -65,7 +67,6 @@ pub fn set_mapping(
     provider_anime_id: &str,
     provider_title: Option<&str>,
 ) -> Result<OnlinestreamMapping> {
-    let _ = conn.execute_batch(db::SCHEMA_V9);
     let ts = db::now();
     conn.execute(
         "INSERT INTO onlinestream_mappings
@@ -88,7 +89,6 @@ pub fn set_mapping(
 }
 
 pub fn remove_mapping(conn: &Connection, provider_id: &str, anilist_id: i64) -> Result<()> {
-    let _ = conn.execute_batch(db::SCHEMA_V9);
     conn.execute(
         "DELETE FROM onlinestream_mappings WHERE provider_id = ?1 AND anilist_id = ?2",
         params![provider_id, anilist_id],
@@ -171,16 +171,8 @@ struct ProxyInfo {
 
 static STREAM_PROXY: OnceLock<Result<ProxyInfo, String>> = OnceLock::new();
 
-fn generate_proxy_token() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id() as u128;
-    let mixed = nanos ^ (pid.wrapping_mul(0x9E37_79B9_7F4A_7C15_u128));
-    format!("{mixed:032x}")
-}
+const MAX_M3U8_LINES: usize = 25_000;
+const MAX_M3U8_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
 fn ensure_stream_proxy() -> Result<&'static ProxyInfo> {
     let res = STREAM_PROXY.get_or_init(|| {
@@ -193,18 +185,9 @@ fn ensure_stream_proxy() -> Result<&'static ProxyInfo> {
             .local_addr()
             .map_err(|e| format!("Failed to inspect proxy port: {e}"))?
             .port();
-        let token = generate_proxy_token();
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
-            .pool_idle_timeout(Duration::from_secs(90))
-            .pool_max_idle_per_host(24)
-            .tcp_nodelay(true)
-            .build()
-            .map_err(|e| format!("Failed to build proxy HTTP client: {e}"))?;
+        let token = crate::db::random_hex_token(24);
 
         let token_bg = token.clone();
-        let client_bg = client.clone();
         tauri::async_runtime::spawn(async move {
             let Ok(listener) = TcpListener::from_std(std_listener) else {
                 return;
@@ -216,9 +199,8 @@ fn ensure_stream_proxy() -> Result<&'static ProxyInfo> {
                 };
                 let _ = socket.set_nodelay(true);
                 let tok = token_bg.clone();
-                let cli = client_bg.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Err(e) = handle_proxy_connection(socket, port, &tok, &cli).await {
+                    if let Err(e) = handle_proxy_connection(socket, port, &tok).await {
                         let msg = e.to_string();
                         // Broken pipe / aborted segment seeks from mpv are normal during scrubbing
                         if !msg.contains("os error 10053")
@@ -244,6 +226,10 @@ fn ensure_stream_proxy() -> Result<&'static ProxyInfo> {
 /// Build a local `http://127.0.0.1:<port>/proxy?...` URL that injects custom upstream headers
 /// and transparently rewrites `.m3u8` manifests so `libmpv` never hits CDN 403 hotlink checks.
 pub fn build_proxy_url(target_url: &str, headers: &HashMap<String, String>) -> Result<String> {
+    let parsed = reqwest::Url::parse(target_url.trim()).context("Invalid stream URL")?;
+    if !crate::extensions::is_safe_redirect_url(&parsed) {
+        bail!("Blocked unsafe stream URL targeting local or private network");
+    }
     let info = ensure_stream_proxy()?;
     let hdrs_json = serde_json::to_vec(headers)?;
     let hdrs_b64 = base64_encode(&hdrs_json);
@@ -251,7 +237,7 @@ pub fn build_proxy_url(target_url: &str, headers: &HashMap<String, String>) -> R
     Ok(format_proxied_url(
         &proxy_base,
         &info.token,
-        target_url,
+        parsed.as_str(),
         &hdrs_b64,
     ))
 }
@@ -295,27 +281,34 @@ pub fn rewrite_m3u8_playlist(
         } else {
             trimmed.to_string()
         };
+        let is_safe = reqwest::Url::parse(&resolved)
+            .map(|u| crate::extensions::is_safe_redirect_url(&u))
+            .unwrap_or(false);
+        if !is_safe {
+            return String::new();
+        }
         format_proxied_url(proxy_base, token, &resolved, hdrs_b64)
     };
 
-    let mut out = String::with_capacity(content.len() + 1024);
-    for (idx, line) in content.lines().enumerate() {
+    let mut out = String::with_capacity(content.len().min(MAX_M3U8_OUTPUT_BYTES) + 1024);
+    for (idx, line) in content.lines().take(MAX_M3U8_LINES).enumerate() {
+        let trimmed = line.trim();
+        let next_line = if trimmed.is_empty() {
+            String::new()
+        } else if trimmed.starts_with('#') {
+            rewrite_tag_uri_attributes(trimmed, &resolve_and_wrap)
+                .unwrap_or_else(|| trimmed.to_string())
+        } else {
+            resolve_and_wrap(trimmed)
+        };
+        let extra = usize::from(idx > 0) + next_line.len();
+        if out.len().saturating_add(extra) > MAX_M3U8_OUTPUT_BYTES {
+            break;
+        }
         if idx > 0 {
             out.push('\n');
         }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('#') {
-            if let Some(rewritten_tag) = rewrite_tag_uri_attributes(trimmed, &resolve_and_wrap) {
-                out.push_str(&rewritten_tag);
-            } else {
-                out.push_str(trimmed);
-            }
-        } else {
-            out.push_str(&resolve_and_wrap(trimmed));
-        }
+        out.push_str(&next_line);
     }
     out
 }
@@ -352,7 +345,6 @@ async fn handle_proxy_connection(
     mut stream: TcpStream,
     port: u16,
     expected_token: &str,
-    client: &reqwest::Client,
 ) -> Result<()> {
     let mut req_buf = vec![0u8; 16_384];
     let mut read_len = 0usize;
@@ -380,7 +372,7 @@ async fn handle_proxy_connection(
     let raw_target = parts.next().unwrap_or("/");
 
     if method.eq_ignore_ascii_case("OPTIONS") {
-        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n";
+        let resp = "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n";
         stream.write_all(resp.as_bytes()).await?;
         return Ok(());
     }
@@ -454,17 +446,75 @@ async fn handle_proxy_connection(
         }
     }
 
-    let mut resp = client
-        .get(target_url)
-        .headers(upstream_headers)
-        .send()
-        .await
-        .with_context(|| format!("upstream proxy GET failed for {target_url}"))?;
+    let is_head = method.eq_ignore_ascii_case("HEAD");
+    let mut current_url = target_url.clone();
+    let mut final_resp_opt: Option<(reqwest::Response, String)> = None;
+
+    for hop in 0..=8 {
+        let Ok((hop_url, domain_opt, addrs)) =
+            crate::extensions::validate_and_resolve_public_url(&current_url).await
+        else {
+            stream
+                .write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
+                .await?;
+            return Ok(());
+        };
+        let client = crate::extensions::build_pinned_http_client(
+            domain_opt.as_deref(),
+            &addrs,
+            Duration::from_secs(15),
+            Some(Duration::from_secs(30)),
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+
+        let req_method = if is_head {
+            reqwest::Method::HEAD
+        } else {
+            reqwest::Method::GET
+        };
+        let resp = client
+            .request(req_method, hop_url.clone())
+            .headers(upstream_headers.clone())
+            .send()
+            .await
+            .map_err(|e| anyhow::Error::new(e.without_url()))
+            .context("upstream proxy GET failed")?;
+
+        if matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            if let Some(loc_val) = resp.headers().get(LOCATION) {
+                if hop >= 8 {
+                    bail!("upstream stream exceeded 8 redirects");
+                }
+                let Ok(loc_str) = loc_val.to_str() else {
+                    bail!("invalid upstream redirect Location header");
+                };
+                let Ok(next_url) = hop_url.join(loc_str) else {
+                    bail!("invalid upstream redirect Location URL");
+                };
+                if !crate::extensions::same_origin(&hop_url, &next_url) {
+                    upstream_headers.remove(COOKIE);
+                    upstream_headers.remove(AUTHORIZATION);
+                    upstream_headers.remove(PROXY_AUTHORIZATION);
+                }
+                current_url = next_url.to_string();
+                continue;
+            }
+        }
+
+        final_resp_opt = Some((resp, hop_url.to_string()));
+        break;
+    }
+
+    let Some((mut resp, final_url)) = final_resp_opt else {
+        stream
+            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+            .await?;
+        return Ok(());
+    };
 
     let status = resp.status();
     let status_code = status.as_u16();
     let reason = status.canonical_reason().unwrap_or("OK");
-    let final_url = resp.url().to_string();
 
     let upstream_ct = resp
         .headers()
@@ -481,60 +531,83 @@ async fn handle_proxy_connection(
     let looks_like_m3u8_by_meta = upstream_ct.to_ascii_lowercase().contains("mpegurl")
         || url_path_lower.ends_with(".m3u8");
 
-    // Peek first chunk so we can also detect disguised `#EXTM3U` playlists (e.g. served as `.txt`/`.png`)
-    // AND fix disguised `0x47` MPEG-TS segments served with `image/*` MIME types!
-    let first_chunk = resp.chunk().await?;
-    let first_bytes = first_chunk.as_deref().unwrap_or(&[]);
-    let trimmed_start = first_bytes
-        .strip_prefix(&[0xEF, 0xBB, 0xBF])
-        .unwrap_or(first_bytes);
-    let starts_with_extm3u = trimmed_start.starts_with(b"#EXTM3U");
+    // Peek just enough leading bytes to detect `#EXTM3U` (including BOM / leading whitespace
+    // or disguised `.txt`/`.png` playlists) WITHOUT buffering >4 KiB of disguised MP4/TS video streams!
+    let mut prefix_buf: Vec<u8> = Vec::new();
+    if !is_head {
+        loop {
+            let without_bom = prefix_buf
+                .strip_prefix(&[0xEF, 0xBB, 0xBF])
+                .unwrap_or(&prefix_buf);
+            let non_ws_start = without_bom
+                .iter()
+                .position(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                .map(|idx| &without_bom[idx..])
+                .unwrap_or(&[]);
 
-    if status.is_success() && (looks_like_m3u8_by_meta || starts_with_extm3u) {
-        let mut body = Vec::from(first_bytes);
-        while let Some(chunk) = resp.chunk().await? {
-            body.extend_from_slice(&chunk);
-            if body.len() > 8 * 1024 * 1024 {
+            if non_ws_start.len() >= 7
+                || (!non_ws_start.is_empty() && !b"#EXTM3U".starts_with(non_ws_start))
+                || prefix_buf.len() >= 4096
+            {
                 break;
             }
+            let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|e| anyhow::Error::new(e.without_url()))?
+            else {
+                break;
+            };
+            prefix_buf.extend_from_slice(&chunk);
+        }
+    }
+
+    let trimmed_start = prefix_buf
+        .strip_prefix(&[0xEF, 0xBB, 0xBF])
+        .unwrap_or(&prefix_buf);
+    let trimmed_after_ws = trimmed_start
+        .iter()
+        .position(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+        .map(|idx| &trimmed_start[idx..])
+        .unwrap_or(&[]);
+    let starts_with_extm3u = trimmed_after_ws.starts_with(b"#EXTM3U");
+
+    // ONLY buffer & rewrite as an HLS playlist when the body actually begins with `#EXTM3U`!
+    if status.is_success() && !is_head && starts_with_extm3u {
+        let mut body = prefix_buf;
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| anyhow::Error::new(e.without_url()))?
+        {
+            if body.len().saturating_add(chunk.len()) > 8 * 1024 * 1024 {
+                bail!("upstream m3u8 playlist exceeds 8 MiB limit");
+            }
+            body.extend_from_slice(&chunk);
         }
         let text = String::from_utf8_lossy(&body);
-        if text.trim_start_matches('\u{feff}').trim_start().starts_with("#EXTM3U") {
-            let proxy_base = format!("http://127.0.0.1:{port}");
-            let rewritten =
-                rewrite_m3u8_playlist(&text, &final_url, &proxy_base, expected_token, &hdrs_b64);
-            let out_bytes = rewritten.as_bytes();
-            let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
-                out_bytes.len()
-            );
-            stream.write_all(header.as_bytes()).await?;
-            if !method.eq_ignore_ascii_case("HEAD") {
-                stream.write_all(out_bytes).await?;
-            }
-            stream.flush().await?;
-            return Ok(());
-        }
-
-        // Not actually `#EXTM3U`; write buffered body as-is
+        let proxy_base = format!("http://127.0.0.1:{port}");
+        let rewritten =
+            rewrite_m3u8_playlist(&text, &final_url, &proxy_base, expected_token, &hdrs_b64);
+        let out_bytes = rewritten.as_bytes();
         let header = format!(
-            "HTTP/1.1 {status_code} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
-            if upstream_ct.is_empty() { "application/octet-stream" } else { &upstream_ct },
-            body.len()
+            "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+            out_bytes.len()
         );
         stream.write_all(header.as_bytes()).await?;
-        if !method.eq_ignore_ascii_case("HEAD") {
-            stream.write_all(&body).await?;
-        }
+        stream.write_all(out_bytes).await?;
         stream.flush().await?;
         return Ok(());
     }
 
-    // Binary stream (MPEG-TS segment, fMP4 segment, AES-128 key, MP4 video, or VTT subtitle)
-    let effective_ct = if first_bytes.first() == Some(&0x47)
-        && upstream_ct.to_ascii_lowercase().starts_with("image/")
+    // Binary stream (MPEG-TS segment, fMP4 segment, AES-128 key, MP4 video, disguised video at `.m3u8`, or VTT subtitle):
+    // stream `prefix_buf` followed by all remaining `resp.chunk()` data without any 8 MiB truncation!
+    let effective_ct = if prefix_buf.first() == Some(&0x47)
+        && (upstream_ct.to_ascii_lowercase().starts_with("image/") || looks_like_m3u8_by_meta)
     {
         "video/mp2t"
+    } else if looks_like_m3u8_by_meta && !starts_with_extm3u && !is_head {
+        "application/octet-stream"
     } else if upstream_ct.is_empty() {
         "application/octet-stream"
     } else {
@@ -542,7 +615,7 @@ async fn handle_proxy_connection(
     };
 
     let mut resp_hdr = format!(
-        "HTTP/1.1 {status_code} {reason}\r\nContent-Type: {effective_ct}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n"
+        "HTTP/1.1 {status_code} {reason}\r\nContent-Type: {effective_ct}\r\nConnection: close\r\n"
     );
     for passthrough in ["content-length", "content-range", "accept-ranges"] {
         if let Some(val) = resp.headers().get(passthrough).and_then(|v| v.to_str().ok()) {
@@ -552,11 +625,15 @@ async fn handle_proxy_connection(
     resp_hdr.push_str("\r\n");
 
     stream.write_all(resp_hdr.as_bytes()).await?;
-    if !method.eq_ignore_ascii_case("HEAD") {
-        if !first_bytes.is_empty() {
-            stream.write_all(first_bytes).await?;
+    if !is_head {
+        if !prefix_buf.is_empty() {
+            stream.write_all(&prefix_buf).await?;
         }
-        while let Some(chunk) = resp.chunk().await? {
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| anyhow::Error::new(e.without_url()))?
+        {
             stream.write_all(&chunk).await?;
         }
     }
@@ -638,5 +715,41 @@ https://cdn2.example.org/seg-002.ts
         assert!(get_mapping(&conn, "demo-provider", 154587)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn m3u8_rewriter_refuses_loopback_private_urls_and_caps_lines() {
+        let malicious = "\
+#EXTM3U
+#EXT-X-KEY:METHOD=AES-128,URI=\"http://127.0.0.1:8765/steal\"
+#EXTINF:4.0,
+http://192.168.1.1/admin
+#EXTINF:4.0,
+http://localhost:14876/oauth/token
+#EXTINF:4.0,
+https://cdn.example.org/valid.ts
+";
+        let out = rewrite_m3u8_playlist(
+            malicious,
+            "https://cdn.example.org/live/index.m3u8",
+            "http://127.0.0.1:50000",
+            "secret_tok",
+            "aGRycw==",
+        );
+        assert!(!out.contains("127.0.0.1%3A8765"));
+        assert!(!out.contains("192.168.1.1"));
+        assert!(!out.contains("localhost"));
+        assert!(out.contains(&url_encode_component("https://cdn.example.org/valid.ts")));
+
+        let huge = format!("#EXTM3U\n{}", "seg.ts\n".repeat(30_000));
+        let capped = rewrite_m3u8_playlist(
+            &huge,
+            "https://cdn.example.org/live/index.m3u8",
+            "http://127.0.0.1:50000",
+            "secret_tok",
+            "aGRycw==",
+        );
+        assert!(capped.lines().count() <= MAX_M3U8_LINES);
+        assert!(capped.len() <= MAX_M3U8_OUTPUT_BYTES);
     }
 }

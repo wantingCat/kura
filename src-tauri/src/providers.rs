@@ -405,7 +405,10 @@ impl Providers {
             if let Some(t) = token.filter(|s| !s.trim().is_empty()) {
                 req = req.header("Authorization", format!("Bearer {}", t.trim()));
             }
-            let resp = req.send().await?;
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| anyhow::Error::new(e.without_url()))?;
 
             let remaining = resp
                 .headers()
@@ -435,7 +438,10 @@ impl Providers {
             }
 
             let status = resp.status();
-            let v: Value = resp.json().await?;
+            let v: Value = resp
+                .json()
+                .await
+                .map_err(|e| anyhow::Error::new(e.without_url()))?;
             if let Some(errors) = v.get("errors").and_then(|e| e.as_array()) {
                 if !errors.is_empty() && v.get("data").map_or(true, |d| d.is_null()) {
                     bail!("AniList error ({status}): {}", errors[0].get("message").and_then(|m| m.as_str()).unwrap_or("unknown"));
@@ -1025,11 +1031,19 @@ impl Providers {
     pub async fn anizip_data(&self, anilist_id: i64) -> Result<AniZipData> {
         self.anizip_rl.wait().await;
         let url = format!("https://api.ani.zip/mappings?anilist_id={anilist_id}");
-        let resp = self.http.get(&url).send().await?;
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| anyhow::Error::new(e.without_url()))?;
         if !resp.status().is_success() {
             bail!("ani.zip returned {}", resp.status());
         }
-        let v: Value = resp.json().await?;
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| anyhow::Error::new(e.without_url()))?;
         let eps = v.get("episodes").and_then(|e| e.as_object());
 
         let mut episodes = Vec::new();
@@ -1130,20 +1144,23 @@ impl Providers {
         }
     }
 
-    /// Episodes from ani.zip, keyed to the AniList entry's own numbering.
-    pub async fn anizip_episodes(&self, anilist_id: i64) -> Result<Vec<EpisodeMeta>> {
-        let data = self.anizip_data(anilist_id).await?;
-        Ok(data.episodes)
-    }
-
     /// High-resolution anime artwork from Fanart.tv using a user-provided API key.
     pub async fn fanart_tv_images(&self, thetvdb_id: i64, api_key: &str) -> Result<AniZipImages> {
         let url = format!("https://webservice.fanart.tv/v3/anime/{thetvdb_id}?api_key={api_key}");
-        let resp = self.http.get(&url).timeout(Duration::from_secs(6)).send().await?;
+        let resp = self
+            .http
+            .get(&url)
+            .timeout(Duration::from_secs(6))
+            .send()
+            .await
+            .map_err(|e| anyhow::Error::new(e.without_url()))?;
         if !resp.status().is_success() {
             bail!("Fanart.tv returned {}", resp.status());
         }
-        let v: Value = resp.json().await?;
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| anyhow::Error::new(e.without_url()))?;
         let mut images = AniZipImages::default();
 
         // ClearLogo: check clearlogo or hdclearart array, prefer English ("en") or first item
@@ -1179,7 +1196,13 @@ impl Providers {
         loop {
             self.jikan_rl.wait().await;
             let url = format!("https://api.jikan.moe/v4/anime/{mal_id}/episodes?page={page}");
-            let resp = self.http.get(&url).timeout(Duration::from_secs(5)).send().await?;
+            let resp = self
+                .http
+                .get(&url)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+                .map_err(|e| anyhow::Error::new(e.without_url()))?;
             if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;
@@ -1187,7 +1210,10 @@ impl Providers {
             if !resp.status().is_success() {
                 bail!("Jikan returned {}", resp.status());
             }
-            let v: Value = resp.json().await?;
+            let v: Value = resp
+                .json()
+                .await
+                .map_err(|e| anyhow::Error::new(e.without_url()))?;
             let data = v["data"].as_array().cloned().unwrap_or_default();
             for e in data {
                 let n = e["mal_id"].as_i64().unwrap_or(0);

@@ -8,16 +8,16 @@ use regex::Regex;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::io::SeekFrom;
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 
 // ---------------------------------------------------------------------------
 // Public Types (Frontend <-> Backend)
@@ -193,14 +193,10 @@ pub fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-pub fn hex_decode_20(hex: &str) -> Option<[u8; 20]> {
-    parse_btih_20(hex)
-}
-
 /// Decode a 32-character RFC 4648 Base32 `btih` string (used by SubsPlease & Anidex magnets) into 20 bytes.
 pub fn base32_decode_20(b32: &str) -> Option<[u8; 20]> {
     let clean = b32.trim();
-    if clean.len() != 32 {
+    if !clean.is_ascii() || clean.len() != 32 {
         return None;
     }
     let mut out = [0u8; 20];
@@ -235,14 +231,26 @@ pub fn base32_decode_20(b32: &str) -> Option<[u8; 20]> {
 /// Parse either a 40-char hex or 32-char RFC 4648 Base32 `btih` info_hash into 20 raw bytes.
 pub fn parse_btih_20(raw: &str) -> Option<[u8; 20]> {
     let clean = raw.trim();
-    if clean.len() == 40 {
+    if !clean.is_ascii() {
+        return None;
+    }
+    let bytes = clean.as_bytes();
+    if bytes.len() == 40 {
+        let hex_nibble = |b: u8| -> Option<u8> {
+            match b {
+                b'0'..=b'9' => Some(b - b'0'),
+                b'a'..=b'f' => Some(b - b'a' + 10),
+                b'A'..=b'F' => Some(b - b'A' + 10),
+                _ => None,
+            }
+        };
         let mut out = [0u8; 20];
-        for i in 0..20 {
-            out[i] = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16).ok()?;
+        for (i, pair) in bytes.chunks_exact(2).enumerate() {
+            out[i] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
         }
         return Some(out);
     }
-    if clean.len() == 32 {
+    if bytes.len() == 32 {
         return base32_decode_20(clean);
     }
     None
@@ -325,22 +333,29 @@ impl BVal {
     }
 }
 
+const MAX_BENCODE_DEPTH: usize = 64;
+
 pub fn parse_bencode(input: &[u8]) -> Result<(BVal, usize)> {
-    parse_bencode_at(input, 0)
+    parse_bencode_at(input, 0, 0)
 }
 
-fn parse_bencode_at(input: &[u8], pos: usize) -> Result<(BVal, usize)> {
+fn parse_bencode_at(input: &[u8], pos: usize, depth: usize) -> Result<(BVal, usize)> {
+    if depth > MAX_BENCODE_DEPTH {
+        bail!("Bencode nesting depth exceeds maximum of {MAX_BENCODE_DEPTH}");
+    }
     if pos >= input.len() {
         bail!("Unexpected EOF in bencode");
     }
     match input[pos] {
         b'i' => {
-            let end = input[pos + 1..]
+            let rel_end = input[pos + 1..]
                 .iter()
                 .position(|&b| b == b'e')
-                .context("Unterminated integer in bencode")?
-                + pos
-                + 1;
+                .context("Unterminated integer in bencode")?;
+            let end = pos
+                .checked_add(1)
+                .and_then(|p| p.checked_add(rel_end))
+                .ok_or_else(|| anyhow::anyhow!("Bencode integer offset overflow"))?;
             let s = std::str::from_utf8(&input[pos + 1..end])?;
             let n: i64 = s.parse()?;
             Ok((BVal::Int(n), end + 1))
@@ -349,7 +364,7 @@ fn parse_bencode_at(input: &[u8], pos: usize) -> Result<(BVal, usize)> {
             let mut cur = pos + 1;
             let mut list = Vec::new();
             while cur < input.len() && input[cur] != b'e' {
-                let (v, next) = parse_bencode_at(input, cur)?;
+                let (v, next) = parse_bencode_at(input, cur, depth + 1)?;
                 list.push(v);
                 cur = next;
             }
@@ -362,12 +377,12 @@ fn parse_bencode_at(input: &[u8], pos: usize) -> Result<(BVal, usize)> {
             let mut cur = pos + 1;
             let mut entries = Vec::new();
             while cur < input.len() && input[cur] != b'e' {
-                let (k_val, val_start) = parse_bencode_at(input, cur)?;
+                let (k_val, val_start) = parse_bencode_at(input, cur, depth + 1)?;
                 let key = match k_val {
                     BVal::Bytes(b) => b,
                     _ => bail!("Dictionary key must be byte string"),
                 };
-                let (val, val_end) = parse_bencode_at(input, val_start)?;
+                let (val, val_end) = parse_bencode_at(input, val_start, depth + 1)?;
                 entries.push((key, val, val_start, val_end));
                 cur = val_end;
             }
@@ -377,15 +392,21 @@ fn parse_bencode_at(input: &[u8], pos: usize) -> Result<(BVal, usize)> {
             Ok((BVal::Dict(entries), cur + 1))
         }
         b'0'..=b'9' => {
-            let colon = input[pos..]
+            let rel_colon = input[pos..]
                 .iter()
                 .position(|&b| b == b':')
-                .context("Missing colon in byte string")?
-                + pos;
+                .context("Missing colon in byte string")?;
+            let colon = pos
+                .checked_add(rel_colon)
+                .ok_or_else(|| anyhow::anyhow!("Bencode colon offset overflow"))?;
             let len_str = std::str::from_utf8(&input[pos..colon])?;
             let len: usize = len_str.parse()?;
-            let start = colon + 1;
-            let end = start + len;
+            let start = colon
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("Bencode start offset overflow"))?;
+            let end = start
+                .checked_add(len)
+                .ok_or_else(|| anyhow::anyhow!("Bencode length overflow"))?;
             if end > input.len() {
                 bail!("Byte string exceeds input length");
             }
@@ -428,6 +449,24 @@ pub const PUBLIC_FALLBACK_TRACKERS: [&str; 12] = [
     "udp://p4p.arenabg.com:1337/announce",
 ];
 
+const MIN_PIECE_LENGTH: i64 = 16_384;
+const MAX_PIECE_LENGTH: i64 = 67_108_864;
+const MAX_TARGET_FILE_BYTES: u64 = 128 * 1024 * 1024 * 1024;
+
+fn is_video_filename(name: &str) -> bool {
+    let leaf = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
+    let Some((stem, ext)) = leaf.rsplit_once('.') else {
+        return false;
+    };
+    if stem.trim().is_empty() {
+        return false;
+    }
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "mkv" | "mp4" | "webm" | "avi"
+    )
+}
+
 pub fn parse_torrent_bytes(raw: &[u8], target_episode: Option<i64>) -> Result<TorrentMeta> {
     parse_torrent_bytes_with_index(raw, target_episode, None).map(|(m, _)| m)
 }
@@ -442,14 +481,6 @@ pub fn parse_torrent_file_entries(raw: &[u8]) -> Result<Vec<TorrentFileEntry>> {
         .and_then(|v| v.as_str())
         .unwrap_or_else(|| "video.mkv".to_string());
 
-    let is_video = |n: &str| {
-        let lower = n.to_ascii_lowercase();
-        lower.ends_with(".mkv")
-            || lower.ends_with(".mp4")
-            || lower.ends_with(".webm")
-            || lower.ends_with(".avi")
-    };
-
     if let Some(len) = info.dict_get(b"length").and_then(|v| v.as_int()) {
         let parsed = crate::parser::parse_filename(&name);
         return Ok(vec![TorrentFileEntry {
@@ -457,7 +488,7 @@ pub fn parse_torrent_file_entries(raw: &[u8]) -> Result<Vec<TorrentFileEntry>> {
             name: name.clone(),
             length: len.max(0) as u64,
             detected_episode: parsed.episode.map(|e| e as i64),
-            is_video: is_video(&name),
+            is_video: is_video_filename(&name),
         }]);
     }
 
@@ -479,15 +510,20 @@ pub fn parse_torrent_file_entries(raw: &[u8]) -> Result<Vec<TorrentFileEntry>> {
                 parts
                     .iter()
                     .filter_map(|p| p.as_str())
+                    .filter(|s| !s.is_empty())
                     .collect::<Vec<_>>()
                     .join("/")
             })
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| format!("file_{idx}.mkv"));
+            .unwrap_or_else(|| format!("file_{idx}"));
         let leaf = file_name.rsplit('/').next().unwrap_or(&file_name);
         let parsed = crate::parser::parse_filename(leaf);
-        let is_vid = is_video(leaf);
-        let det_ep = if parsed.extra || parsed.special.is_some() {
+        let is_vid = is_video_filename(leaf);
+        let in_extra_subfolder = file_name
+            .rsplit('/')
+            .skip(1)
+            .any(|seg| crate::parser::classify_subfolder(seg).is_some());
+        let det_ep = if parsed.extra || parsed.special.is_some() || in_extra_subfolder {
             None
         } else {
             parsed.episode.map(|e| e as i64)
@@ -518,15 +554,20 @@ pub fn parse_torrent_bytes_with_index(
         .dict_get(b"name")
         .and_then(|v| v.as_str())
         .unwrap_or_else(|| "video.mkv".to_string());
-    let piece_length = info
+    let piece_length_i64 = info
         .dict_get(b"piece length")
         .and_then(|v| v.as_int())
-        .context("Missing `piece length`")? as u64;
+        .context("Missing `piece length`")?;
+    if !(MIN_PIECE_LENGTH..=MAX_PIECE_LENGTH).contains(&piece_length_i64) {
+        bail!("Invalid `piece length` in .torrent: {piece_length_i64}");
+    }
+    let piece_length = piece_length_i64 as u64;
+
     let pieces_raw = info
         .dict_get(b"pieces")
         .and_then(|v| v.as_bytes())
         .context("Missing `pieces`")?;
-    if pieces_raw.len() % 20 != 0 {
+    if pieces_raw.is_empty() || pieces_raw.len() % 20 != 0 {
         bail!("Invalid `pieces` length in .torrent");
     }
     let mut pieces = Vec::with_capacity(pieces_raw.len() / 20);
@@ -565,17 +606,35 @@ pub fn parse_torrent_bytes_with_index(
     }
 
     // Single-file vs Multi-file
-    if let Some(len) = info.dict_get(b"length").and_then(|v| v.as_int()) {
-        let total = len.max(1) as u64;
+    if let Some(len_i64) = info.dict_get(b"length").and_then(|v| v.as_int()) {
+        if len_i64 <= 0 {
+            bail!("Invalid `length` in .torrent: {len_i64}");
+        }
+        let total = len_i64 as u64;
+        if total > MAX_TARGET_FILE_BYTES {
+            bail!("Torrent file exceeds 128 GiB safety limit");
+        }
+        let expected_pieces = total.div_ceil(piece_length) as usize;
+        if pieces.len() != expected_pieces {
+            bail!(
+                "Mismatched `pieces` count in .torrent ({} != {expected_pieces})",
+                pieces.len()
+            );
+        }
+        let leaf = name.rsplit(['/', '\\']).next().unwrap_or(&name);
+        let safe_name = sanitize_filename(leaf);
+        if !is_video_filename(&safe_name) {
+            bail!("Refusing non-video torrent file '{safe_name}'");
+        }
         return Ok((
             TorrentMeta {
                 info_hash,
-                name: name.clone(),
+                name,
                 piece_length,
                 pieces,
                 total_length: total,
                 trackers,
-                target_file_name: sanitize_filename(&name),
+                target_file_name: safe_name,
                 target_file_offset: 0,
                 target_file_length: total,
             },
@@ -587,76 +646,111 @@ pub fn parse_torrent_bytes_with_index(
         .dict_get(b"files")
         .and_then(|v| v.as_list())
         .context("Missing `length` or `files` in .torrent")?;
+    if files.is_empty() {
+        bail!("Multi-file .torrent has empty `files` list");
+    }
 
     let mut offset = 0u64;
-    let mut candidates: Vec<(usize, String, u64, u64)> = Vec::new(); // (idx, filename, offset, len)
+    let mut candidates: Vec<(usize, String, u64, u64)> = Vec::with_capacity(files.len()); // (idx, rel_path, offset, len)
     for (idx, f) in files.iter().enumerate() {
-        let len = f
+        let len_i64 = f
             .dict_get(b"length")
             .and_then(|v| v.as_int())
-            .unwrap_or(0)
-            .max(0) as u64;
+            .context("Missing file `length` in multi-file .torrent")?;
+        if len_i64 < 0 {
+            bail!("Negative file `length` in multi-file .torrent");
+        }
+        let len = len_i64 as u64;
         let path_parts = f.dict_get(b"path").and_then(|v| v.as_list());
-        let file_name = path_parts
-            .and_then(|parts| parts.last())
-            .and_then(|v| v.as_str())
-            .unwrap_or_else(|| "episode.mkv".to_string());
-        candidates.push((idx, file_name, offset, len));
-        offset += len;
+        let rel_path = path_parts
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| p.as_str())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("file_{idx}"));
+        candidates.push((idx, rel_path, offset, len));
+        offset = offset
+            .checked_add(len)
+            .ok_or_else(|| anyhow::anyhow!("Multi-file .torrent total size overflow"))?;
     }
 
-    let file_count = candidates.len().max(1);
-    let total_length = offset.max(1);
-    let is_video = |n: &str| {
-        let lower = n.to_ascii_lowercase();
-        lower.ends_with(".mkv")
-            || lower.ends_with(".mp4")
-            || lower.ends_with(".webm")
-            || lower.ends_with(".avi")
-    };
+    if offset == 0 {
+        bail!("Multi-file .torrent has zero total byte length");
+    }
+    let file_count = candidates.len();
+    let total_length = offset;
+    let expected_pieces = total_length.div_ceil(piece_length) as usize;
+    if pieces.len() != expected_pieces {
+        bail!(
+            "Mismatched `pieces` count in multi-file .torrent ({} != {expected_pieces})",
+            pieces.len()
+        );
+    }
 
     let chosen = if let Some(sel_idx) = explicit_file_index {
-        candidates.iter().find(|(i, ..)| *i == sel_idx).cloned()
+        let picked = candidates
+            .iter()
+            .find(|(i, ..)| *i == sel_idx)
+            .cloned()
+            .with_context(|| format!("Selected torrent file index {sel_idx} out of range"))?;
+        if !is_video_filename(&picked.1) || picked.3 == 0 {
+            bail!("Selected torrent entry is not a valid video file");
+        }
+        picked
     } else {
-        None
-    }
-    .or_else(|| {
-        if let Some(ep) = target_episode {
-            let ep_u32 = ep as u32;
-            candidates
+        let video_cands: Vec<&(usize, String, u64, u64)> = candidates
+            .iter()
+            .filter(|(_, p, _, l)| *l > 0 && is_video_filename(p))
+            .collect();
+        if video_cands.is_empty() {
+            bail!("Torrent contains no supported video files (.mkv, .mp4, .webm, .avi)");
+        }
+        let picked = if let Some(ep) = target_episode {
+            let ep_u32 = ep.max(0) as u32;
+            video_cands
                 .iter()
-                .filter(|(_, n, _, _)| is_video(n))
-                .find(|(_, n, _, _)| {
-                    let p = crate::parser::parse_filename(n);
+                .copied()
+                .find(|(_, rel_path, _, _)| {
+                    let in_extra_dir = rel_path
+                        .rsplit('/')
+                        .skip(1)
+                        .any(|seg| crate::parser::classify_subfolder(seg).is_some());
+                    if in_extra_dir {
+                        return false;
+                    }
+                    let leaf = rel_path.rsplit('/').next().unwrap_or(rel_path);
+                    let p = crate::parser::parse_filename(leaf);
                     !p.extra && p.special.is_none() && p.episode == Some(ep_u32)
                 })
                 .or_else(|| {
-                    candidates
-                        .iter()
-                        .filter(|(_, n, _, _)| is_video(n))
-                        .find(|(_, n, _, _)| {
-                            let p = crate::parser::parse_filename(n);
-                            p.episode == Some(ep_u32)
-                        })
+                    video_cands.iter().copied().find(|(_, rel_path, _, _)| {
+                        let leaf = rel_path.rsplit('/').next().unwrap_or(rel_path);
+                        let p = crate::parser::parse_filename(leaf);
+                        p.episode == Some(ep_u32)
+                    })
                 })
-                .or_else(|| {
-                    candidates
-                        .iter()
-                        .filter(|(_, n, _, _)| is_video(n))
-                        .max_by_key(|(_, _, _, l)| *l)
-                })
-                .or_else(|| candidates.iter().max_by_key(|(_, _, _, l)| *l))
-                .cloned()
+                .or_else(|| video_cands.iter().copied().max_by_key(|(_, _, _, l)| *l))
         } else {
-            candidates
-                .iter()
-                .filter(|(_, n, _, _)| is_video(n))
-                .max_by_key(|(_, _, _, l)| *l)
-                .or_else(|| candidates.iter().max_by_key(|(_, _, _, l)| *l))
-                .cloned()
-        }
-    })
-    .unwrap_or_else(|| (0, name.clone(), 0, total_length));
+            video_cands.iter().copied().max_by_key(|(_, _, _, l)| *l)
+        };
+        picked
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("No playable video file found in torrent"))?
+    };
+
+    if chosen.3 == 0 || chosen.3 > MAX_TARGET_FILE_BYTES {
+        bail!("Selected video file length is invalid or exceeds 128 GiB");
+    }
+    let leaf = chosen.1.rsplit(['/', '\\']).next().unwrap_or(&chosen.1);
+    let safe_leaf = sanitize_filename(leaf);
+    if !is_video_filename(&safe_leaf) {
+        bail!("Refusing non-video torrent file '{safe_leaf}'");
+    }
 
     Ok((
         TorrentMeta {
@@ -666,29 +760,64 @@ pub fn parse_torrent_bytes_with_index(
             pieces,
             total_length,
             trackers,
-            target_file_name: sanitize_filename(&chosen.1),
+            target_file_name: safe_leaf,
             target_file_offset: chosen.2,
-            target_file_length: chosen.3.max(1),
+            target_file_length: chosen.3,
         },
         file_count,
     ))
 }
 
 fn sanitize_filename(name: &str) -> String {
-    let mut out: String = name
+    let replaced: String = name
         .chars()
         .map(|c| {
-            if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
                 '_'
             } else {
                 c
             }
         })
         .collect();
-    if out.trim().is_empty() {
-        out = "episode.mkv".to_string();
+    let trimmed = replaced
+        .trim_start()
+        .trim_end_matches(|c: char| c == '.' || c.is_whitespace());
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return "unnamed".to_string();
     }
-    out
+    let stem = trimmed.split('.').next().unwrap_or(trimmed);
+    let is_win_reserved = matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM0"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT0"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if is_win_reserved {
+        format!("_{trimmed}")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -762,31 +891,6 @@ pub fn parse_release_media_badges(title: &str) -> (Option<String>, Option<String
     (codec, bit_depth, is_dual_audio)
 }
 
-pub fn score_candidate(
-    title: &str,
-    group: Option<&str>,
-    resolution: Option<&str>,
-    seeders: i64,
-    is_batch: bool,
-    target_episode: i64,
-    pref_res: &str,
-) -> i64 {
-    score_candidate_with_context(
-        title,
-        group,
-        resolution,
-        seeders,
-        0,
-        is_batch,
-        target_episode,
-        None,
-        false,
-        pref_res,
-        &[],
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 /// Seeder-health component of the candidate score.
 pub fn seeder_score(seeders: i64) -> i64 {
     if seeders <= 0 {
@@ -994,7 +1098,26 @@ pub fn score_candidate_with_context(
     score
 }
 
-/// Strip punctuation and noise tokens that cause Nyaa's strict keyword search to miss releases.
+/// Fold Romaji macrons and circumflexes (`ā`->`a`, `ī`->`i`, `ū`->`u`, `ē`->`e`, `ō`->`o`).
+fn fold_romaji_macrons(raw: &str) -> String {
+    raw.chars()
+        .map(|c| match c {
+            'ā' | 'â' => 'a',
+            'Ā' | 'Â' => 'A',
+            'ī' | 'î' => 'i',
+            'Ī' | 'Î' => 'I',
+            'ū' | 'û' => 'u',
+            'Ū' | 'Û' => 'U',
+            'ē' | 'ê' => 'e',
+            'Ē' | 'Ê' => 'E',
+            'ō' | 'ô' => 'o',
+            'Ō' | 'Ô' => 'O',
+            _ => c,
+        })
+        .collect()
+}
+
+/// Strip punctuation, Romaji macrons, and noise tokens that cause Nyaa's strict keyword search to miss releases.
 pub fn clean_search_title(raw: &str) -> String {
     static NOISE_RE: OnceLock<Regex> = OnceLock::new();
     static POSSESSIVE_RE: OnceLock<Regex> = OnceLock::new();
@@ -1005,7 +1128,8 @@ pub fn clean_search_title(raw: &str) -> String {
     let possessive_re = POSSESSIVE_RE.get_or_init(|| Regex::new(r"(?i)['’]s\b").unwrap());
     let space_re = SPACE_RE.get_or_init(|| Regex::new(r"\s+").unwrap());
 
-    let without_tags = noise_re.replace_all(raw, " ");
+    let folded = fold_romaji_macrons(raw);
+    let without_tags = noise_re.replace_all(&folded, " ");
     let without_possessive = possessive_re.replace_all(&without_tags, "");
     let mapped: String = without_possessive
         .chars()
@@ -1022,15 +1146,23 @@ pub fn clean_search_title(raw: &str) -> String {
 fn split_season_from_title(title: &str) -> (Option<u32>, String) {
     static S_ORD_RE: OnceLock<Regex> = OnceLock::new();
     static S_WORD_RE: OnceLock<Regex> = OnceLock::new();
+    static S_NAMED_RE: OnceLock<Regex> = OnceLock::new();
+    static S_SHORT_RE: OnceLock<Regex> = OnceLock::new();
+    static S_JP_RE: OnceLock<Regex> = OnceLock::new();
     static S_PART_RE: OnceLock<Regex> = OnceLock::new();
     static S_ROMAN_RE: OnceLock<Regex> = OnceLock::new();
 
     let ord_re =
         S_ORD_RE.get_or_init(|| Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b").unwrap());
-    let word_re = S_WORD_RE.get_or_init(|| Regex::new(r"(?i)\bseason\s*(\d{1,2})\b").unwrap());
+    let word_re =
+        S_WORD_RE.get_or_init(|| Regex::new(r"(?i)\b(?:season|saison)\s*(\d{1,2})\b").unwrap());
+    let named_re = S_NAMED_RE
+        .get_or_init(|| Regex::new(r"(?i)\b(second|third|fourth|fifth|sixth)\s+season\b").unwrap());
+    let short_re = S_SHORT_RE.get_or_init(|| Regex::new(r"(?i)\bS(\d{1,2})\b").unwrap());
+    let jp_re = S_JP_RE.get_or_init(|| Regex::new(r"(?:第\s*)?(\d{1,2})\s*期").unwrap());
     let part_re =
         S_PART_RE.get_or_init(|| Regex::new(r"(?i)\b(?:part|cour)\s*(\d{1,2})\b").unwrap());
-    let roman_re = S_ROMAN_RE.get_or_init(|| Regex::new(r"\s+(II|III|IV|V)\s*$").unwrap());
+    let roman_re = S_ROMAN_RE.get_or_init(|| Regex::new(r"\s+(II|III|IV|V|VI)\s*$").unwrap());
 
     let mut season: Option<u32> = None;
     let mut base = title.to_string();
@@ -1041,12 +1173,33 @@ fn split_season_from_title(title: &str) -> (Option<u32>, String) {
     } else if let Some(c) = word_re.captures(&base) {
         season = c.get(1).and_then(|m| m.as_str().parse().ok());
         base = word_re.replace_all(&base, " ").to_string();
+    } else if let Some(c) = named_re.captures(&base) {
+        season = match c
+            .get(1)
+            .map(|m| m.as_str().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("second") => Some(2),
+            Some("third") => Some(3),
+            Some("fourth") => Some(4),
+            Some("fifth") => Some(5),
+            Some("sixth") => Some(6),
+            _ => None,
+        };
+        base = named_re.replace_all(&base, " ").to_string();
+    } else if let Some(c) = jp_re.captures(&base) {
+        season = c.get(1).and_then(|m| m.as_str().parse().ok());
+        base = jp_re.replace_all(&base, " ").to_string();
+    } else if let Some(c) = short_re.captures(&base) {
+        season = c.get(1).and_then(|m| m.as_str().parse().ok());
+        base = short_re.replace_all(&base, " ").to_string();
     } else if let Some(c) = roman_re.captures(&base) {
         season = match c.get(1).map(|m| m.as_str()).unwrap_or("") {
             "II" => Some(2),
             "III" => Some(3),
             "IV" => Some(4),
             "V" => Some(5),
+            "VI" => Some(6),
             _ => None,
         };
         base = roman_re.replace_all(&base, " ").to_string();
@@ -1161,22 +1314,6 @@ pub fn save_torrent_extensions(
     Ok(())
 }
 
-fn torrent_http() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .connect_timeout(Duration::from_millis(1600))
-            .timeout(Duration::from_millis(3200))
-            .pool_idle_timeout(Duration::from_secs(90))
-            .pool_max_idle_per_host(16)
-            .tcp_nodelay(true)
-            .tcp_keepalive(Duration::from_secs(30))
-            .user_agent("Kura/0.6.1 (https://github.com/wantingCat/kura)")
-            .build()
-            .expect("torrent http client")
-    })
-}
-
 type SearchCacheKey = (i64, i64, String, String);
 
 /// HTTP client for indexer searches & `.torrent` downloads. Indexers (especially Nyaa RSS) regularly take
@@ -1190,7 +1327,11 @@ fn torrent_search_http() -> &'static reqwest::Client {
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(16)
             .tcp_keepalive(Duration::from_secs(30))
-            .user_agent("Kura/0.6 (https://github.com/wantingCat/kura)")
+            .user_agent(concat!(
+                "Kura/",
+                env!("CARGO_PKG_VERSION"),
+                " (+https://github.com/wantingCat/kura)"
+            ))
             .build()
             .expect("torrent search http client")
     })
@@ -1207,6 +1348,11 @@ const SCRAPE_HTTP_TRACKERS: [&str; 1] = ["http://nyaa.tracker.wf:7777/scrape"];
 async fn scrape_udp(host_port: &str, hashes: &[[u8; 20]]) -> Result<HashMap<[u8; 20], (i64, i64)>> {
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
     tokio::time::timeout(Duration::from_secs(3), sock.connect(host_port)).await??;
+    if let Ok(remote) = sock.peer_addr() {
+        if !crate::extensions::is_public_ip(remote.ip()) {
+            bail!("Blocked UDP tracker announce to non-public address");
+        }
+    }
     let tx_id: u32 = 0x4B52_5343; // "KRSC"
     let mut req = [0u8; 16];
     req[0..8].copy_from_slice(&0x41727101980u64.to_be_bytes());
@@ -1254,7 +1400,9 @@ async fn scrape_http(scrape_url: &str, hashes: &[[u8; 20]]) -> Result<HashMap<[u
         url.push_str("info_hash=");
         url.push_str(&url_encode_bytes(h));
     }
-    let bytes = torrent_http().get(&url).send().await?.bytes().await?;
+    let bytes = crate::extensions::fetch_public_bytes_limited(&url, &[], 2 * 1024 * 1024, 6)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let (root, _) = parse_bencode(&bytes)?;
     let mut out = HashMap::new();
     if let Some(BVal::Dict(files)) = root.dict_get(b"files") {
@@ -1415,20 +1563,16 @@ pub async fn import_torrent_extension(
     st: &AppState,
     raw_input: &str,
 ) -> Result<Vec<TorrentExtension>> {
-    let trimmed = raw_input.trim();
+    let normalized = crate::extensions::normalize_github_raw_url(raw_input);
+    let trimmed = normalized.trim();
     if trimmed.is_empty() {
         bail!("Extension URL or manifest cannot be empty");
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .user_agent("Kura/0.5")
-        .build()?;
-
     let mut discovered: Vec<TorrentExtension> = Vec::new();
 
     if trimmed.starts_with('[') || trimmed.starts_with('{') {
-        discovered.extend(parse_manifest_json_or_script(&client, trimmed, None).await);
+        discovered.extend(parse_manifest_json_or_script(trimmed, None).await);
     } else if let Some(gh_repo) = trimmed
         .strip_prefix("gh:")
         .or_else(|| trimmed.strip_prefix("github:"))
@@ -1444,17 +1588,19 @@ pub async fn import_torrent_extension(
             format!("https://raw.githubusercontent.com/{clean_repo}/main/hayase/index.json"),
             format!("https://raw.githubusercontent.com/{clean_repo}/master/index.json"),
         ] {
-            if let Ok(resp) = client.get(&candidate_url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(text) = resp.text().await {
-                        let items =
-                            parse_manifest_json_or_script(&client, &text, Some(&candidate_url))
-                                .await;
-                        if !items.is_empty() {
-                            discovered.extend(items);
-                            break;
-                        }
-                    }
+            if let Ok(bytes) = crate::extensions::fetch_public_bytes_limited(
+                &candidate_url,
+                &[],
+                10 * 1024 * 1024,
+                20,
+            )
+            .await
+            {
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                let items = parse_manifest_json_or_script(&text, Some(&candidate_url)).await;
+                if !items.is_empty() {
+                    discovered.extend(items);
+                    break;
                 }
             }
         }
@@ -1466,19 +1612,27 @@ pub async fn import_torrent_extension(
             || lower.ends_with(".js");
 
         if looks_like_manifest {
-            let text = client
-                .get(trimmed)
-                .send()
-                .await
-                .context("Failed to fetch extension manifest URL")?
-                .text()
-                .await?;
-            discovered.extend(parse_manifest_json_or_script(&client, &text, Some(trimmed)).await);
+            let bytes = crate::extensions::fetch_public_bytes_limited(
+                trimmed,
+                &[],
+                10 * 1024 * 1024,
+                20,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch extension manifest URL: {e}"))?;
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            discovered.extend(parse_manifest_json_or_script(&text, Some(trimmed)).await);
         } else {
+            let _ = crate::extensions::validate_and_resolve_public_url(trimmed)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             discovered.push(build_extension_from_url(trimmed, None, None));
         }
     } else if trimmed.contains('.') && !trimmed.contains(' ') {
         let with_https = format!("https://{trimmed}");
+        let _ = crate::extensions::validate_and_resolve_public_url(&with_https)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         discovered.push(build_extension_from_url(&with_https, None, None));
     } else {
         bail!("Unrecognized extension format. Paste an `https://` source or manifest URL.");
@@ -1518,7 +1672,6 @@ pub async fn import_torrent_extension(
 }
 
 async fn parse_manifest_json_or_script(
-    client: &reqwest::Client,
     text: &str,
     base_manifest_url: Option<&str>,
 ) -> Vec<TorrentExtension> {
@@ -1604,11 +1757,17 @@ async fn parse_manifest_json_or_script(
                     .and_then(|v| v.as_str())
                 {
                     if let Some(js_url) = resolve_rel(code_ref) {
-                        if let Ok(resp) = client.get(&js_url).send().await {
-                            if let Ok(js_code) = resp.text().await {
-                                for ext in extract_sources_from_script(&js_code, name.as_deref()) {
-                                    out.push(apply_meta(ext));
-                                }
+                        if let Ok(js_bytes) = crate::extensions::fetch_public_bytes_limited(
+                            &js_url,
+                            &[],
+                            4 * 1024 * 1024,
+                            15,
+                        )
+                        .await
+                        {
+                            let js_code = String::from_utf8_lossy(&js_bytes);
+                            for ext in extract_sources_from_script(&js_code, name.as_deref()) {
+                                out.push(apply_meta(ext));
                             }
                         }
                     }
@@ -2894,11 +3053,6 @@ fn parse_human_size(s: &str) -> i64 {
     (val * mult) as i64
 }
 
-#[allow(dead_code)]
-fn parse_nyaa_rss(xml: &str, episode: i64, pref_res: &str) -> Vec<TorrentCandidate> {
-    parse_rss_with_context(xml, "RSS", episode, None, false, false, pref_res, &[])
-}
-
 fn parse_rss_with_context(
     xml: &str,
     source_name: &str,
@@ -3017,6 +3171,18 @@ fn spawn_tracker_peer_discovery(
     }
 }
 
+fn is_valid_swarm_peer_v4(ip: Ipv4Addr, port: u16) -> bool {
+    port > 0 && crate::extensions::is_public_ip(std::net::IpAddr::V4(ip))
+}
+
+fn generate_peer_id(prefix: &[u8; 8]) -> [u8; 20] {
+    let mut peer_id = [0u8; 20];
+    peer_id[0..8].copy_from_slice(prefix);
+    let rnd = db::random_bytes::<12>();
+    peer_id[8..20].copy_from_slice(&rnd);
+    peer_id
+}
+
 static INBOUND_PEER_PORT: OnceLock<u16> = OnceLock::new();
 
 fn ensure_inbound_peer_port() -> u16 {
@@ -3028,17 +3194,25 @@ fn ensure_inbound_peer_port() -> u16 {
             return 6881;
         }
         let port = std_listener.local_addr().map(|a| a.port()).unwrap_or(6881);
+        let sem = Arc::new(Semaphore::new(64));
         tokio::spawn(async move {
             let Ok(listener) = TcpListener::from_std(std_listener) else {
                 return;
             };
             crate::klog!("[torrent] Inbound TCP peer listener bound on 0.0.0.0:{port}");
             loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
+                let Ok((mut socket, peer_addr)) = listener.accept().await else {
+                    continue;
+                };
+                if !crate::extensions::is_public_ip(peer_addr.ip()) {
+                    continue;
+                }
+                let Ok(permit) = sem.clone().try_acquire_owned() else {
                     continue;
                 };
                 let _ = socket.set_nodelay(true);
                 tokio::spawn(async move {
+                    let _permit = permit;
                     let mut peer_hs = [0u8; 68];
                     let Ok(Ok(_)) =
                         tokio::time::timeout(Duration::from_secs(4), socket.read_exact(&mut peer_hs))
@@ -3048,7 +3222,7 @@ fn ensure_inbound_peer_port() -> u16 {
                     };
                     if &peer_hs[1..20] != b"BitTorrent protocol" {
                         return;
-                    }
+                    };
                     let mut info_hash = [0u8; 20];
                     info_hash.copy_from_slice(&peer_hs[28..48]);
 
@@ -3070,9 +3244,8 @@ fn ensure_inbound_peer_port() -> u16 {
                     our_hs[1..20].copy_from_slice(b"BitTorrent protocol");
                     our_hs[25] |= 0x10;
                     our_hs[28..48].copy_from_slice(&info_hash);
-                    our_hs[48..56].copy_from_slice(b"-KR0081-");
-                    our_hs[56..64].copy_from_slice(&(db::now() as u64).to_be_bytes());
-                    our_hs[64..68].copy_from_slice(&std::process::id().to_be_bytes());
+                    let our_peer_id = generate_peer_id(b"-KR0081-");
+                    our_hs[48..68].copy_from_slice(&our_peer_id);
                     if tokio::time::timeout(Duration::from_secs(3), socket.write_all(&our_hs))
                         .await
                         .is_err()
@@ -3107,14 +3280,16 @@ async fn announce_http(
         url_encode_bytes(info_hash),
         url_encode_bytes(peer_id),
     );
-    let bytes = torrent_http().get(&url).send().await?.bytes().await?;
+    let bytes = crate::extensions::fetch_public_bytes_limited(&url, &[], 2 * 1024 * 1024, 6)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let (root, _) = parse_bencode(&bytes)?;
     let mut peers = Vec::new();
     if let Some(compact) = root.dict_get(b"peers").and_then(|v| v.as_bytes()) {
         for chunk in compact.chunks_exact(6) {
             let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
             let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-            if port > 0 {
+            if is_valid_swarm_peer_v4(ip, port) {
                 peers.push(SocketAddr::V4(SocketAddrV4::new(ip, port)));
             }
         }
@@ -3137,6 +3312,11 @@ async fn announce_udp(
 
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
     tokio::time::timeout(Duration::from_secs(3), sock.connect(host_port)).await??;
+    if let Ok(remote) = sock.peer_addr() {
+        if !crate::extensions::is_public_ip(remote.ip()) {
+            bail!("Blocked UDP tracker announce to non-public address");
+        }
+    }
 
     // BEP 15 Step 1: Connect request
     let tx_id: u32 = 0x4B555241; // "KURA"
@@ -3180,7 +3360,7 @@ async fn announce_udp(
     for chunk in buf[20..len].chunks_exact(6) {
         let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
         let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-        if port > 0 {
+        if is_valid_swarm_peer_v4(ip, port) {
             peers.push(SocketAddr::V4(SocketAddrV4::new(ip, port)));
         }
     }
@@ -3198,14 +3378,35 @@ enum PieceState {
     Complete,
 }
 
+const MAX_HOT_PIECES_BYTES: usize = 32 * 1024 * 1024;
+const MAX_TORRENT_META_CACHE: usize = 64;
+
+/// Open files with `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` (`0x07`) on Windows
+/// so concurrent readers (`subtitles.rs` MKV alignment, `libmpv`, or Windows Defender) never
+/// block atomic `.part` -> `.mkv` renaming with `ERROR_SHARING_VIOLATION` (`os error 32`).
+fn shared_open_options() -> std::fs::OpenOptions {
+    let mut opts = std::fs::OpenOptions::new();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.share_mode(0x07);
+    }
+    opts
+}
+
 pub struct SwarmSession {
     pub id: String,
+    pub stream_token: String,
     pub anilist_id: i64,
     pub ep_key: String,
     pub title: String,
     pub mode: String, // "stream" | "hybrid" | "download"
     pub meta: TorrentMeta,
+    /// Active working path on disk (`<file>.part` during download, or inside `stream_cache/`).
     pub save_path: PathBuf,
+    /// Final library destination path (for `"hybrid"` / `"download"`, atomically renamed upon 100% completion).
+    pub final_save_path: PathBuf,
+    pub renamed_to_final: AtomicBool,
     pub first_piece: usize,
     pub last_piece: usize,
     piece_states: Mutex<Vec<PieceState>>,
@@ -3217,15 +3418,17 @@ pub struct SwarmSession {
     pub speed_bps: AtomicU64,
     pub upload_speed_bps: AtomicU64,
     pub active_peers: AtomicUsize,
+    pub active_peer_addrs: Mutex<HashSet<SocketAddr>>,
     pub state_str: Mutex<String>,
     pub error_str: Mutex<Option<String>>,
     pub stream_url: Mutex<Option<String>>,
     pub allow_seeding: bool,
     pub preload_only: AtomicBool,
+    pub player_stopped: AtomicBool,
     pub cancelled: AtomicBool,
     pub piece_notify: Notify,
-    file_write_lock: tokio::sync::Mutex<()>,
-    hot_pieces: Mutex<HashMap<usize, Arc<Vec<u8>>>>,
+    disk_file: Mutex<Option<std::fs::File>>,
+    hot_pieces: Mutex<(usize, HashMap<usize, Arc<Vec<u8>>>)>,
 }
 
 impl SwarmSession {
@@ -3416,23 +3619,143 @@ impl SwarmSession {
         rem.min(plen) as usize
     }
 
+    pub fn current_disk_path(&self) -> PathBuf {
+        if self.renamed_to_final.load(Ordering::Acquire) {
+            self.final_save_path.clone()
+        } else {
+            self.save_path.clone()
+        }
+    }
+
+    fn close_disk_file(&self) {
+        let mut guard = self.disk_file.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mut f) = guard.take() {
+            let _ = f.flush();
+        }
+    }
+
+    fn clear_hot_pieces(&self) {
+        if let Ok(mut guard) = self.hot_pieces.lock() {
+            guard.0 = 0;
+            guard.1.clear();
+        }
+    }
+
+    fn finalize_completed_file(&self) -> Result<()> {
+        if self.mode == "hybrid" || self.mode == "download" {
+            if self.renamed_to_final.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            self.close_disk_file();
+            if self.save_path != self.final_save_path && self.save_path.exists() {
+                if self.final_save_path.exists() {
+                    let _ = std::fs::remove_file(&self.final_save_path);
+                }
+                let mut last_err = None;
+                for attempt in 0..5 {
+                    match std::fs::rename(&self.save_path, &self.final_save_path) {
+                        Ok(()) => {
+                            last_err = None;
+                            break;
+                        }
+                        Err(e) => {
+                            last_err = Some(e);
+                            if attempt < 4 {
+                                std::thread::sleep(Duration::from_millis(60));
+                            }
+                        }
+                    }
+                }
+                if let Some(e) = last_err {
+                    return Err(e.into());
+                }
+            }
+            self.renamed_to_final.store(true, Ordering::Release);
+            if self.mode == "download" {
+                self.clear_hot_pieces();
+            }
+        }
+        Ok(())
+    }
+
+    async fn finalize_completed_file_async(&self) -> Result<()> {
+        if self.mode == "hybrid" || self.mode == "download" {
+            if self.renamed_to_final.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            self.close_disk_file();
+            if self.save_path != self.final_save_path && self.save_path.exists() {
+                if self.final_save_path.exists() {
+                    let _ = tokio::fs::remove_file(&self.final_save_path).await;
+                }
+                let mut last_err = None;
+                for attempt in 0..5 {
+                    match tokio::fs::rename(&self.save_path, &self.final_save_path).await {
+                        Ok(()) => {
+                            last_err = None;
+                            break;
+                        }
+                        Err(e) => {
+                            last_err = Some(e);
+                            if attempt < 4 {
+                                tokio::time::sleep(Duration::from_millis(60)).await;
+                            }
+                        }
+                    }
+                }
+                if let Some(e) = last_err {
+                    return Err(e.into());
+                }
+            }
+            self.renamed_to_final.store(true, Ordering::Release);
+            if self.mode == "download" {
+                self.clear_hot_pieces();
+            }
+        }
+        Ok(())
+    }
+
     fn cache_hot_piece(&self, idx: usize, data: Arc<Vec<u8>>) {
+        let piece_bytes = data.len();
+        if piece_bytes == 0 || piece_bytes > MAX_HOT_PIECES_BYTES {
+            return;
+        }
         let head = self.read_head_piece.load(Ordering::Relaxed);
         let is_pinned = idx <= self.first_piece + 2 || idx >= self.last_piece.saturating_sub(1);
         if !is_pinned && idx.abs_diff(head) > 16 {
             return;
         }
-        if let Ok(mut map) = self.hot_pieces.lock() {
-            if map.len() >= 48 && !map.contains_key(&idx) {
-                let evict_cand = map.keys().copied().find(|&k| {
-                    k > self.first_piece + 2
-                        && k < self.last_piece.saturating_sub(1)
-                        && (k < head.saturating_sub(4) || k > head + 16)
-                });
-                if let Some(k) = evict_cand {
-                    map.remove(&k);
+        if let Ok(mut guard) = self.hot_pieces.lock() {
+            let (ref mut total_bytes, ref mut map) = *guard;
+            if let Some(prev) = map.remove(&idx) {
+                *total_bytes = total_bytes.saturating_sub(prev.len());
+            }
+            while total_bytes.saturating_add(piece_bytes) > MAX_HOT_PIECES_BYTES && !map.is_empty()
+            {
+                let evict_cand = map
+                    .keys()
+                    .copied()
+                    .filter(|&k| {
+                        k > self.first_piece + 2
+                            && k < self.last_piece.saturating_sub(1)
+                            && (k < head.saturating_sub(4) || k > head + 16)
+                    })
+                    .max_by_key(|&k| k.abs_diff(head))
+                    .or_else(|| {
+                        map.keys()
+                            .copied()
+                            .filter(|&k| k != self.first_piece && k != self.last_piece)
+                            .max_by_key(|&k| k.abs_diff(head))
+                    })
+                    .or_else(|| map.keys().next().copied());
+                let Some(k) = evict_cand else {
+                    break;
+                };
+                if let Some(removed) = map.remove(&k) {
+                    *total_bytes = total_bytes.saturating_sub(removed.len());
                 }
             }
+            *total_bytes = total_bytes.saturating_add(piece_bytes);
             map.insert(idx, data);
         }
     }
@@ -3441,11 +3764,11 @@ impl SwarmSession {
         self.hot_pieces
             .lock()
             .ok()
-            .and_then(|m| m.get(&idx).cloned())
+            .and_then(|g| g.1.get(&idx).cloned())
     }
 
-    /// Write verified piece bytes into the target file (cropping to `[target_file_offset, target_file_offset + target_file_length)`).
-    async fn write_verified_piece(&self, idx: usize, data: &[u8]) -> Result<()> {
+    /// Write verified piece bytes into the shared target file handle (cropping to `[target_file_offset, target_file_offset + target_file_length)`).
+    fn write_verified_piece(&self, idx: usize, data: &[u8]) -> Result<()> {
         let piece_global_start = (idx as u64) * self.meta.piece_length;
         let piece_global_end = piece_global_start + (data.len() as u64);
 
@@ -3462,27 +3785,50 @@ impl SwarmSession {
         let slice_len = (overlap_end - overlap_start) as usize;
         let dest_offset = overlap_start - file_start;
 
-        let _guard = self.file_write_lock.lock().await;
-        let mut f = tokio::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&self.save_path)
-            .await?;
-        f.seek(SeekFrom::Start(dest_offset)).await?;
-        f.write_all(&data[slice_offset..slice_offset + slice_len])
-            .await?;
+        let mut guard = self.disk_file.lock().unwrap_or_else(|e| e.into_inner());
+        if self.cancelled.load(Ordering::Relaxed) {
+            bail!("Session cancelled");
+        }
+        if guard.is_none() {
+            let path = self.current_disk_path();
+            let f = shared_open_options()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&path)?;
+            *guard = Some(f);
+        }
+        let f = guard.as_mut().unwrap();
+        f.seek(SeekFrom::Start(dest_offset))?;
+        f.write_all(&data[slice_offset..slice_offset + slice_len])?;
         Ok(())
     }
 
-    /// Read a verified block from disk to upload to a requesting peer when `allow_seeding` is enabled.
-    async fn read_verified_block(
-        &self,
-        idx: usize,
-        begin: usize,
-        len: usize,
-    ) -> Result<Option<Vec<u8>>> {
+    fn read_disk_range(&self, file_offset: u64, dst: &mut [u8]) -> Result<()> {
+        let mut guard = self.disk_file.lock().unwrap_or_else(|e| e.into_inner());
+        if self.cancelled.load(Ordering::Relaxed) {
+            bail!("Session cancelled");
+        }
+        if guard.is_none() {
+            let path = self.current_disk_path();
+            let f = shared_open_options().read(true).open(&path)?;
+            *guard = Some(f);
+        }
+        let f = guard.as_mut().unwrap();
+        f.seek(SeekFrom::Start(file_offset))?;
+        f.read_exact(dst)?;
+        Ok(())
+    }
+
+    /// Read a verified block from memory or the shared disk handle to upload to a requesting peer when `allow_seeding` is enabled.
+    fn read_verified_block(&self, idx: usize, begin: usize, len: usize) -> Result<Option<Vec<u8>>> {
         if !self.allow_seeding || len == 0 || len > 65_536 || !self.is_piece_complete(idx) {
             return Ok(None);
+        }
+        if let Some(hot) = self.get_hot_piece(idx) {
+            if begin.saturating_add(len) <= hot.len() {
+                return Ok(Some(hot[begin..begin + len].to_vec()));
+            }
         }
         let block_global_start = (idx as u64) * self.meta.piece_length + (begin as u64);
         let block_global_end = block_global_start + (len as u64);
@@ -3494,10 +3840,8 @@ impl SwarmSession {
         }
 
         let file_offset = block_global_start - file_start;
-        let mut f = tokio::fs::File::open(&self.save_path).await?;
-        f.seek(SeekFrom::Start(file_offset)).await?;
         let mut buf = vec![0u8; len];
-        f.read_exact(&mut buf).await?;
+        self.read_disk_range(file_offset, &mut buf)?;
         Ok(Some(buf))
     }
 
@@ -3513,6 +3857,7 @@ impl SwarmSession {
         } else {
             verified_dl
         };
+        let display_path = self.current_disk_path();
         TorrentSessionStatus {
             session_id: self.id.clone(),
             anilist_id: self.anilist_id,
@@ -3529,7 +3874,7 @@ impl SwarmSession {
             upload_speed_bps: self.upload_speed_bps.load(Ordering::Relaxed),
             peers: self.active_peers.load(Ordering::Relaxed),
             stream_url: self.stream_url.lock().unwrap().clone(),
-            save_path: self.save_path.to_string_lossy().to_string(),
+            save_path: display_path.to_string_lossy().to_string(),
             error: self.error_str.lock().unwrap().clone(),
         }
     }
@@ -3551,10 +3896,23 @@ fn handle_extended_pex_msg(
             for chunk in compact.chunks_exact(6).take(60) {
                 let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
                 let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-                if port > 0 && !ip.is_unspecified() && !ip.is_loopback() {
+                if is_valid_swarm_peer_v4(ip, port) {
                     let _ = peer_tx.send(SocketAddr::V4(SocketAddrV4::new(ip, port)));
                 }
             }
+        }
+    }
+}
+
+struct ActivePeerAddrGuard {
+    session: Arc<SwarmSession>,
+    addr: SocketAddr,
+}
+
+impl Drop for ActivePeerAddrGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.session.active_peer_addrs.lock() {
+            set.remove(&self.addr);
         }
     }
 }
@@ -3565,6 +3923,10 @@ async fn run_peer_worker(
     peer_id: [u8; 20],
     peer_tx: tokio::sync::mpsc::UnboundedSender<SocketAddr>,
 ) -> Result<()> {
+    let _addr_guard = ActivePeerAddrGuard {
+        session: session.clone(),
+        addr,
+    };
     let (stream, resp_hs) =
         crate::mse::connect_peer_with_mse_fallback(addr, session.meta.info_hash, peer_id).await?;
     run_peer_session_on_stream(session, stream, resp_hs, peer_tx).await
@@ -3671,9 +4033,8 @@ async fn run_peer_session_on_stream(
                     let req_len =
                         u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]])
                             as usize;
-                    if let Ok(Some(block_data)) = session
-                        .read_verified_block(req_idx, req_begin, req_len)
-                        .await
+                    if let Ok(Some(block_data)) =
+                        session.read_verified_block(req_idx, req_begin, req_len)
                     {
                         let msg_len = (9 + block_data.len()) as u32;
                         let mut hdr = [0u8; 13];
@@ -3703,6 +4064,8 @@ async fn run_peer_session_on_stream(
         let mut piece_buf = vec![0u8; piece_len];
         let mut received = 0usize;
         let block_size = 16_384usize;
+        let num_blocks = piece_len.div_ceil(block_size);
+        let mut received_blocks = vec![false; num_blocks];
 
         // Pipeline up to 48 block requests (768 KiB window per peer) with batched TCP writes
         const PIPELINE_DEPTH: usize = 48;
@@ -3749,13 +4112,24 @@ async fn run_peer_session_on_stream(
                     let begin = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]])
                         as usize;
                     let block = &payload[8..];
-                    if idx == piece_idx && begin + block.len() <= piece_len {
-                        piece_buf[begin..begin + block.len()].copy_from_slice(block);
-                        received += block.len();
-                        in_flight = in_flight.saturating_sub(1);
-                        session
-                            .wire_rx_bytes
-                            .fetch_add(block.len() as u64, Ordering::Relaxed);
+                    if idx == piece_idx
+                        && begin % block_size == 0
+                        && begin.saturating_add(block.len()) <= piece_len
+                    {
+                        let blk_idx = begin / block_size;
+                        let expected_blk_len = (piece_len - begin).min(block_size);
+                        if blk_idx < num_blocks
+                            && block.len() == expected_blk_len
+                            && !received_blocks[blk_idx]
+                        {
+                            received_blocks[blk_idx] = true;
+                            piece_buf[begin..begin + block.len()].copy_from_slice(block);
+                            received += block.len();
+                            in_flight = in_flight.saturating_sub(1);
+                            session
+                                .wire_rx_bytes
+                                .fetch_add(block.len() as u64, Ordering::Relaxed);
+                        }
                     }
                 }
                 Ok(Ok(Some((0, _)))) => {
@@ -3789,9 +4163,8 @@ async fn run_peer_session_on_stream(
                     let req_len =
                         u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]])
                             as usize;
-                    if let Ok(Some(block_data)) = session
-                        .read_verified_block(req_idx, req_begin, req_len)
-                        .await
+                    if let Ok(Some(block_data)) =
+                        session.read_verified_block(req_idx, req_begin, req_len)
                     {
                         let msg_len = (9 + block_data.len()) as u32;
                         let mut hdr = [0u8; 13];
@@ -3837,11 +4210,7 @@ async fn run_peer_session_on_stream(
         let piece_arc = Arc::new(piece_buf);
         session.cache_hot_piece(piece_idx, piece_arc.clone());
 
-        if session
-            .write_verified_piece(piece_idx, &piece_arc)
-            .await
-            .is_ok()
-        {
+        if session.write_verified_piece(piece_idx, &piece_arc).is_ok() {
             session.mark_piece_complete(piece_idx, piece_len as u64);
             if session.allow_seeding {
                 let mut have_msg = [0u8; 9];
@@ -3882,12 +4251,71 @@ async fn read_peer_msg(stream: &mut crate::mse::PeerStream) -> Result<Option<(u8
 // Local HTTP Range Server for Built-in Player & `mpv`
 // ---------------------------------------------------------------------------
 
+fn parse_http_byte_range(
+    range_value: &str,
+    total_len: u64,
+) -> std::result::Result<(u64, u64), ()> {
+    if total_len == 0 {
+        return Err(());
+    }
+    let val = range_value.trim();
+    let rest = val
+        .strip_prefix("bytes=")
+        .or_else(|| val.strip_prefix("BYTES="))
+        .ok_or(())?
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim();
+    let (start_str, end_str) = rest.split_once('-').ok_or(())?;
+    let start_str = start_str.trim();
+    let end_str = end_str.trim();
+
+    if start_str.is_empty() {
+        // Suffix byte-range-spec: `bytes=-N` (last N bytes)
+        let suffix = end_str.parse::<u64>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        let start = total_len.saturating_sub(suffix);
+        Ok((start, total_len - 1))
+    } else if end_str.is_empty() {
+        // Open-ended byte-range-spec: `bytes=S-`
+        let start = start_str.parse::<u64>().map_err(|_| ())?;
+        if start >= total_len {
+            return Err(());
+        }
+        Ok((start, total_len - 1))
+    } else {
+        let start = start_str.parse::<u64>().map_err(|_| ())?;
+        let end_raw = end_str.parse::<u64>().map_err(|_| ())?;
+        if start > end_raw || start >= total_len {
+            return Err(());
+        }
+        Ok((start, end_raw.min(total_len - 1)))
+    }
+}
+
+fn stream_mime_for_filename(name: &str) -> &'static str {
+    let low = name.to_ascii_lowercase();
+    if low.ends_with(".mp4") {
+        "video/mp4"
+    } else if low.ends_with(".webm") {
+        "video/webm"
+    } else if low.ends_with(".avi") {
+        "video/x-msvideo"
+    } else {
+        "video/x-matroska"
+    }
+}
+
 async fn spawn_http_range_server(session: Arc<SwarmSession>) -> Result<String> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let url = format!(
-        "http://127.0.0.1:{port}/stream/{}/{}",
+        "http://127.0.0.1:{port}/stream/{}/{}/{}",
         session.id,
+        session.stream_token,
         url_encode_bytes(session.meta.target_file_name.as_bytes())
     );
     *session.stream_url.lock().unwrap() = Some(url.clone());
@@ -3909,6 +4337,7 @@ async fn spawn_http_range_server(session: Arc<SwarmSession>) -> Result<String> {
             let Ok((socket, _)) = accept_res else {
                 break;
             };
+            let _ = socket.set_nodelay(true);
             let sess = session.clone();
             tokio::spawn(async move {
                 let _ = handle_http_stream_client(socket, sess).await;
@@ -3923,56 +4352,113 @@ async fn handle_http_stream_client(
     mut socket: TcpStream,
     session: Arc<SwarmSession>,
 ) -> Result<()> {
-    let mut req_buf = [0u8; 4096];
-    let n = tokio::time::timeout(Duration::from_secs(10), socket.read(&mut req_buf)).await??;
-    if n == 0 {
+    let mut req_buf = vec![0u8; 16_384];
+    let mut read_len = 0usize;
+    let header_end = loop {
+        if read_len >= req_buf.len() {
+            let _ = socket
+                .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n")
+                .await;
+            return Ok(());
+        }
+        let n = tokio::time::timeout(
+            Duration::from_secs(10),
+            socket.read(&mut req_buf[read_len..]),
+        )
+        .await??;
+        if n == 0 {
+            return Ok(());
+        }
+        read_len += n;
+        if let Some(pos) = req_buf[..read_len].windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos;
+        }
+    };
+
+    let req_str = String::from_utf8_lossy(&req_buf[..header_end]);
+    let mut lines = req_str.lines();
+    let first_line = lines.next().unwrap_or("");
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let req_target = parts.next().unwrap_or("/");
+
+    let is_get = method.eq_ignore_ascii_case("GET");
+    let is_head = method.eq_ignore_ascii_case("HEAD");
+    if !is_get && !is_head {
+        socket
+            .write_all(b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n")
+            .await?;
         return Ok(());
     }
-    let req_str = String::from_utf8_lossy(&req_buf[..n]);
-    let first_line = req_str.lines().next().unwrap_or("");
-    let is_head = first_line.starts_with("HEAD ");
-    let req_target = first_line.split_whitespace().nth(1).unwrap_or("/");
-    let selected_aid: i64 = req_target
-        .split_once('?')
-        .and_then(|(_, q)| {
-            q.split('&').find_map(|pair| {
-                let (k, v) = pair.split_once('=')?;
-                if k == "aid" {
-                    v.parse::<i64>().ok()
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or(0);
+
+    // Authenticate `/stream/{session.id}/{session.stream_token}/{filename}` BEFORE touching `read_head_piece`!
+    let path_only = req_target.split('?').next().unwrap_or(req_target);
+    let mut segs = path_only.trim_start_matches('/').split('/');
+    let seg_root = segs.next();
+    let seg_id = segs.next();
+    let seg_tok = segs.next();
+    if seg_root != Some("stream")
+        || seg_id != Some(session.id.as_str())
+        || seg_tok != Some(session.stream_token.as_str())
+    {
+        socket
+            .write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
+            .await?;
+        return Ok(());
+    }
+
     let total_len = session.meta.target_file_length;
+    if total_len == 0 {
+        socket
+            .write_all(
+                b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await?;
+        return Ok(());
+    }
 
-    let mut range_start = 0u64;
-    let mut range_end = total_len.saturating_sub(1);
-    let mut has_range = false;
-
-    for line in req_str.lines() {
-        let lower = line.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("range: bytes=") {
-            has_range = true;
-            let mut parts = rest.trim().splitn(2, '-');
-            if let Some(s) = parts.next().and_then(|s| s.parse::<u64>().ok()) {
-                range_start = s.min(total_len.saturating_sub(1));
-            }
-            if let Some(e) = parts.next().and_then(|e| e.parse::<u64>().ok()) {
-                range_end = e.min(total_len.saturating_sub(1));
+    let mut raw_range_hdr: Option<&str> = None;
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("range") {
+                raw_range_hdr = Some(v.trim());
+                break;
             }
         }
     }
 
+    let (has_range, range_start, range_end) = if let Some(rh) = raw_range_hdr {
+        match parse_http_byte_range(rh, total_len) {
+            Ok((s, e)) => (true, s, e),
+            Err(()) => {
+                let hdr416 = format!(
+                    "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{total_len}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                socket.write_all(hdr416.as_bytes()).await?;
+                return Ok(());
+            }
+        }
+    } else {
+        (false, 0u64, total_len - 1)
+    };
+
+    if range_start > range_end || range_start >= total_len {
+        let hdr416 = format!(
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{total_len}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        socket.write_all(hdr416.as_bytes()).await?;
+        return Ok(());
+    }
+
+    let content_type = stream_mime_for_filename(&session.meta.target_file_name);
     let content_len = (range_end - range_start) + 1;
     let header = if has_range {
         format!(
-            "HTTP/1.1 206 Partial Content\r\nContent-Type: video/x-matroska\r\nAccept-Ranges: bytes\r\nAccess-Control-Allow-Origin: *\r\nContent-Range: bytes {range_start}-{range_end}/{total_len}\r\nContent-Length: {content_len}\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 206 Partial Content\r\nContent-Type: {content_type}\r\nAccept-Ranges: bytes\r\nContent-Range: bytes {range_start}-{range_end}/{total_len}\r\nContent-Length: {content_len}\r\nConnection: close\r\n\r\n"
         )
     } else {
         format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: video/x-matroska\r\nAccept-Ranges: bytes\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {total_len}\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nAccept-Ranges: bytes\r\nContent-Length: {total_len}\r\nConnection: close\r\n\r\n"
         )
     };
     socket.write_all(header.as_bytes()).await?;
@@ -3982,8 +4468,6 @@ async fn handle_http_stream_client(
 
     let mut cur_offset = range_start;
     let mut chunk_buf = vec![0u8; 262_144];
-    let mut f = tokio::fs::File::open(&session.save_path).await?;
-    let mut cached_audio_offsets: Option<Vec<usize>> = None;
 
     while cur_offset <= range_end {
         if session.cancelled.load(Ordering::Relaxed) {
@@ -4022,38 +4506,11 @@ async fn handle_http_stream_client(
             break;
         }
 
-        let needs_audio_mask = selected_aid > 0 && cur_offset < 65_536;
-        if needs_audio_mask && cached_audio_offsets.is_none() {
-            let hdr_len = total_len.min(65_536) as usize;
-            let mut hdr_buf = vec![0u8; hdr_len];
-            if f.seek(SeekFrom::Start(0)).await.is_ok() {
-                if let Ok(read_hdr) = f.read(&mut hdr_buf).await {
-                    cached_audio_offsets = Some(
-                        crate::subtitles::find_mkv_audio_track_type_offsets(&hdr_buf[..read_hdr]),
-                    );
-                }
-            }
-        }
-
         // Fast path: serve directly from RAM `hot_pieces` cache without disk seek/read!
         if let Some(mem_piece) = session.get_hot_piece(needed_piece) {
             let in_piece_offset = (global_offset - piece_start_global) as usize;
             if in_piece_offset + to_read <= mem_piece.len() {
-                if needs_audio_mask {
-                    chunk_buf[..to_read]
-                        .copy_from_slice(&mem_piece[in_piece_offset..in_piece_offset + to_read]);
-                    if let Some(ref a_offs) = cached_audio_offsets {
-                        crate::subtitles::apply_mkv_audio_track_mask(
-                            &mut chunk_buf[..to_read],
-                            cur_offset,
-                            a_offs,
-                            selected_aid,
-                        );
-                    }
-                    if socket.write_all(&chunk_buf[..to_read]).await.is_err() {
-                        break;
-                    }
-                } else if socket
+                if socket
                     .write_all(&mem_piece[in_piece_offset..in_piece_offset + to_read])
                     .await
                     .is_err()
@@ -4065,19 +4522,7 @@ async fn handle_http_stream_client(
             }
         }
 
-        f.seek(SeekFrom::Start(cur_offset)).await?;
-        f.read_exact(&mut chunk_buf[..to_read]).await?;
-        if needs_audio_mask {
-            if let Some(ref a_offs) = cached_audio_offsets {
-                crate::subtitles::apply_mkv_audio_track_mask(
-                    &mut chunk_buf[..to_read],
-                    cur_offset,
-                    a_offs,
-                    selected_aid,
-                );
-            }
-        }
-
+        session.read_disk_range(cur_offset, &mut chunk_buf[..to_read])?;
         if socket.write_all(&chunk_buf[..to_read]).await.is_err() {
             break;
         }
@@ -4092,9 +4537,14 @@ async fn handle_http_stream_client(
 // ---------------------------------------------------------------------------
 
 static SESSIONS: OnceLock<Mutex<HashMap<String, Arc<SwarmSession>>>> = OnceLock::new();
+static COMPLETED_STREAMS: OnceLock<Mutex<HashMap<String, Arc<SwarmSession>>>> = OnceLock::new();
 
 fn sessions_map() -> &'static Mutex<HashMap<String, Arc<SwarmSession>>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn completed_streams_map() -> &'static Mutex<HashMap<String, Arc<SwarmSession>>> {
+    COMPLETED_STREAMS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub fn list_active_sessions() -> Vec<TorrentSessionStatus> {
@@ -4102,64 +4552,170 @@ pub fn list_active_sessions() -> Vec<TorrentSessionStatus> {
     map.values().map(|s| s.status()).collect()
 }
 
-pub fn save_path_for_stream_url(url: &str) -> Option<PathBuf> {
-    let base_url = url.split('?').next().unwrap_or(url);
-    let map = sessions_map().lock().unwrap();
-    for s in map.values() {
-        if s.stream_url.lock().unwrap().as_deref() == Some(base_url) {
-            return Some(s.save_path.clone());
+pub fn active_save_path_for_episode(anilist_id: i64, ep_key: &str) -> Option<PathBuf> {
+    {
+        let map = sessions_map().lock().unwrap();
+        for s in map.values() {
+            if s.anilist_id == anilist_id && s.ep_key == ep_key {
+                let p = s.current_disk_path();
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    {
+        let cmap = completed_streams_map().lock().unwrap();
+        for s in cmap.values() {
+            if s.anilist_id == anilist_id && s.ep_key == ep_key {
+                let p = s.current_disk_path();
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
         }
     }
     None
 }
 
-pub fn active_save_path_for_episode(anilist_id: i64, ep_key: &str) -> Option<PathBuf> {
-    let map = sessions_map().lock().unwrap();
-    for s in map.values() {
-        if s.anilist_id == anilist_id && s.ep_key == ep_key && s.save_path.is_file() {
-            return Some(s.save_path.clone());
+fn teardown_session_resources(s: &Arc<SwarmSession>, delete_async_fallback: bool) {
+    s.cancelled.store(true, Ordering::Relaxed);
+    s.speed_bps.store(0, Ordering::Relaxed);
+    s.upload_speed_bps.store(0, Ordering::Relaxed);
+    s.active_peers.store(0, Ordering::Relaxed);
+    s.clear_hot_pieces();
+    s.close_disk_file();
+    s.piece_notify.notify_waiters();
+
+    // Delete temporary `"stream"` cache files, or incomplete `.part` files when cancelled/failed before 100%;
+    // NEVER delete a 100%-verified `"hybrid"` / `"download"` file even if atomic rename was deferred!
+    let should_delete = s.mode == "stream"
+        || (!s.renamed_to_final.load(Ordering::Acquire) && !s.is_all_complete());
+    if should_delete {
+        let path = s.save_path.clone();
+        if path.exists() && std::fs::remove_file(&path).is_err() && delete_async_fallback {
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                rt.spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(800)).await;
+                    let _ = tokio::fs::remove_file(&path).await;
+                });
+            }
         }
     }
-    None
 }
 
 pub fn cancel_session(session_id: &str) {
-    let sess = {
-        let mut map = sessions_map().lock().unwrap();
-        map.remove(session_id)
-    };
+    let sess = sessions_map()
+        .lock()
+        .unwrap()
+        .remove(session_id)
+        .or_else(|| completed_streams_map().lock().unwrap().remove(session_id));
     if let Some(s) = sess {
-        s.cancelled.store(true, Ordering::Relaxed);
-        s.speed_bps.store(0, Ordering::Relaxed);
-        s.upload_speed_bps.store(0, Ordering::Relaxed);
-        s.active_peers.store(0, Ordering::Relaxed);
         *s.state_str.lock().unwrap() = "cancelled".into();
-        s.piece_notify.notify_waiters();
-        if s.mode == "stream" {
-            let path = s.save_path.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                let _ = tokio::fs::remove_file(&path).await;
-            });
+        // Explicit user cancellation (`cancel_torrent_session`) cleans up incomplete `.part` files
+        let was_incomplete_non_stream =
+            s.mode != "stream" && !s.renamed_to_final.load(Ordering::Acquire) && !s.is_all_complete();
+        teardown_session_resources(&s, true);
+        if was_incomplete_non_stream && s.save_path.exists() {
+            let _ = std::fs::remove_file(&s.save_path);
         }
     }
 }
 
-/// Clean up any active streaming session for `(anilist_id, ep_key)` when `mpv` / `Memento` exits.
+/// Clean up any active `"stream"` session (or completed `"stream"`/`"hybrid"` HTTP range server)
+/// for `(anilist_id, ep_key)` when `mpv` / `Memento` exits. Active `"hybrid"` ("Stream & Save")
+/// swarms continue downloading in the background so the episode finishes saving to the library!
 pub fn on_player_stopped(anilist_id: i64, ep_key: &str) {
-    let to_cancel: Vec<String> = {
+    let to_cancel_active: Vec<String> = {
         let map = sessions_map().lock().unwrap();
-        map.values()
+        let mut ids = Vec::new();
+        for s in map.values() {
+            if s.anilist_id == anilist_id && s.ep_key == ep_key {
+                if s.mode == "stream" {
+                    ids.push(s.id.clone());
+                } else if s.mode == "hybrid" {
+                    s.player_stopped.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        ids
+    };
+    for id in to_cancel_active {
+        cancel_session(&id);
+    }
+
+    let completed_to_cleanup: Vec<Arc<SwarmSession>> = {
+        let mut cmap = completed_streams_map().lock().unwrap();
+        let ids: Vec<String> = cmap
+            .values()
             .filter(|s| {
                 s.anilist_id == anilist_id
                     && s.ep_key == ep_key
-                    && (s.mode == "stream" || s.mode == "hybrid")
+                    && (s.mode == "stream" || s.mode == "hybrid" || !s.renamed_to_final.load(Ordering::Acquire))
             })
             .map(|s| s.id.clone())
-            .collect()
+            .collect();
+        ids.into_iter().filter_map(|id| cmap.remove(&id)).collect()
     };
-    for id in to_cancel {
-        cancel_session(&id);
+
+    for s in completed_to_cleanup {
+        if s.mode != "stream" && !s.renamed_to_final.load(Ordering::Acquire) {
+            if let Err(e) = s.finalize_completed_file() {
+                crate::klog!("[torrent] Retry finalize on player stop failed ({e}); keeping file intact");
+            }
+        }
+        teardown_session_resources(&s, true);
+    }
+}
+
+/// Remove stale temporary stream files inside `data_dir/stream_cache` (called on app startup/shutdown).
+pub fn purge_stream_cache(data_dir: &Path) {
+    let cache_dir = data_dir.join("stream_cache");
+    let Ok(entries) = std::fs::read_dir(&cache_dir) else {
+        return;
+    };
+    let mut active_paths = HashSet::new();
+    if let Ok(map) = sessions_map().lock() {
+        for s in map.values() {
+            active_paths.insert(s.save_path.clone());
+        }
+    }
+    if let Ok(cmap) = completed_streams_map().lock() {
+        for s in cmap.values() {
+            active_paths.insert(s.save_path.clone());
+        }
+    }
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_file() && !active_paths.contains(&p) {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
+/// Synchronously cancel all active and completed sessions, close file handles, and remove `"stream"` / incomplete `.part` files on app exit.
+pub fn shutdown_all_sessions() {
+    let mut all: Vec<Arc<SwarmSession>> = Vec::new();
+    if let Ok(mut map) = sessions_map().lock() {
+        all.extend(map.drain().map(|(_, s)| s));
+    }
+    if let Ok(mut cmap) = completed_streams_map().lock() {
+        all.extend(cmap.drain().map(|(_, s)| s));
+    }
+    for s in all {
+        *s.state_str.lock().unwrap() = "cancelled".into();
+        teardown_session_resources(&s, false);
+    }
+}
+
+fn cache_torrent_meta(hash: String, bytes: Vec<u8>) {
+    if let Ok(mut guard) = torrent_meta_cache().lock() {
+        if guard.len() >= MAX_TORRENT_META_CACHE && !guard.contains_key(&hash) {
+            if let Some(evict_key) = guard.keys().next().cloned() {
+                guard.remove(&evict_key);
+            }
+        }
+        guard.insert(hash, bytes);
     }
 }
 
@@ -4219,11 +4775,7 @@ fn parse_hex_hash_20(hex: &str) -> Option<[u8; 20]> {
 
 /// Fallback `BEP 9` (`ut_metadata`) peer-wire metadata exchange when magnet-only releases are not cached on HTTP indexers.
 async fn fetch_metadata_via_bep9(info_hash: [u8; 20], trackers: &[String]) -> Result<Vec<u8>> {
-    let mut peer_id = [0u8; 20];
-    peer_id[0..8].copy_from_slice(b"-KR0061-");
-    let now_bytes = (db::now() as u64).to_be_bytes();
-    peer_id[8..16].copy_from_slice(&now_bytes);
-    peer_id[16..20].copy_from_slice(&std::process::id().to_be_bytes());
+    let peer_id = generate_peer_id(b"-KR0081-");
 
     let (peer_tx, mut peer_rx) = tokio::sync::mpsc::unbounded_channel::<SocketAddr>();
     for tr in trackers.iter().take(12).cloned() {
@@ -4324,9 +4876,12 @@ async fn fetch_bep9_from_peer(
     let mut received_chunks = 0usize;
     let mut chunk_done: Vec<bool> = Vec::new();
 
-    for _ in 0..48 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut msgs_seen = 0usize;
+    while msgs_seen < 1024 && tokio::time::Instant::now() < deadline {
+        msgs_seen += 1;
         let Some((msg_id, payload)) =
-            tokio::time::timeout(Duration::from_secs(4), read_peer_msg(&mut stream)).await??
+            tokio::time::timeout_at(deadline, read_peer_msg(&mut stream)).await??
         else {
             continue;
         };
@@ -4334,7 +4889,7 @@ async fn fetch_bep9_from_peer(
             continue;
         }
         let ext_id = payload[0];
-        if ext_id == 0 {
+        if ext_id == 0 && meta_buf.is_empty() {
             let (dict, _) = parse_bencode(&payload[1..])?;
             let ut_meta_id = dict
                 .dict_get(b"m")
@@ -4345,12 +4900,12 @@ async fn fetch_bep9_from_peer(
                 .dict_get(b"metadata_size")
                 .and_then(|v| v.as_int())
                 .unwrap_or(0);
-            if ut_meta_id <= 0 || meta_size <= 0 || meta_size > 8 * 1024 * 1024 {
-                bail!("Peer has no ut_metadata");
+            if !(1..=255).contains(&ut_meta_id) || meta_size <= 0 || meta_size > 8 * 1024 * 1024 {
+                bail!("Peer has no valid ut_metadata");
             }
             let size = meta_size as usize;
             meta_buf = vec![0u8; size];
-            num_chunks = (size + 16_383) / 16_384;
+            num_chunks = size.div_ceil(16_384);
             chunk_done = vec![false; num_chunks];
 
             for p in 0..num_chunks {
@@ -4406,7 +4961,7 @@ async fn fetch_torrent_bytes(
     magnet_uri: Option<&str>,
     info_hash: Option<&str>,
 ) -> Result<Vec<u8>> {
-    let client = torrent_search_http();
+    const MAX_TORRENT_FETCH_BYTES: usize = 10 * 1024 * 1024;
 
     let hash_opt = info_hash
         .map(|s| s.trim())
@@ -4430,21 +4985,17 @@ async fn fetch_torrent_bytes(
         }
     }
 
-    // 1. Direct .torrent URL
+    // 1. Direct .torrent URL (SSRF-validated + DNS-pinned)
     if let Some(url) = torrent_url.filter(|u| u.starts_with("http")) {
-        if let Ok(resp) = client.get(url).send().await {
-            if resp.status().is_success() {
-                if let Ok(bytes) = resp.bytes().await {
-                    if bytes.starts_with(b"d") {
-                        let vec = bytes.to_vec();
-                        if let Some(h) = hash_opt {
-                            if let Ok(mut guard) = torrent_meta_cache().lock() {
-                                guard.insert(h, vec.clone());
-                            }
-                        }
-                        return Ok(vec);
-                    }
+        if let Ok(bytes) =
+            crate::extensions::fetch_public_bytes_limited(url, &[], MAX_TORRENT_FETCH_BYTES, 20)
+                .await
+        {
+            if bytes.starts_with(b"d") {
+                if let Some(h) = hash_opt {
+                    cache_torrent_meta(h, bytes.clone());
                 }
+                return Ok(bytes);
             }
         }
     }
@@ -4462,16 +5013,18 @@ async fn fetch_torrent_bytes(
         format!("https://btcache.me/torrent/{upper_hash}"),
         format!("https://torrage.info/torrent.php?h={upper_hash}"),
     ] {
-        let c = client.clone();
         let tx_c = tx.clone();
         handles.push(tokio::spawn(async move {
-            if let Ok(resp) = c.get(&cache_url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(bytes) = resp.bytes().await {
-                        if bytes.starts_with(b"d") {
-                            let _ = tx_c.send(bytes.to_vec());
-                        }
-                    }
+            if let Ok(bytes) = crate::extensions::fetch_public_bytes_limited(
+                &cache_url,
+                &[],
+                MAX_TORRENT_FETCH_BYTES,
+                20,
+            )
+            .await
+            {
+                if bytes.starts_with(b"d") {
+                    let _ = tx_c.send(bytes);
                 }
             }
         }));
@@ -4498,33 +5051,43 @@ async fn fetch_torrent_bytes(
             ));
         }
         for lookup in lookups {
-            let c = client.clone();
             let tx_c = tx.clone();
             let target_hash = hash.clone();
             handles.push(tokio::spawn(async move {
-                if let Ok(resp) = c.get(&lookup).send().await {
-                    if let Ok(xml) = resp.text().await {
-                        for raw_item in xml.split("<item>").skip(1) {
-                            let Some(end) = raw_item.find("</item>") else {
-                                continue;
-                            };
-                            let block = &raw_item[..end];
-                            let item_hash = extract_xml_tag(block, "nyaa:infoHash")
-                                .or_else(|| extract_xml_tag(block, "infoHash"))
-                                .and_then(|raw_h| {
-                                    normalize_btih_hex(&raw_h)
-                                        .or_else(|| Some(raw_h.to_ascii_lowercase()))
-                                })
-                                .unwrap_or_default();
-                            if item_hash == target_hash {
-                                if let Some(t_url) = extract_xml_tag(block, "link") {
-                                    if let Ok(r2) = c.get(&t_url).send().await {
-                                        if let Ok(bytes) = r2.bytes().await {
-                                            if bytes.starts_with(b"d") {
-                                                let _ = tx_c.send(bytes.to_vec());
-                                                return;
-                                            }
-                                        }
+                if let Ok(xml_bytes) = crate::extensions::fetch_public_bytes_limited(
+                    &lookup,
+                    &[],
+                    MAX_TORRENT_FETCH_BYTES,
+                    20,
+                )
+                .await
+                {
+                    let xml = String::from_utf8_lossy(&xml_bytes);
+                    for raw_item in xml.split("<item>").skip(1) {
+                        let Some(end) = raw_item.find("</item>") else {
+                            continue;
+                        };
+                        let block = &raw_item[..end];
+                        let item_hash = extract_xml_tag(block, "nyaa:infoHash")
+                            .or_else(|| extract_xml_tag(block, "infoHash"))
+                            .and_then(|raw_h| {
+                                normalize_btih_hex(&raw_h)
+                                    .or_else(|| Some(raw_h.to_ascii_lowercase()))
+                            })
+                            .unwrap_or_default();
+                        if item_hash == target_hash {
+                            if let Some(t_url) = extract_xml_tag(block, "link") {
+                                if let Ok(bytes) = crate::extensions::fetch_public_bytes_limited(
+                                    &t_url,
+                                    &[],
+                                    MAX_TORRENT_FETCH_BYTES,
+                                    20,
+                                )
+                                .await
+                                {
+                                    if bytes.starts_with(b"d") {
+                                        let _ = tx_c.send(bytes);
+                                        return;
                                     }
                                 }
                             }
@@ -4565,9 +5128,7 @@ async fn fetch_torrent_bytes(
         for h in &handles {
             h.abort();
         }
-        if let Ok(mut guard) = torrent_meta_cache().lock() {
-            guard.insert(hash, candidate.clone());
-        }
+        cache_torrent_meta(hash, candidate.clone());
         return Ok(candidate);
     }
     for h in &handles {
@@ -4577,16 +5138,22 @@ async fn fetch_torrent_bytes(
     bail!("Couldn't get this release's metadata — no cache, indexer or peer had it. Try another release.")
 }
 
-fn resolve_destination_path(
+/// Resolve `(active_working_path, final_destination_path)` for a torrent session.
+/// For `"stream"`, both point to a session-scoped `.part` file inside `data_dir/stream_cache/`.
+/// For `"hybrid"` and `"download"`, `active_working_path` has a `.part` suffix so incomplete
+/// files never pollute the library or trigger filesystem watcher ingestion until 100% verified!
+fn resolve_destination_paths(
     st: &AppState,
     anilist_id: i64,
     mode: &str,
+    session_id: &str,
     file_name: &str,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, PathBuf)> {
     if mode == "stream" {
         let dir = st.data_dir.join("stream_cache");
         std::fs::create_dir_all(&dir)?;
-        return Ok(dir.join(file_name));
+        let stream_file = dir.join(format!("{session_id}_{file_name}.part"));
+        return Ok((stream_file.clone(), stream_file));
     }
 
     // For "hybrid" or "download", place into the show's existing library folder or the first library root
@@ -4600,45 +5167,43 @@ fn resolve_destination_path(
         .ok()
         .flatten();
 
-    if let Some(folder) = existing_group_folder {
-        let p = PathBuf::from(folder);
-        if p.exists() {
-            return Ok(p.join(file_name));
+    let final_path = if let Some(folder) = existing_group_folder.filter(|f| Path::new(f).exists()) {
+        PathBuf::from(folder).join(file_name)
+    } else {
+        let first_lib_root: Option<String> = conn
+            .query_row(
+                "SELECT path FROM library_folders ORDER BY id LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        let show_title: String = conn
+            .query_row(
+                "SELECT COALESCE(title_english, title_romaji, 'Anime') FROM media WHERE anilist_id = ?1",
+                [anilist_id],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| format!("Anime_{anilist_id}"));
+
+        if let Some(root) = first_lib_root {
+            let show_dir = PathBuf::from(root).join(sanitize_filename(&show_title));
+            std::fs::create_dir_all(&show_dir)?;
+            show_dir.join(file_name)
+        } else {
+            let dl_dir = st
+                .data_dir
+                .join("downloads")
+                .join(sanitize_filename(&show_title));
+            std::fs::create_dir_all(&dl_dir)?;
+            dl_dir.join(file_name)
         }
-    }
+    };
 
-    let first_lib_root: Option<String> = conn
-        .query_row(
-            "SELECT path FROM library_folders ORDER BY id LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .ok();
-    let show_title: String = conn
-        .query_row(
-            "SELECT COALESCE(title_english, title_romaji, 'Anime') FROM media WHERE anilist_id = ?1",
-            [anilist_id],
-            |r| r.get(0),
-        )
-        .unwrap_or_else(|_| format!("Anime_{anilist_id}"));
-
-    if let Some(root) = first_lib_root {
-        let show_dir = PathBuf::from(root).join(sanitize_filename(&show_title));
-        std::fs::create_dir_all(&show_dir)?;
-        return Ok(show_dir.join(file_name));
-    }
-
-    // Fallback if user has no library folders configured yet: create `Downloads` in data_dir
-    let dl_dir = st
-        .data_dir
-        .join("downloads")
-        .join(sanitize_filename(&show_title));
-    std::fs::create_dir_all(&dl_dir)?;
-    Ok(dl_dir.join(file_name))
+    let part_path = PathBuf::from(format!("{}.part", final_path.to_string_lossy()));
+    Ok((part_path, final_path))
 }
 
 pub fn get_remembered_batch(conn: &rusqlite::Connection, anilist_id: i64) -> Option<RememberedBatch> {
-    let _ = conn.execute_batch(db::SCHEMA_V9);
     conn.query_row(
         "SELECT anilist_id, info_hash, magnet_uri, torrent_url, title, updated_at
          FROM torrent_batch_history WHERE anilist_id = ?1",
@@ -4662,7 +5227,6 @@ pub fn save_remembered_batch(
     anilist_id: i64,
     candidate: &TorrentCandidate,
 ) {
-    let _ = conn.execute_batch(db::SCHEMA_V9);
     let _ = conn.execute(
         "INSERT INTO torrent_batch_history
          (anilist_id, info_hash, magnet_uri, torrent_url, title, file_map_json, updated_at)
@@ -4685,7 +5249,6 @@ pub fn save_remembered_batch(
 }
 
 pub fn clear_remembered_batch(conn: &rusqlite::Connection, anilist_id: i64) {
-    let _ = conn.execute_batch(db::SCHEMA_V9);
     let _ = conn.execute(
         "DELETE FROM torrent_batch_history WHERE anilist_id = ?1",
         [anilist_id],
@@ -4815,7 +5378,7 @@ pub async fn preload_next_torrent_episode(
         ep_key,
         Some(next_episode),
         best,
-        None,
+        Some("stream".to_string()),
         None,
         true,
     )
@@ -4861,35 +5424,18 @@ async fn start_torrent_session_internal(
     file_index: Option<usize>,
     preload_only: bool,
 ) -> Result<TorrentSessionStatus> {
-    // If we already preloaded this exact `(anilist_id, ep_key)` in the background and the user/autoplay
-    // is now starting it (with no custom `file_index` override), promote the warm session in-place!
-    if !preload_only && file_index.is_none() {
-        let promoted = {
-            let map = sessions_map().lock().unwrap();
-            map.values()
-                .find(|s| {
-                    s.anilist_id == anilist_id
-                        && s.ep_key == ep_key
-                        && s.preload_only.load(Ordering::Relaxed)
-                        && !s.cancelled.load(Ordering::Relaxed)
-                })
-                .cloned()
-        };
-        if let Some(sess) = promoted {
-            sess.preload_only.store(false, Ordering::Relaxed);
-            sess.piece_notify.notify_waiters();
-            return Ok(sess.status());
-        }
-    }
-
     let (mode, rss_bases, allow_seeding) = {
         let conn = st.db();
-        let m = mode_override.unwrap_or_else(|| {
-            db::get_setting(&conn, "pref.torrent_action")
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "stream".to_string())
-        });
+        let m = if preload_only {
+            "stream".to_string()
+        } else {
+            mode_override.unwrap_or_else(|| {
+                db::get_setting(&conn, "pref.torrent_action")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "stream".to_string())
+            })
+        };
         let rss_bases: Vec<String> = list_torrent_extensions(&conn)
             .into_iter()
             .filter(|e| e.enabled && e.kind == "rss")
@@ -4903,8 +5449,35 @@ async fn start_torrent_session_internal(
         (m, rss_bases, seed)
     };
 
+    // If we already preloaded this exact `(anilist_id, ep_key)` in the background:
+    // - Promote in-place ONLY when effective `mode == "stream"` and no custom `file_index` is requested;
+    // - Otherwise (e.g. `"hybrid"` or `"download"`), cancel the ephemeral `"stream"` preload so a real
+    //   library-saving session starts cleanly!
     if !preload_only {
-        // Cancel any previous session for the same episode
+        let preloaded = {
+            let map = sessions_map().lock().unwrap();
+            map.values()
+                .find(|s| {
+                    s.anilist_id == anilist_id
+                        && s.ep_key == ep_key
+                        && s.preload_only.load(Ordering::Relaxed)
+                        && !s.cancelled.load(Ordering::Relaxed)
+                })
+                .cloned()
+        };
+        if let Some(sess) = preloaded {
+            if mode == "stream" && file_index.is_none() {
+                sess.preload_only.store(false, Ordering::Relaxed);
+                sess.piece_notify.notify_waiters();
+                return Ok(sess.status());
+            } else {
+                cancel_session(&sess.id);
+            }
+        }
+    }
+
+    if !preload_only {
+        // Cancel any previous `"stream"` session (or finished stream listener) for the same episode
         on_player_stopped(anilist_id, &ep_key);
     }
 
@@ -4923,7 +5496,11 @@ async fn start_torrent_session_internal(
             meta.trackers.push(tr);
         }
     }
-    let save_path = resolve_destination_path(&st, anilist_id, &mode, &meta.target_file_name)?;
+
+    let session_id = format!("{}-{anilist_id}-{ep_key}", db::random_hex_token(8));
+    let stream_token = db::random_hex_token(16);
+    let (save_path, final_save_path) =
+        resolve_destination_paths(&st, anilist_id, &mode, &session_id, &meta.target_file_name)?;
 
     // Remember multi-episode batch torrents for this anime so subsequent episodes auto-reuse it!
     if !preload_only && (candidate.is_batch || file_count > 1) {
@@ -4934,7 +5511,6 @@ async fn start_torrent_session_internal(
     // Ensure the show is bookmarked in `stream_library` when in streaming/hybrid mode
     {
         let conn = st.db();
-        let _ = conn.execute_batch(db::SCHEMA_V7);
         let _ = conn.execute(
             "INSERT OR IGNORE INTO stream_library (anilist_id, added_at) VALUES (?1, ?2)",
             params![anilist_id, db::now()],
@@ -4947,16 +5523,29 @@ async fn start_torrent_session_internal(
         ((last_byte / meta.piece_length) as usize).min(meta.pieces.len().saturating_sub(1));
 
     let num_pieces = meta.pieces.len();
-    let session_id = format!("{:x}-{anilist_id}-{ep_key}", db::now());
+
+    // Pre-allocate active working `.part` file and retain open read+write handle (`FILE_SHARE_DELETE` on Windows)
+    let initial_file = {
+        let f = shared_open_options()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&save_path)?;
+        f.set_len(meta.target_file_length)?;
+        f
+    };
 
     let session = Arc::new(SwarmSession {
         id: session_id.clone(),
+        stream_token,
         anilist_id,
         ep_key: ep_key.clone(),
         title: candidate.title.clone(),
         mode: mode.clone(),
         meta,
         save_path: save_path.clone(),
+        final_save_path,
+        renamed_to_final: AtomicBool::new(false),
         first_piece,
         last_piece,
         piece_states: Mutex::new(vec![PieceState::Missing; num_pieces]),
@@ -4968,6 +5557,7 @@ async fn start_torrent_session_internal(
         speed_bps: AtomicU64::new(0),
         upload_speed_bps: AtomicU64::new(0),
         active_peers: AtomicUsize::new(0),
+        active_peer_addrs: Mutex::new(HashSet::new()),
         state_str: Mutex::new(if preload_only {
             "preloading".into()
         } else {
@@ -4977,24 +5567,18 @@ async fn start_torrent_session_internal(
         stream_url: Mutex::new(None),
         allow_seeding,
         preload_only: AtomicBool::new(preload_only),
+        player_stopped: AtomicBool::new(false),
         cancelled: AtomicBool::new(false),
         piece_notify: Notify::new(),
-        file_write_lock: tokio::sync::Mutex::new(()),
-        hot_pieces: Mutex::new(HashMap::new()),
+        disk_file: Mutex::new(Some(initial_file)),
+        hot_pieces: Mutex::new((0, HashMap::new())),
     });
 
-    // Pre-allocate target file
-    {
-        let f = tokio::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&save_path)
-            .await?;
-        f.set_len(session.meta.target_file_length).await?;
-    }
-
     if mode == "stream" || mode == "hybrid" {
-        let _ = spawn_http_range_server(session.clone()).await?;
+        if let Err(e) = spawn_http_range_server(session.clone()).await {
+            teardown_session_resources(&session, false);
+            return Err(e);
+        }
     }
 
     sessions_map()
@@ -5022,11 +5606,7 @@ async fn run_swarm_orchestrator(
     episode_num: Option<i64>,
     ref_sub_url: Option<String>,
 ) {
-    let mut peer_id = [0u8; 20];
-    peer_id[0..8].copy_from_slice(b"-KR0081-");
-    let now_bytes = (db::now() as u64).to_be_bytes();
-    peer_id[8..16].copy_from_slice(&now_bytes);
-    peer_id[16..20].copy_from_slice(&std::process::id().to_be_bytes());
+    let peer_id = generate_peer_id(b"-KR0081-");
 
     // Stream discovered peers from all trackers in parallel so fast UDP/HTTP trackers
     // begin connecting to seeders within ~100ms instead of waiting for slow trackers.
@@ -5085,22 +5665,42 @@ async fn run_swarm_orchestrator(
     let mut last_up_bytes = 0u64;
     let mut last_speed_t = std::time::Instant::now();
     let mut last_emit_t = std::time::Instant::now();
-    let start_t = std::time::Instant::now();
+    let mut start_t = std::time::Instant::now();
     let mut was_preload = session.preload_only.load(Ordering::Relaxed);
     if !was_preload {
         let _ = app.emit("torrent-progress", session.status());
     }
+
+    let spawn_peer_if_new = |addr: SocketAddr,
+                             seen: &mut HashSet<SocketAddr>,
+                             handles: &mut Vec<tokio::task::JoinHandle<()>>,
+                             sess: &Arc<SwarmSession>,
+                             tx: &tokio::sync::mpsc::UnboundedSender<SocketAddr>| {
+        if !seen.insert(addr) {
+            return;
+        }
+        {
+            let mut active = sess.active_peer_addrs.lock().unwrap();
+            if !active.insert(addr) {
+                return;
+            }
+        }
+        let s = sess.clone();
+        let tx_c = tx.clone();
+        handles.push(tokio::spawn(async move {
+            let _ = run_peer_worker(s, addr, peer_id, tx_c).await;
+        }));
+    };
 
     loop {
         if session.cancelled.load(Ordering::Relaxed) {
             for h in &peer_handles {
                 h.abort();
             }
-            session.speed_bps.store(0, Ordering::Relaxed);
-            session.upload_speed_bps.store(0, Ordering::Relaxed);
-            session.active_peers.store(0, Ordering::Relaxed);
             *session.state_str.lock().unwrap() = "cancelled".into();
             sessions_map().lock().unwrap().remove(&session.id);
+            completed_streams_map().lock().unwrap().remove(&session.id);
+            teardown_session_resources(&session, true);
             let _ = app.emit("torrent-progress", session.status());
             break;
         }
@@ -5109,8 +5709,9 @@ async fn run_swarm_orchestrator(
         if was_preload && !is_preload {
             // Promoted from background 85% preload to active playback!
             was_preload = false;
+            start_t = std::time::Instant::now();
+            last_discovery_t = std::time::Instant::now();
             *session.state_str.lock().unwrap() = "buffering".into();
-            seen_peers.clear();
             spawn_tracker_peer_discovery(&session.meta, &peer_id, peer_tx.clone());
             crate::dht::spawn_get_peers(
                 session.meta.info_hash,
@@ -5127,13 +5728,7 @@ async fn run_swarm_orchestrator(
             let Ok(addr) = peer_rx.try_recv() else {
                 break;
             };
-            if seen_peers.insert(addr) {
-                let s = session.clone();
-                let tx = peer_tx.clone();
-                peer_handles.push(tokio::spawn(async move {
-                    let _ = run_peer_worker(s, addr, peer_id, tx).await;
-                }));
-            }
+            spawn_peer_if_new(addr, &mut seen_peers, &mut peer_handles, &session, &peer_tx);
         }
 
         if !is_preload && start_t.elapsed() >= Duration::from_secs(15) && seen_peers.is_empty() {
@@ -5144,6 +5739,7 @@ async fn run_swarm_orchestrator(
             *session.error_str.lock().unwrap() =
                 Some("No peers found for this release (trackers and DHT) — trying next source…".into());
             sessions_map().lock().unwrap().remove(&session.id);
+            teardown_session_resources(&session, true);
             let _ = app.emit("torrent-progress", session.status());
             return;
         }
@@ -5159,19 +5755,19 @@ async fn run_swarm_orchestrator(
             for h in &peer_handles {
                 h.abort();
             }
-            session.speed_bps.store(0, Ordering::Relaxed);
-            session.upload_speed_bps.store(0, Ordering::Relaxed);
-            session.active_peers.store(0, Ordering::Relaxed);
             *session.state_str.lock().unwrap() = "error".into();
             *session.error_str.lock().unwrap() =
                 Some("No responsive seeders on this release — trying next source…".into());
             sessions_map().lock().unwrap().remove(&session.id);
+            teardown_session_resources(&session, true);
             let _ = app.emit("torrent-progress", session.status());
             return;
         }
 
         let elapsed_sec = last_speed_t.elapsed().as_secs_f64();
         if elapsed_sec >= 0.5 {
+            peer_handles.retain(|h| !h.is_finished());
+
             let cur_bytes = session.wire_rx_bytes.load(Ordering::Relaxed);
             let delta = cur_bytes.saturating_sub(last_bytes);
             let inst_speed = ((delta as f64) / elapsed_sec) as u64;
@@ -5202,7 +5798,8 @@ async fn run_swarm_orchestrator(
                 && last_discovery_t.elapsed() >= Duration::from_secs(20)
             {
                 last_discovery_t = std::time::Instant::now();
-                seen_peers.clear();
+                let live_addrs = session.active_peer_addrs.lock().unwrap().clone();
+                seen_peers.retain(|a| live_addrs.contains(a));
                 spawn_tracker_peer_discovery(&session.meta, &peer_id, peer_tx.clone());
                 crate::dht::spawn_get_peers(
                     session.meta.info_hash,
@@ -5243,12 +5840,41 @@ async fn run_swarm_orchestrator(
             session.speed_bps.store(0, Ordering::Relaxed);
             session.upload_speed_bps.store(0, Ordering::Relaxed);
             session.active_peers.store(0, Ordering::Relaxed);
+
+            let rename_ok = match session.finalize_completed_file_async().await {
+                Ok(()) => true,
+                Err(e) => {
+                    crate::klog!(
+                        "[torrent] Deferred finalizing '{}' ({e}); keeping .part active and retrying on player stop",
+                        session.save_path.display()
+                    );
+                    false
+                }
+            };
+
             *session.state_str.lock().unwrap() = "completed".into();
             sessions_map().lock().unwrap().remove(&session.id);
+
+            let keep_stream_alive = (session.mode == "stream"
+                || (session.mode == "hybrid" && !session.player_stopped.load(Ordering::Relaxed))
+                || !rename_ok)
+                && !session.cancelled.load(Ordering::Relaxed);
+
+            if keep_stream_alive {
+                completed_streams_map()
+                    .lock()
+                    .unwrap()
+                    .insert(session.id.clone(), session.clone());
+            } else {
+                session.cancelled.store(true, Ordering::Relaxed);
+                session.clear_hot_pieces();
+                session.close_disk_file();
+                session.piece_notify.notify_waiters();
+            }
             let _ = app.emit("torrent-progress", session.status());
 
-            // If mode is "hybrid" or "download", trigger a rescan so the downloaded file is linked in library
-            if session.mode == "hybrid" || session.mode == "download" {
+            // If mode is "hybrid" or "download" and atomic rename succeeded, trigger a rescan so the `.mkv` is linked in library
+            if (session.mode == "hybrid" || session.mode == "download") && rename_ok {
                 crate::scan::spawn_scan(app.clone(), st.clone(), None);
             }
             break;
@@ -5260,13 +5886,7 @@ async fn run_swarm_orchestrator(
         }
         tokio::select! {
             Some(addr) = peer_rx.recv(), if seen_peers.len() < max_peers => {
-                if seen_peers.insert(addr) {
-                    let s = session.clone();
-                    let tx = peer_tx.clone();
-                    peer_handles.push(tokio::spawn(async move {
-                        let _ = run_peer_worker(s, addr, peer_id, tx).await;
-                    }));
-                }
+                spawn_peer_if_new(addr, &mut seen_peers, &mut peer_handles, &session, &peer_tx);
             }
             _ = session.piece_notify.notified(), if !launched_player || is_preload || session.cancelled.load(Ordering::Relaxed) => {}
             _ = tokio::time::sleep(Duration::from_millis(800)) => {}
@@ -5281,6 +5901,30 @@ async fn run_swarm_orchestrator(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn score_candidate(
+        title: &str,
+        group: Option<&str>,
+        resolution: Option<&str>,
+        seeders: i64,
+        is_batch: bool,
+        target_episode: i64,
+        pref_res: &str,
+    ) -> i64 {
+        score_candidate_with_context(
+            title,
+            group,
+            resolution,
+            seeders,
+            0,
+            is_batch,
+            target_episode,
+            None,
+            false,
+            pref_res,
+            &[],
+        )
+    }
 
     #[test]
     fn search_helpers_keep_relevant_low_seeder_releases() {
@@ -5318,18 +5962,73 @@ mod tests {
 
     #[test]
     fn parses_bencode_and_torrent_metadata() {
-        // Minimal synthetic single-file .torrent:
-        // d8:announce27:http://tracker.example/ann4:infod6:lengthi1048576e4:name11:episode.mkv12:piece lengthi262144e6:pieces20:01234567890123456789ee
-        let raw = b"d8:announce26:http://tracker.example/ann4:infod6:lengthi1048576e4:name11:episode.mkv12:piece lengthi262144e6:pieces20:01234567890123456789ee";
+        // Minimal synthetic single-file .torrent (1 MiB file = 4 x 256 KiB pieces = 80-byte `pieces`):
+        let raw = b"d8:announce26:http://tracker.example/ann4:infod6:lengthi1048576e4:name11:episode.mkv12:piece lengthi262144e6:pieces80:01234567890123456789012345678901234567890123456789012345678901234567890123456789ee";
         let meta = parse_torrent_bytes(raw, Some(1)).unwrap();
         assert_eq!(meta.name, "episode.mkv");
         assert_eq!(meta.total_length, 1_048_576);
         assert_eq!(meta.piece_length, 262_144);
-        assert_eq!(meta.pieces.len(), 1);
+        assert_eq!(meta.pieces.len(), 4);
         assert!(meta
             .trackers
             .iter()
             .any(|t| t == "http://tracker.example/ann"));
+    }
+
+    #[test]
+    fn bencode_rejects_overflow_and_excessive_recursion() {
+        assert!(parse_bencode(b"18446744073709551615:a").is_err());
+        let deep_lists = format!("{}{}", "l".repeat(100), "e".repeat(100));
+        assert!(parse_bencode(deep_lists.as_bytes()).is_err());
+        assert!(parse_bencode(&b"l".repeat(100)).is_err());
+    }
+
+    #[test]
+    fn torrent_parser_rejects_zero_piece_len_empty_pieces_and_executables() {
+        // piece length = 0
+        let zero_plen = b"d4:infod6:lengthi262144e4:name11:episode.mkv12:piece lengthi0e6:pieces20:01234567890123456789ee";
+        assert!(parse_torrent_bytes(zero_plen, Some(1)).is_err());
+
+        // empty pieces
+        let empty_pieces = b"d4:infod6:lengthi262144e4:name11:episode.mkv12:piece lengthi262144e6:pieces0:ee";
+        assert!(parse_torrent_bytes(empty_pieces, Some(1)).is_err());
+
+        // non-video payload (.exe)
+        let exe_torrent = b"d4:infod6:lengthi262144e4:name11:malware.exe12:piece lengthi262144e6:pieces20:01234567890123456789ee";
+        assert!(parse_torrent_bytes(exe_torrent, Some(1)).is_err());
+
+        // filename sanitization & UTF-8 btih safety
+        assert_eq!(sanitize_filename(".."), "unnamed");
+        assert_eq!(sanitize_filename("."), "unnamed");
+        assert_eq!(sanitize_filename("CON.mkv"), "_CON.mkv");
+        assert_eq!(sanitize_filename("episode.mkv... "), "episode.mkv");
+        let utf8_40_bytes = format!("{}a", "あ".repeat(13));
+        assert_eq!(utf8_40_bytes.len(), 40);
+        assert!(parse_btih_20(&utf8_40_bytes).is_none());
+    }
+
+    #[test]
+    fn romaji_macrons_seasons_and_http_byte_ranges_work() {
+        assert_eq!(clean_search_title("Sōsō no Frieren"), "Soso no Frieren");
+        assert_eq!(
+            split_season_from_title("Kusuriya no Hitorigoto Second Season"),
+            (Some(2), "Kusuriya no Hitorigoto".to_string())
+        );
+        assert_eq!(
+            split_season_from_title("Jujutsu Kaisen 第2期"),
+            (Some(2), "Jujutsu Kaisen".to_string())
+        );
+        assert_eq!(
+            split_season_from_title("Mushoku Tensei S2"),
+            (Some(2), "Mushoku Tensei".to_string())
+        );
+
+        assert_eq!(parse_http_byte_range("bytes=0-1023", 10_000), Ok((0, 1023)));
+        assert_eq!(parse_http_byte_range("bytes=-65536", 100_000), Ok((34_464, 99_999)));
+        assert_eq!(parse_http_byte_range("bytes=-65536", 10_000), Ok((0, 9_999)));
+        assert!(parse_http_byte_range("bytes=500-100", 10_000).is_err());
+        assert!(parse_http_byte_range("bytes=10000-", 10_000).is_err());
+        assert!(parse_http_byte_range("bytes=0-10", 0).is_err());
     }
 
     #[test]

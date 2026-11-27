@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 
 const BOOTSTRAP: [&str; 5] = [
     "router.bittorrent.com:6881",
@@ -41,17 +41,7 @@ fn bootstrap_addrs_cache() -> &'static Mutex<Vec<SocketAddr>> {
 
 fn node_id() -> [u8; 20] {
     static OWN_ID: OnceLock<[u8; 20]> = OnceLock::new();
-    *OWN_ID.get_or_init(|| {
-        let seed = format!(
-            "kura-dht-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-        sha1_digest(seed.as_bytes())
-    })
+    *OWN_ID.get_or_init(crate::db::random_bytes::<20>)
 }
 
 fn xor_distance(a: &[u8; 20], b: &[u8; 20]) -> [u8; 20] {
@@ -92,7 +82,14 @@ fn parse_compact_peer(b: &[u8]) -> Option<SocketAddr> {
     }
     let ip = Ipv4Addr::new(b[0], b[1], b[2], b[3]);
     let port = u16::from_be_bytes([b[4], b[5]]);
-    if port == 0 || ip.is_unspecified() || ip.is_loopback() || ip.is_private() {
+    if port == 0
+        || ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+    {
         return None;
     }
     Some(SocketAddr::V4(SocketAddrV4::new(ip, port)))
@@ -281,28 +278,6 @@ pub fn spawn_get_peers(
     });
 }
 
-/// Convenience helper returning up to `max_peers` within `timeout`.
-pub async fn quick_get_peers(
-    info_hash: [u8; 20],
-    max_peers: usize,
-    timeout: Duration,
-) -> Vec<SocketAddr> {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let cancel = Arc::new(AtomicBool::new(false));
-    spawn_get_peers(info_hash, tx, timeout, Some(cancel.clone()));
-    let mut out = Vec::new();
-    let deadline = Instant::now() + timeout;
-    while out.len() < max_peers && Instant::now() < deadline {
-        let rem = deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(rem, rx.recv()).await {
-            Ok(Some(peer)) => out.push(peer),
-            _ => break,
-        }
-    }
-    cancel.store(true, Ordering::Relaxed);
-    out
-}
-
 async fn run_get_peers(
     info_hash: [u8; 20],
     tx: UnboundedSender<SocketAddr>,
@@ -354,8 +329,10 @@ async fn run_get_peers(
             break;
         }
 
+        // Expire unanswered queries.
         in_flight.retain(|_, (_, t)| t.elapsed() < QUERY_TIMEOUT);
 
+        // Query the closest not-yet-queried nodes.
         if in_flight.len() < MAX_IN_FLIGHT && queried.len() < MAX_QUERIES {
             let mut pending: Vec<(SocketAddr, [u8; 20])> = nodes
                 .iter()
@@ -459,6 +436,10 @@ mod tests {
         assert_eq!(
             a.dict_get(b"info_hash").and_then(|x| x.as_bytes()),
             Some(&[2u8; 20][..])
+        );
+        assert_eq!(
+            v.dict_get(b"t").and_then(|x| x.as_bytes()),
+            Some(&[1u8, 2u8][..])
         );
 
         let fn_q = find_node_query(&[3u8; 20], &[4u8; 20], 0x0304);

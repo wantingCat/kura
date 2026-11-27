@@ -155,19 +155,8 @@ pub fn dh_public_key(priv_key: &[u8; 20]) -> [u8; 96] {
     mod_pow_mse(&g, priv_key)
 }
 
-fn random_20_bytes(extra_seed: u64) -> [u8; 20] {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let mut material = Vec::with_capacity(40);
-    material.extend_from_slice(&nanos.to_le_bytes());
-    material.extend_from_slice(&seq.to_le_bytes());
-    material.extend_from_slice(&extra_seed.to_le_bytes());
-    material.extend_from_slice(&std::process::id().to_le_bytes());
-    sha1_digest(&material)
+fn random_20_bytes() -> [u8; 20] {
+    crate::db::random_bytes::<20>()
 }
 
 // ---------------------------------------------------------------------------
@@ -325,16 +314,7 @@ pub async fn perform_mse_outbound_io<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let xa = random_20_bytes(u64::from_be_bytes([
-        info_hash[0],
-        info_hash[1],
-        info_hash[2],
-        info_hash[3],
-        info_hash[4],
-        info_hash[5],
-        info_hash[6],
-        info_hash[7],
-    ]));
+    let xa = random_20_bytes();
     let ya = dh_public_key(&xa);
     let pad_len = (xa[19] & 0x1F) as usize;
     let mut step1 = Vec::with_capacity(96 + pad_len);

@@ -2,14 +2,14 @@
 
 use crate::db::{self, now};
 use crate::service::AppState;
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -17,7 +17,18 @@ pub const DEFAULT_CLIENT_ID: &str = "55550";
 
 static FLUSHING: AtomicBool = AtomicBool::new(false);
 static OAUTH_LISTENING: AtomicBool = AtomicBool::new(false);
+static OAUTH_PORT: AtomicU16 = AtomicU16::new(0);
+static OAUTH_CSRF: OnceLock<Mutex<String>> = OnceLock::new();
 static CONNECTING: AtomicBool = AtomicBool::new(false);
+static SYNC_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+fn sync_lock() -> &'static tokio::sync::Mutex<()> {
+    SYNC_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn oauth_csrf_slot() -> &'static Mutex<String> {
+    OAUTH_CSRF.get_or_init(|| Mutex::new(String::new()))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,10 +90,6 @@ pub fn get_account(conn: &Connection) -> AnilistAccount {
         .flatten()
         .map(|v| v != "0" && v != "false")
         .unwrap_or(true);
-    let client_id = db::get_setting(conn, "pref.anilist_client_id")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
     let queued_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM anilist_scrobble_queue", [], |r| r.get(0))
         .unwrap_or(0);
@@ -99,7 +106,7 @@ pub fn get_account(conn: &Connection) -> AnilistAccount {
         auto_scrobble,
         queued_count,
         tracked_count,
-        client_id,
+        client_id: String::new(),
     }
 }
 
@@ -228,59 +235,68 @@ pub async fn connect_with_token(app: &AppHandle, st: &Arc<AppState>, raw_token: 
     Ok(acct)
 }
 
-const OAUTH_INIT_SCRIPT: &str = r#"
-(function() {
+fn build_oauth_init_script(actual_port: u16, csrf_token: &str) -> String {
+    format!(
+        r#"
+(function() {{
+  if (window.location.origin !== "https://anilist.co") return;
   let sent = false;
-  const JWT_RE = /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/;
-  function deliver(raw) {
+  const PORT = {actual_port};
+  const CSRF = "{csrf_token}";
+  const JWT_RE = /eyJ[A-Za-z0-9_-]{{10,}}\.[A-Za-z0-9_-]{{10,}}\.[A-Za-z0-9_-]{{10,}}/;
+  function deliver(raw) {{
     if (sent || !raw) return;
     const m = String(raw).match(JWT_RE);
     const token = m ? m[0] : String(raw).replace(/^.*access_token=/, "").split("&")[0].trim();
     if (!token || !token.startsWith("eyJ")) return;
     sent = true;
-    try {
-      window.location.replace("http://127.0.0.1:14876/oauth/callback?access_token=" + encodeURIComponent(token));
-    } catch (_) {}
-  }
-  function check() {
+    try {{
+      window.location.replace(
+        "http://127.0.0.1:" + PORT + "/oauth/callback?kura_state=" + encodeURIComponent(CSRF) + "&access_token=" + encodeURIComponent(token)
+      );
+    }} catch (_) {{}}
+  }}
+  function check() {{
     if (sent) return;
     const h = window.location.hash || "";
     const s = window.location.search || "";
-    if (h.includes("access_token=")) {
+    if (h.includes("access_token=")) {{
       deliver(h);
       return;
-    }
-    if (s.includes("access_token=") && !window.location.host.startsWith("127.0.0.1")) {
+    }}
+    if (s.includes("access_token=")) {{
       deliver(s);
       return;
-    }
-    if (window.location.pathname.includes("/oauth/pin")) {
+    }}
+    if (window.location.pathname.includes("/oauth/pin")) {{
       const els = document.querySelectorAll("textarea, input, code, pre, .token");
-      for (const el of els) {
+      for (const el of els) {{
         const val = (el.value || el.textContent || "").trim();
         const m = val.match(JWT_RE);
-        if (m) {
+        if (m) {{
           deliver(m[0]);
           return;
-        }
-      }
-      if (document.body) {
+        }}
+      }}
+      if (document.body) {{
         const txt = document.body.innerText || "";
         const m = txt.match(JWT_RE);
-        if (m) {
+        if (m) {{
           deliver(m[0]);
           return;
-        }
-      }
-    }
-  }
+        }}
+      }}
+    }}
+  }}
   window.addEventListener("hashchange", check);
   window.addEventListener("DOMContentLoaded", check);
   window.addEventListener("load", check);
   setInterval(check, 250);
   check();
-})();
-"#;
+}})();
+"#
+    )
+}
 
 /// Start a 1-click OAuth flow: opens an in-app AniList login window (with automatic token capture)
 /// plus a local loopback listener so everything completes automatically with zero manual copy/paste.
@@ -292,22 +308,55 @@ pub fn start_oauth_flow(app: AppHandle, st: Arc<AppState>, client_id: Option<Str
 
     let auth_url = format!("https://anilist.co/api/v2/oauth/authorize?client_id={cid}&response_type=token");
 
-    if !OAUTH_LISTENING.swap(true, Ordering::SeqCst) {
+    if let Some(existing) = app.get_webview_window("anilist-oauth") {
+        let _ = existing.set_focus();
+        return Ok(auth_url);
+    }
+
+    let csrf_token = db::random_hex_token(16);
+    *oauth_csrf_slot().lock().unwrap_or_else(|e| e.into_inner()) = csrf_token.clone();
+
+    let actual_port = if !OAUTH_LISTENING.swap(true, Ordering::SeqCst) {
+        let mut last_err = None;
+        let mut bound_listener = None;
+        for attempt in 0..5 {
+            match TcpListener::bind("127.0.0.1:14876") {
+                Ok(l) => {
+                    bound_listener = Some(l);
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < 4 {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            }
+        }
+        let Some(listener) = bound_listener else {
+            OAUTH_LISTENING.store(false, Ordering::SeqCst);
+            let detail = last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "port unavailable".to_string());
+            bail!("Couldn't bind AniList OAuth callback port 127.0.0.1:14876 ({detail}). Please close any conflicting process on port 14876 and try again.");
+        };
+        let port = 14876u16;
+        OAUTH_PORT.store(port, Ordering::SeqCst);
         let app_bg = app.clone();
         let st_bg = st.clone();
         std::thread::spawn(move || {
-            let res = run_loopback_listener(&app_bg, &st_bg);
+            let res = run_loopback_listener(listener, port, &app_bg, &st_bg);
             OAUTH_LISTENING.store(false, Ordering::SeqCst);
             if let Err(e) = res {
                 crate::klog!("[kura] AniList OAuth loopback listener ended: {e}");
             }
         });
-    }
+        port
+    } else {
+        OAUTH_PORT.load(Ordering::SeqCst)
+    };
 
-    if let Some(existing) = app.get_webview_window("anilist-oauth") {
-        let _ = existing.set_focus();
-        return Ok(auth_url);
-    }
+    let init_script = build_oauth_init_script(actual_port, &csrf_token);
 
     if let Ok(parsed) = auth_url.parse::<tauri::Url>() {
         let app_nav = app.clone();
@@ -317,7 +366,7 @@ pub fn start_oauth_flow(app: AppHandle, st: Arc<AppState>, client_id: Option<Str
             .inner_size(520.0, 700.0)
             .resizable(true)
             .center()
-            .initialization_script(OAUTH_INIT_SCRIPT)
+            .initialization_script(&init_script)
             .on_navigation(move |url| {
                 let full = url.as_str();
                 if full.contains("access_token=") {
@@ -357,10 +406,79 @@ pub fn start_oauth_flow(app: AppHandle, st: Arc<AppState>, client_id: Option<Str
     Ok(auth_url)
 }
 
-fn run_loopback_listener(app: &AppHandle, st: &Arc<AppState>) -> Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:14876")
-        .or_else(|_| TcpListener::bind("127.0.0.1:14877"))
-        .context("couldn't bind loopback port 14876/14877")?;
+fn read_framed_http_request(stream: &mut std::net::TcpStream) -> Result<Option<(String, String)>> {
+    const MAX_HEADER_BYTES: usize = 16 * 1024;
+    const MAX_BODY_BYTES: usize = 16 * 1024;
+
+    let mut raw = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 2048];
+    let header_end = loop {
+        if raw.len() >= MAX_HEADER_BYTES {
+            bail!("OAuth HTTP header too large");
+        }
+        let n = match stream.read(&mut chunk) {
+            Ok(0) => {
+                if raw.is_empty() {
+                    return Ok(None);
+                }
+                bail!("EOF before end of OAuth HTTP headers");
+            }
+            Ok(n) => n,
+            Err(e) => return Err(e.into()),
+        };
+        raw.extend_from_slice(&chunk[..n]);
+        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos;
+        }
+    };
+
+    let head_str = String::from_utf8_lossy(&raw[..header_end]).into_owned();
+    let mut content_len = 0usize;
+    for line in head_str.lines().skip(1) {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("content-length") {
+                content_len = v.trim().parse::<usize>().unwrap_or(0);
+            }
+        }
+    }
+    if content_len > MAX_BODY_BYTES {
+        bail!("OAuth HTTP body too large");
+    }
+
+    let body_start = header_end + 4;
+    while raw.len() < body_start + content_len {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&chunk[..n]);
+        if raw.len() > body_start + MAX_BODY_BYTES {
+            bail!("OAuth HTTP body exceeded limit");
+        }
+    }
+
+    let body_end = (body_start + content_len).min(raw.len());
+    let body_str = String::from_utf8_lossy(&raw[body_start..body_end]).into_owned();
+    Ok(Some((head_str, body_str)))
+}
+
+fn extract_query_param(query: &str, key: &str) -> Option<String> {
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == key {
+                return Some(crate::onlinestream::url_decode_component(v));
+            }
+        }
+    }
+    None
+}
+
+fn run_loopback_listener(
+    listener: TcpListener,
+    actual_port: u16,
+    app: &AppHandle,
+    st: &Arc<AppState>,
+) -> Result<()> {
     listener.set_nonblocking(true)?;
     let deadline = std::time::Instant::now() + Duration::from_secs(180);
 
@@ -368,34 +486,85 @@ fn run_loopback_listener(app: &AppHandle, st: &Arc<AppState>) -> Result<()> {
         match listener.accept() {
             Ok((mut stream, _)) => {
                 let _ = stream.set_nonblocking(false);
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-                let mut buf = [0u8; 16384];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                if n == 0 {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let Ok(Some((head_str, body_str))) = read_framed_http_request(&mut stream) else {
+                    continue;
+                };
+                let mut lines = head_str.lines();
+                let first_line = lines.next().unwrap_or("");
+                let mut parts = first_line.split_whitespace();
+                let method = parts.next().unwrap_or("");
+                let raw_target = parts.next().unwrap_or("/");
+                let (path, query) = raw_target.split_once('?').unwrap_or((raw_target, ""));
+
+                if method.eq_ignore_ascii_case("OPTIONS") {
+                    let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
                     continue;
                 }
-                let req = String::from_utf8_lossy(&buf[..n]);
-                let first_line = req.lines().next().unwrap_or("");
 
-                if first_line.starts_with("POST /oauth/token") || first_line.contains("access_token=") {
-                    let body = if first_line.contains("access_token=") {
-                        first_line.to_string()
+                let mut csrf_hdr: Option<String> = None;
+                let mut origin_hdr: Option<String> = None;
+                for hdr in lines {
+                    if let Some((k, v)) = hdr.split_once(':') {
+                        let k_trim = k.trim();
+                        let v_trim = v.trim();
+                        if k_trim.eq_ignore_ascii_case("x-kura-oauth-token") {
+                            csrf_hdr = Some(v_trim.to_string());
+                        } else if k_trim.eq_ignore_ascii_case("origin") {
+                            origin_hdr = Some(v_trim.to_string());
+                        }
+                    }
+                }
+
+                let expected_csrf = oauth_csrf_slot()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if expected_csrf.is_empty() {
+                    let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
+
+                let query_state = extract_query_param(query, "kura_state");
+
+                if (method.eq_ignore_ascii_case("POST") && path == "/oauth/token")
+                    || query.contains("access_token=")
+                {
+                    let valid_origin = origin_hdr.as_deref().map_or(true, |o| {
+                        o == "https://anilist.co"
+                            || o == format!("http://127.0.0.1:{actual_port}")
+                            || o == format!("http://localhost:{actual_port}")
+                    });
+                    let valid_csrf = if method.eq_ignore_ascii_case("POST") {
+                        csrf_hdr.as_deref() == Some(expected_csrf.as_str())
                     } else {
-                        req.split("\r\n\r\n").nth(1).unwrap_or("").trim().to_string()
+                        query_state.as_deref() == Some(expected_csrf.as_str())
                     };
-                    let token = clean_token(&body);
+                    if !valid_origin || !valid_csrf {
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+                        continue;
+                    }
+
+                    let token_source = if query.contains("access_token=") {
+                        query
+                    } else {
+                        body_str.trim()
+                    };
+                    let token = clean_token(token_source);
                     let done_html = r#"<!doctype html><html><head><meta charset="utf-8"><title>Kura · AniList</title>
 <style>body{background:#181012;color:#f7ede2;font-family:system-ui,sans-serif;display:grid;place-items:center;height:100vh;margin:0}
 .card{background:#23181b;border:2.5px solid #140c0d;border-radius:18px;padding:32px 36px;box-shadow:5px 5px 0 #f76d4d;text-align:center;max-width:420px}
 h1{margin:0 0 10px;color:#f76d4d;font-size:24px}p{margin:0;color:#cdbab0;line-height:1.5}</style></head>
 <body><div class="card"><h1>Connected to Kura!</h1><p>Finishing sign-in and syncing your AniList…</p></div></body></html>"#;
                     let reply = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         done_html.len(),
                         done_html
                     );
                     let _ = stream.write_all(reply.as_bytes());
                     if !token.is_empty() && token.starts_with("eyJ") {
+                        *oauth_csrf_slot().lock().unwrap_or_else(|e| e.into_inner()) = String::new();
                         let app_c = app.clone();
                         let st_c = st.clone();
                         tauri::async_runtime::spawn(async move {
@@ -404,26 +573,36 @@ h1{margin:0 0 10px;color:#f76d4d;font-size:24px}p{margin:0;color:#cdbab0;line-he
                         return Ok(());
                     }
                 } else {
-                    // Serve the HTML page that reads `window.location.hash` and posts it back to `/oauth/token`.
-                    let html = r#"<!doctype html><html><head><meta charset="utf-8"><title>Kura · AniList</title>
-<style>body{background:#181012;color:#f7ede2;font-family:system-ui,sans-serif;display:grid;place-items:center;height:100vh;margin:0}
-.card{background:#23181b;border:2.5px solid #140c0d;border-radius:18px;padding:32px 36px;box-shadow:5px 5px 0 #f76d4d;text-align:center;max-width:420px}
-h1{margin:0 0 10px;color:#f76d4d;font-size:24px}p{margin:0;color:#cdbab0;line-height:1.5}</style></head>
+                    // Serve the read-only HTML callback bridge (`Cache-Control: no-store`) that reads `window.location.hash`
+                    // (stripped by browsers on HTTPS->HTTP redirect along with `Referer`) and posts it back to `/oauth/token`
+                    // with `X-Kura-OAuth-Token`.
+                    let html = format!(
+                        r#"<!doctype html><html><head><meta charset="utf-8"><title>Kura · AniList</title>
+<style>body{{background:#181012;color:#f7ede2;font-family:system-ui,sans-serif;display:grid;place-items:center;height:100vh;margin:0}}
+.card{{background:#23181b;border:2.5px solid #140c0d;border-radius:18px;padding:32px 36px;box-shadow:5px 5px 0 #f76d4d;text-align:center;max-width:420px}}
+h1{{margin:0 0 10px;color:#f76d4d;font-size:24px}}p{{margin:0;color:#cdbab0;line-height:1.5}}</style></head>
 <body><div class="card"><h1 id="h">Connecting to Kura…</h1><p id="p">Finishing AniList sign-in.</p></div>
 <script>
 const h = location.hash.slice(1) || location.search.slice(1);
-if (h.includes("access_token=")) {
-  fetch("/oauth/token", { method: "POST", body: h }).then(() => {
-    document.getElementById("h").textContent = "Connected to Kura!";
-    document.getElementById("p").textContent = "You can close this tab and return to Kura.";
-  });
-} else {
+if (h.includes("access_token=")) {{
+  fetch("/oauth/token", {{
+    method: "POST",
+    headers: {{ "X-Kura-OAuth-Token": "{expected_csrf}" }},
+    body: h
+  }}).then((r) => {{
+    if (r.ok) {{
+      document.getElementById("h").textContent = "Connected to Kura!";
+      document.getElementById("p").textContent = "You can close this tab and return to Kura.";
+    }}
+  }});
+}} else {{
   document.getElementById("h").textContent = "No token found in URL";
   document.getElementById("p").textContent = "Copy the token from AniList and paste it into Kura Settings → Integrations.";
-}
-</script></body></html>"#;
+}}
+</script></body></html>"#
+                    );
                     let header = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         html.len()
                     );
                     let _ = stream.write_all(header.as_bytes());
@@ -540,7 +719,6 @@ pub fn reconcile_media_entry(conn: &Connection, anilist_id: i64, total_eps: Opti
 
 /// Reconcile all cached `anilist_entries` rows into `watch_state` so both offline and streaming shows reflect watched episodes.
 pub fn reconcile_cached_entries(conn: &Connection) {
-    let _ = conn.execute_batch(db::SCHEMA_V5);
     let rows: Vec<(i64, i64)> = {
         let Ok(mut stmt) = conn.prepare(
             "SELECT ae.anilist_id,
@@ -554,7 +732,8 @@ pub fn reconcile_cached_entries(conn: &Connection) {
                        AND w.ep_key NOT LIKE 'extra:%') AS local_cnt
              FROM anilist_entries ae
              LEFT JOIN media m ON m.anilist_id = ae.anilist_id
-             WHERE ae.progress > 0 OR ae.status = 'COMPLETED'",
+             WHERE (ae.progress > 0 OR ae.status = 'COMPLETED')
+               AND NOT EXISTS(SELECT 1 FROM anilist_scrobble_queue q WHERE q.anilist_id = ae.anilist_id)",
         ) else {
             return;
         };
@@ -648,64 +827,62 @@ pub fn on_episode_watched(app: &AppHandle, st: &Arc<AppState>, anilist_id: i64) 
     }
 }
 
-/// Update `anilist_entries` (and AniList if auto-scrobble is enabled) when an episode is unmarked as watched locally.
-pub fn on_episode_unwatched(app: &AppHandle, st: &Arc<AppState>, anilist_id: i64) {
-    let push_target: Option<(String, i64, String)> = {
-        let conn = st.db();
-        let Some(remote) = get_remote_entry(&conn, anilist_id) else {
-            return;
-        };
-        let local_prog = local_watched_progress(&conn, anilist_id);
-        if local_prog >= remote.progress && remote.status != "COMPLETED" {
-            return;
-        }
-        let next_status = if remote.status == "COMPLETED" {
-            if local_prog > 0 {
-                "CURRENT".to_string()
-            } else {
-                "PLANNING".to_string()
-            }
-        } else {
-            remote.status.clone()
-        };
-        let _ = conn.execute(
-            "UPDATE anilist_entries SET progress = ?2, status = ?3, updated_at = ?4 WHERE anilist_id = ?1",
-            params![anilist_id, local_prog, next_status, now()],
-        );
-        let acct = get_account(&conn);
-        if acct.connected && acct.auto_scrobble {
-            db::get_setting(&conn, "anilist.token")
-                .ok()
-                .flatten()
-                .filter(|s| !s.trim().is_empty())
-                .map(|tok| (tok, local_prog, next_status))
-        } else {
-            None
-        }
+fn enqueue_unwatch_mutation(conn: &Connection, anilist_id: i64) -> bool {
+    let Some(remote) = get_remote_entry(conn, anilist_id) else {
+        return false;
     };
-    if let Some((token, prog, status)) = push_target {
+    let local_prog = local_watched_progress(conn, anilist_id);
+    if local_prog >= remote.progress && remote.status != "COMPLETED" {
+        return false;
+    }
+    let next_status = if remote.status == "COMPLETED" {
+        if local_prog > 0 {
+            "CURRENT".to_string()
+        } else {
+            "PLANNING".to_string()
+        }
+    } else {
+        remote.status.clone()
+    };
+    let ts = now();
+    let _ = conn.execute(
+        "UPDATE anilist_entries SET progress = ?2, status = ?3, updated_at = ?4 WHERE anilist_id = ?1",
+        params![anilist_id, local_prog, next_status, ts],
+    );
+    let acct = get_account(conn);
+    if acct.connected && acct.auto_scrobble {
+        let _ = conn.execute(
+            "INSERT INTO anilist_scrobble_queue (anilist_id, progress, status, queued_at, last_error)
+             VALUES (?1, ?2, ?3, ?4, NULL)
+             ON CONFLICT(anilist_id) DO UPDATE SET
+               progress = excluded.progress,
+               status = excluded.status,
+               queued_at = excluded.queued_at,
+               last_error = NULL",
+            params![anilist_id, local_prog, Some(next_status), ts],
+        );
+        true
+    } else {
+        false
+    }
+}
+
+/// Update `anilist_entries` (and queue for AniList sync if auto-scrobble is enabled) when an episode is unmarked as watched locally.
+pub fn on_episode_unwatched(app: &AppHandle, st: &Arc<AppState>, anilist_id: i64) {
+    let should_flush = {
+        let conn = st.db();
+        let queued = enqueue_unwatch_mutation(&conn, anilist_id);
+        if queued {
+            let updated_acct = get_account(&conn);
+            let _ = app.emit("anilist-changed", &updated_acct);
+        }
+        queued
+    };
+    if should_flush {
         let app_c = app.clone();
         let st_c = st.clone();
         tauri::async_runtime::spawn(async move {
-            if let Ok(saved) = st_c
-                .providers
-                .anilist_save_entry(&token, anilist_id, prog, Some(&status))
-                .await
-            {
-                let conn = st_c.db();
-                let _ = conn.execute(
-                    "UPDATE anilist_entries SET entry_id = ?2, status = ?3, progress = ?4, updated_at = ?5 WHERE anilist_id = ?1",
-                    params![
-                        anilist_id,
-                        saved.id,
-                        saved.status,
-                        saved.progress,
-                        saved.updated_at.unwrap_or_else(now)
-                    ],
-                );
-                let acct = get_account(&conn);
-                let _ = app_c.emit("anilist-changed", &acct);
-            }
+            let _ = flush_queue(&app_c, &st_c).await;
         });
     }
 }
@@ -720,9 +897,9 @@ pub async fn update_entry(
     progress: Option<i64>,
     score: Option<f64>,
 ) -> Result<AnilistRemoteEntry> {
+    let _sync_guard = sync_lock().lock().await;
     let (token, mut target_status, mut target_progress, target_score) = {
         let conn = st.db();
-        let _ = conn.execute_batch(db::SCHEMA_V5);
         let token = db::get_setting(&conn, "anilist.token")?.filter(|s| !s.trim().is_empty());
         let existing = get_remote_entry(&conn, anilist_id);
         let total_eps: Option<i64> = conn
@@ -850,6 +1027,11 @@ pub async fn update_entry(
 /// Flush pending scrobbles in `anilist_scrobble_queue` to AniList immediately.
 /// Keeps failed items in the queue for retry when back online.
 pub async fn flush_queue(app: &AppHandle, st: &Arc<AppState>) -> Result<usize> {
+    let _sync_guard = sync_lock().lock().await;
+    flush_queue_unlocked(app, st).await
+}
+
+async fn flush_queue_unlocked(app: &AppHandle, st: &Arc<AppState>) -> Result<usize> {
     if FLUSHING.swap(true, Ordering::SeqCst) {
         return Ok(0);
     }
@@ -863,16 +1045,16 @@ pub async fn flush_queue(app: &AppHandle, st: &Arc<AppState>) -> Result<usize> {
 
     let mut flushed = 0usize;
     loop {
-        let (token, items): (String, Vec<(i64, i64, Option<String>)>) = {
+        let (token, items): (String, Vec<(i64, i64, Option<String>, i64)>) = {
             let conn = st.db();
             let Some(token) = db::get_setting(&conn, "anilist.token")?.filter(|s| !s.is_empty()) else {
                 break;
             };
             let mut stmt = conn.prepare(
-                "SELECT anilist_id, progress, status FROM anilist_scrobble_queue ORDER BY queued_at ASC",
+                "SELECT anilist_id, progress, status, queued_at FROM anilist_scrobble_queue ORDER BY queued_at ASC",
             )?;
             let rows = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
                 .flatten()
                 .collect();
             (token, rows)
@@ -883,7 +1065,7 @@ pub async fn flush_queue(app: &AppHandle, st: &Arc<AppState>) -> Result<usize> {
         }
 
         let mut errored = false;
-        for (anilist_id, progress, status) in items {
+        for (anilist_id, progress, status, queued_at) in items {
             match st
                 .providers
                 .anilist_save_entry(&token, anilist_id, progress, status.as_deref())
@@ -897,7 +1079,7 @@ pub async fn flush_queue(app: &AppHandle, st: &Arc<AppState>) -> Result<usize> {
                          ON CONFLICT(anilist_id) DO UPDATE SET
                            entry_id = excluded.entry_id,
                            status = excluded.status,
-                           progress = MAX(anilist_entries.progress, excluded.progress),
+                           progress = excluded.progress,
                            score = COALESCE(excluded.score, anilist_entries.score),
                            updated_at = excluded.updated_at",
                         params![
@@ -910,8 +1092,8 @@ pub async fn flush_queue(app: &AppHandle, st: &Arc<AppState>) -> Result<usize> {
                         ],
                     );
                     let _ = conn.execute(
-                        "DELETE FROM anilist_scrobble_queue WHERE anilist_id = ?1 AND progress <= ?2",
-                        params![anilist_id, progress],
+                        "DELETE FROM anilist_scrobble_queue WHERE anilist_id = ?1 AND queued_at <= ?2",
+                        params![anilist_id, queued_at],
                     );
                     crate::klog!("[kura] scrobbled AniList #{anilist_id} → ep {progress}");
                     flushed += 1;
@@ -944,9 +1126,9 @@ pub async fn flush_queue(app: &AppHandle, st: &Arc<AppState>) -> Result<usize> {
 
 /// Full two-way synchronization between Kura and AniList.
 pub async fn sync_now(app: &AppHandle, st: &Arc<AppState>) -> Result<AnilistSyncReport> {
+    let _sync_guard = sync_lock().lock().await;
     let (token, maybe_user_id) = {
         let conn = st.db();
-        let _ = conn.execute_batch(db::SCHEMA_V5);
         let token = db::get_setting(&conn, "anilist.token")?
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| anyhow::anyhow!("AniList is not connected."))?;
@@ -966,7 +1148,7 @@ pub async fn sync_now(app: &AppHandle, st: &Arc<AppState>) -> Result<AnilistSync
         }
     };
 
-    let flushed_queue = flush_queue(app, st).await.unwrap_or(0);
+    let flushed_queue = flush_queue_unlocked(app, st).await.unwrap_or(0);
     let remote_list = st.providers.anilist_user_list(&token, user_id).await?;
     let total_remote = remote_list.len();
 
@@ -985,9 +1167,32 @@ pub async fn sync_now(app: &AppHandle, st: &Arc<AppState>) -> Result<AnilistSync
     let (mut pulled_series, mut pulled_episodes, to_push) = {
         let mut conn = st.db();
         let tx = conn.transaction()?;
+
+        // Any anime still sitting in `anilist_scrobble_queue` has an un-pushed local watch/unwatch
+        // mutation that must NOT be clobbered or reverted by stale remote progress.
+        let mut pending_queue: HashMap<i64, (i64, Option<String>)> = HashMap::new();
+        if let Ok(mut qstmt) =
+            tx.prepare("SELECT anilist_id, progress, status FROM anilist_scrobble_queue")
+        {
+            if let Ok(rows) = qstmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            }) {
+                for (qid, qprog, qstatus) in rows.flatten() {
+                    pending_queue.insert(qid, (qprog, qstatus));
+                }
+            }
+        }
+
         for e in remote_by_media.values() {
             if let Some(m) = &e.media {
                 let _ = crate::store::upsert_seasonal_media(&tx, m);
+            }
+            if pending_queue.contains_key(&e.media_id) {
+                continue;
             }
             let media_eps = e.media.as_ref().and_then(|m| m.episodes);
             let eff_prog = if e.status == "COMPLETED" {
@@ -1038,6 +1243,10 @@ pub async fn sync_now(app: &AppHandle, st: &Arc<AppState>) -> Result<AnilistSync
         let mut push_list: Vec<(i64, i64, Option<String>)> = Vec::new();
 
         for id in all_ids {
+            if let Some((qprog, qstatus)) = pending_queue.get(&id) {
+                push_list.push((id, *qprog, qstatus.clone()));
+                continue;
+            }
             let local_prog = local_watched_progress(&tx, id);
             let total_eps: Option<i64> = tx
                 .query_row("SELECT episodes FROM media WHERE anilist_id = ?1", [id], |r| r.get(0))
@@ -1108,7 +1317,8 @@ pub async fn sync_now(app: &AppHandle, st: &Arc<AppState>) -> Result<AnilistSync
                     "INSERT INTO anilist_scrobble_queue (anilist_id, progress, status, queued_at, last_error)
                      VALUES (?1, ?2, ?3, ?4, ?5)
                      ON CONFLICT(anilist_id) DO UPDATE SET
-                       progress = MAX(anilist_scrobble_queue.progress, excluded.progress),
+                       progress = excluded.progress,
+                       status = COALESCE(excluded.status, anilist_scrobble_queue.status),
                        last_error = excluded.last_error",
                     params![anilist_id, prog, status, now(), e.to_string()],
                 );
@@ -1387,6 +1597,38 @@ mod tests {
             .query_row("SELECT watched_at FROM watch_state WHERE anilist_id = 100 AND ep_key = '1'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(ep1_ts, 1000);
+    }
+
+    #[test]
+    fn unwatching_episode_enqueues_offline_mutation_and_prevents_reconcile_clobber() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::migrate_for_tests(&conn).unwrap();
+        db::set_setting(&conn, "anilist.token", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig").unwrap();
+        db::set_setting(&conn, "anilist.user_id", "42").unwrap();
+        conn.execute(
+            "INSERT INTO anilist_entries (anilist_id, entry_id, status, progress, score, updated_at)
+             VALUES (200, 999, 'COMPLETED', 12, NULL, 1000)",
+            [],
+        )
+        .unwrap();
+        apply_remote_progress_to_local(&conn, 200, 12).unwrap();
+        conn.execute("DELETE FROM watch_state WHERE anilist_id = 200 AND ep_key = '12'", [])
+            .unwrap();
+        assert!(enqueue_unwatch_mutation(&conn, 200));
+
+        let (q_prog, q_status): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT progress, status FROM anilist_scrobble_queue WHERE anilist_id = 200",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(q_prog, 11);
+        assert_eq!(q_status.as_deref(), Some("CURRENT"));
+
+        // `reconcile_cached_entries` must not resurrect ep 12 while queued
+        reconcile_cached_entries(&conn);
+        assert_eq!(local_watched_progress(&conn, 200), 11);
     }
 }
 

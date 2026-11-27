@@ -3,15 +3,327 @@
 
 use crate::db;
 use anyhow::{anyhow, bail, Context, Result};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, SET_COOKIE, USER_AGENT};
+use reqwest::header::{
+    HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE,
+    LOCATION, PROXY_AUTHORIZATION, SET_COOKIE, USER_AGENT,
+};
 use reqwest::redirect::Policy;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 const DEFAULT_EXT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const MAX_EXT_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_MANIFEST_FETCH_BYTES: usize = 10 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// Public / Global IP & DNS-Pinned SSRF Validation Helpers
+// ---------------------------------------------------------------------------
+
+pub fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            if v4.is_loopback()
+                || v4.is_unspecified()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || octets[0] == 0
+                || (octets[0] == 100 && (octets[1] & 0xC0) == 64) // RFC 6598 CGNAT 100.64.0.0/10
+                || (octets[0] == 192 && octets[1] == 0 && (octets[2] == 0 || octets[2] == 2))
+                || (octets[0] == 198 && (octets[1] & 0xFE) == 18) // Benchmarking 198.18.0.0/15
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+                || octets[0] >= 240
+            {
+                return false;
+            }
+            true
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_ip(IpAddr::V4(v4));
+            }
+            if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
+                return false;
+            }
+            let segs = v6.segments();
+            // IPv4-compatible `::w.x.y.z`
+            if segs[0..6] == [0, 0, 0, 0, 0, 0] {
+                let v4 = Ipv4Addr::new(
+                    (segs[6] >> 8) as u8,
+                    segs[6] as u8,
+                    (segs[7] >> 8) as u8,
+                    segs[7] as u8,
+                );
+                return is_public_ip(IpAddr::V4(v4));
+            }
+            // Unique local (fc00::/7) and link-local (fe80::/10)
+            if (segs[0] & 0xfe00) == 0xfc00 || (segs[0] & 0xffc0) == 0xfe80 {
+                return false;
+            }
+            // NAT64 (64:ff9b::/96 and 64:ff9b:1::/48)
+            if segs[0] == 0x0064 && segs[1] == 0xff9b {
+                return false;
+            }
+            // 6to4 (2002::/16)
+            if segs[0] == 0x2002 {
+                return false;
+            }
+            // Teredo (2001:0000::/32)
+            if segs[0] == 0x2001 && segs[1] == 0x0000 {
+                return false;
+            }
+            // Benchmarking (2001:2::/48), Documentation (2001:db8::/32), ORCHID/ORCHIDv2 (2001:10::/28, 2001:20::/28)
+            if segs[0] == 0x2001
+                && (segs[1] == 0x0002
+                    || segs[1] == 0x0db8
+                    || (segs[1] & 0xfff0) == 0x0010
+                    || (segs[1] & 0xfff0) == 0x0020)
+            {
+                return false;
+            }
+            true
+        }
+    }
+}
+
+pub fn is_safe_redirect_url(url: &reqwest::Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(raw_host) = url.host_str() else {
+        return false;
+    };
+    let unbracketed = raw_host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(raw_host)
+        .trim();
+    if let Ok(ip) = unbracketed.parse::<IpAddr>() {
+        return is_public_ip(ip);
+    }
+    let low = unbracketed.trim_end_matches('.').to_ascii_lowercase();
+    if low.is_empty()
+        || low == "localhost"
+        || low.ends_with(".localhost")
+        || low.ends_with(".local")
+        || low.ends_with(".internal")
+        || low.bytes().all(|b| b.is_ascii_digit())
+        || low.starts_with("0x")
+    {
+        return false;
+    }
+    true
+}
+
+/// Validate `raw` as a public `http`/`https` URL, resolve its DNS addresses upfront, verify
+/// every resolved IP is globally routable, and return `(parsed_url, optional_domain_for_pinning, socket_addrs)`.
+pub async fn validate_and_resolve_public_url(
+    raw: &str,
+) -> std::result::Result<(reqwest::Url, Option<String>, Vec<SocketAddr>), String> {
+    let mut parsed =
+        reqwest::Url::parse(raw.trim()).map_err(|e| format!("Invalid HTTP(S) URL: {e}"))?;
+    if !is_safe_redirect_url(&parsed) {
+        return Err("Blocked HTTP request to local, private, or reserved address".to_string());
+    }
+    let raw_host = parsed
+        .host_str()
+        .ok_or_else(|| "URL is missing a host".to_string())?
+        .to_string();
+    let unbracketed = raw_host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(&raw_host)
+        .trim();
+    let port = parsed.port_or_known_default().unwrap_or(80);
+
+    if let Ok(ip) = unbracketed.parse::<IpAddr>() {
+        if !is_public_ip(ip) {
+            return Err("Blocked HTTP request to non-public IP address".to_string());
+        }
+        return Ok((parsed, None, vec![SocketAddr::new(ip, port)]));
+    }
+
+    let clean_domain = unbracketed.trim_end_matches('.').to_string();
+    if clean_domain.is_empty() {
+        return Err("URL has empty domain".to_string());
+    }
+    if unbracketed.ends_with('.') {
+        let _ = parsed.set_host(Some(&clean_domain));
+    }
+
+    let addrs: Vec<SocketAddr> = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::lookup_host((clean_domain.as_str(), port)),
+    )
+    .await
+    .map_err(|_| "DNS lookup timed out".to_string())?
+    .map_err(|e| format!("DNS resolution failed: {e}"))?
+    .collect();
+
+    if addrs.is_empty() {
+        return Err("DNS resolution returned no addresses".to_string());
+    }
+    if !addrs.iter().all(|sa| is_public_ip(sa.ip())) {
+        return Err("Blocked HTTP request resolving to non-public IP address".to_string());
+    }
+
+    Ok((parsed, Some(clean_domain), addrs))
+}
+
+pub async fn validate_public_http_url(url_str: &str) -> Result<reqwest::Url> {
+    validate_and_resolve_public_url(url_str)
+        .await
+        .map(|(u, _, _)| u)
+        .map_err(|e| anyhow!("{e}"))
+}
+
+pub(crate) fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
+pub(crate) fn build_pinned_http_client(
+    domain_opt: Option<&str>,
+    addrs: &[SocketAddr],
+    connect_timeout: Duration,
+    read_timeout: Option<Duration>,
+) -> std::result::Result<reqwest::Client, String> {
+    if domain_opt.is_none() && connect_timeout == Duration::from_secs(8) && read_timeout.is_none() {
+        static LITERAL_IP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+        return Ok(LITERAL_IP_CLIENT
+            .get_or_init(|| {
+                reqwest::Client::builder()
+                    .redirect(Policy::none())
+                    .connect_timeout(Duration::from_secs(8))
+                    .tcp_nodelay(true)
+                    .build()
+                    .expect("pinned literal IP client")
+            })
+            .clone());
+    }
+    let mut builder = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .connect_timeout(connect_timeout)
+        .tcp_nodelay(true);
+    if let Some(rt) = read_timeout {
+        builder = builder.read_timeout(rt);
+    }
+    if let Some(domain) = domain_opt {
+        builder = builder.resolve_to_addrs(domain, addrs);
+    }
+    builder
+        .build()
+        .map_err(|e| format!("Failed to build pinned HTTP client: {}", e.without_url()))
+}
+
+/// Fetch up to `max_bytes` from a public HTTP(S) URL with per-hop DNS validation + IP pinning
+/// (`0..=8` redirects), stripping `Authorization`/`Cookie` headers across cross-origin redirects.
+pub async fn fetch_public_bytes_limited(
+    url: &str,
+    headers: &[(String, String)],
+    max_bytes: usize,
+    timeout_secs: u64,
+) -> std::result::Result<Vec<u8>, String> {
+    let mut current_url = url.trim().to_string();
+    let effective_timeout = Duration::from_secs(timeout_secs.clamp(2, 120));
+
+    let mut hdr_map = HeaderMap::new();
+    let mut has_ua = false;
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("user-agent") {
+            has_ua = true;
+        }
+        if let (Ok(hn), Ok(hv)) = (
+            HeaderName::from_bytes(k.trim().as_bytes()),
+            HeaderValue::from_str(v),
+        ) {
+            hdr_map.insert(hn, hv);
+        }
+    }
+    if !has_ua {
+        hdr_map.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_EXT_UA));
+    }
+
+    for hop in 0..=8 {
+        let (hop_url, domain_opt, addrs) = validate_and_resolve_public_url(&current_url).await?;
+        let client = build_pinned_http_client(
+            domain_opt.as_deref(),
+            &addrs,
+            Duration::from_secs(10),
+            None,
+        )?;
+        let mut resp = client
+            .get(hop_url.clone())
+            .headers(hdr_map.clone())
+            .timeout(effective_timeout)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP request failed: {}", e.without_url()))?;
+
+        if matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            if let Some(loc) = resp.headers().get(LOCATION) {
+                if hop >= 8 {
+                    return Err("Too many HTTP redirects".to_string());
+                }
+                let loc_str = loc
+                    .to_str()
+                    .map_err(|_| "Invalid redirect Location header".to_string())?;
+                let next_url = hop_url
+                    .join(loc_str)
+                    .map_err(|e| format!("Invalid redirect URL: {e}"))?;
+                if !same_origin(&hop_url, &next_url) {
+                    hdr_map.remove(AUTHORIZATION);
+                    hdr_map.remove(PROXY_AUTHORIZATION);
+                    hdr_map.remove(COOKIE);
+                }
+                current_url = next_url.to_string();
+                continue;
+            }
+        }
+
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status().as_u16()));
+        }
+        if let Some(cl) = resp.content_length() {
+            if cl > max_bytes as u64 {
+                return Err(format!(
+                    "Response exceeds maximum size limit ({cl} > {max_bytes} bytes)"
+                ));
+            }
+        }
+
+        let mut body = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| format!("Failed reading response body: {}", e.without_url()))?
+        {
+            if body.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(format!("Response exceeds maximum size limit ({max_bytes} bytes)"));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        return Ok(body);
+    }
+
+    Err("Too many HTTP redirects".to_string())
+}
+
+async fn fetch_url_text_limited(url: &str, max_bytes: usize, timeout_secs: u64) -> Result<String> {
+    let bytes = fetch_public_bytes_limited(url, &[], max_bytes, timeout_secs)
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
 
 // ---------------------------------------------------------------------------
 // Base64 helper (RFC 4648 standard alphabet)
@@ -169,7 +481,7 @@ pub fn is_supported_ext_type(ext_type: &str) -> bool {
 }
 
 /// Convert `https://github.com/<owner>/<repo>/blob/<ref>/<path>` into `raw.githubusercontent.com`.
-fn normalize_github_raw_url(input: &str) -> String {
+pub fn normalize_github_raw_url(input: &str) -> String {
     let trimmed = input.trim();
     if let Some(rest) = trimmed
         .strip_prefix("https://github.com/")
@@ -220,71 +532,68 @@ fn parse_github_repo_spec(input: &str) -> Option<(String, String, Option<String>
     None
 }
 
+const SELECT_INSTALLED_EXT_NO_PAYLOAD_SQL: &str =
+    "SELECT id, name, version, ext_type, language, manifest_uri, icon_url, author, description,
+            '' AS payload, user_config_json, enabled, updated_at
+     FROM installed_extensions";
+
+const SELECT_INSTALLED_EXT_WITH_PAYLOAD_SQL: &str =
+    "SELECT id, name, version, ext_type, language, manifest_uri, icon_url, author, description,
+            payload, user_config_json, enabled, updated_at
+     FROM installed_extensions";
+
+fn map_installed_extension_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<InstalledExtension> {
+    let cfg_str: String = r.get(10)?;
+    let user_config = serde_json::from_str::<Value>(&cfg_str).unwrap_or_else(|_| json!({}));
+    Ok(InstalledExtension {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        version: r.get(2)?,
+        ext_type: r.get(3)?,
+        language: r.get(4)?,
+        manifest_uri: r.get(5)?,
+        icon_url: r.get(6)?,
+        author: r.get(7)?,
+        description: r.get(8)?,
+        payload: r.get(9)?,
+        user_config,
+        enabled: r.get::<_, i64>(11)? != 0,
+        updated_at: r.get(12)?,
+    })
+}
+
 pub fn list_installed_extensions(conn: &Connection) -> Result<Vec<InstalledExtension>> {
-    let _ = conn.execute_batch(db::SCHEMA_V9);
-    let mut stmt = conn.prepare(
-        "SELECT id, name, version, ext_type, language, manifest_uri, icon_url, author, description,
-                payload, user_config_json, enabled, updated_at
-         FROM installed_extensions
-         ORDER BY ext_type ASC, name ASC",
-    )?;
+    let sql = format!("{SELECT_INSTALLED_EXT_NO_PAYLOAD_SQL} ORDER BY ext_type ASC, name ASC");
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map([], |r| {
-            let cfg_str: String = r.get(10)?;
-            let user_config = serde_json::from_str::<Value>(&cfg_str).unwrap_or_else(|_| json!({}));
-            Ok(InstalledExtension {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                version: r.get(2)?,
-                ext_type: r.get(3)?,
-                language: r.get(4)?,
-                manifest_uri: r.get(5)?,
-                icon_url: r.get(6)?,
-                author: r.get(7)?,
-                description: r.get(8)?,
-                payload: r.get(9)?,
-                user_config,
-                enabled: r.get::<_, i64>(11)? != 0,
-                updated_at: r.get(12)?,
-            })
-        })?
+        .query_map([], map_installed_extension_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
 pub fn get_installed_extension(conn: &Connection, id: &str) -> Result<Option<InstalledExtension>> {
-    let _ = conn.execute_batch(db::SCHEMA_V9);
+    let sql = format!("{SELECT_INSTALLED_EXT_WITH_PAYLOAD_SQL} WHERE id = ?1");
+    conn.query_row(&sql, [id], map_installed_extension_row)
+        .optional()
+        .map_err(Into::into)
+}
+
+pub fn get_extension_payload(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> std::result::Result<String, String> {
     conn.query_row(
-        "SELECT id, name, version, ext_type, language, manifest_uri, icon_url, author, description,
-                payload, user_config_json, enabled, updated_at
-         FROM installed_extensions WHERE id = ?1",
+        "SELECT payload FROM installed_extensions WHERE id = ?1",
         [id],
-        |r| {
-            let cfg_str: String = r.get(10)?;
-            let user_config = serde_json::from_str::<Value>(&cfg_str).unwrap_or_else(|_| json!({}));
-            Ok(InstalledExtension {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                version: r.get(2)?,
-                ext_type: r.get(3)?,
-                language: r.get(4)?,
-                manifest_uri: r.get(5)?,
-                icon_url: r.get(6)?,
-                author: r.get(7)?,
-                description: r.get(8)?,
-                payload: r.get(9)?,
-                user_config,
-                enabled: r.get::<_, i64>(11)? != 0,
-                updated_at: r.get(12)?,
-            })
-        },
+        |r| r.get::<_, String>(0),
     )
     .optional()
-    .map_err(Into::into)
+    .map_err(|e| format!("Failed to read extension payload: {e}"))?
+    .ok_or_else(|| format!("Extension '{id}' is not installed"))
 }
 
 pub async fn fetch_marketplace_extensions(
-    http: &reqwest::Client,
+    _http: &reqwest::Client,
     conn_installed: &[InstalledExtension],
     url: &str,
 ) -> Result<Vec<MarketplaceExtension>> {
@@ -304,17 +613,10 @@ pub async fn fetch_marketplace_extensions(
         let tree_api = format!(
             "https://api.github.com/repos/{owner}/{repo}/git/trees/{tree_ref}?recursive=1"
         );
-        let resp = http
-            .get(&tree_api)
-            .header(USER_AGENT, DEFAULT_EXT_UA)
-            .timeout(Duration::from_secs(15))
-            .send()
+        let tree_txt = fetch_url_text_limited(&tree_api, MAX_MANIFEST_FETCH_BYTES, 15)
             .await
             .with_context(|| format!("Failed to inspect GitHub repository {owner}/{repo}"))?;
-        if !resp.status().is_success() {
-            bail!("GitHub API returned HTTP {} for {owner}/{repo}", resp.status());
-        }
-        let tree_val: Value = resp.json().await?;
+        let tree_val: Value = serde_json::from_str(&tree_txt)?;
         let sha_or_ref = tree_val
             .get("sha")
             .and_then(|v| v.as_str())
@@ -348,19 +650,10 @@ pub async fn fetch_marketplace_extensions(
         manifest_urls.truncate(45);
         let mut set = tokio::task::JoinSet::new();
         for m_url in manifest_urls {
-            let client = http.clone();
             set.spawn(async move {
-                let r = client
-                    .get(&m_url)
-                    .header(USER_AGENT, DEFAULT_EXT_UA)
-                    .timeout(Duration::from_secs(12))
-                    .send()
+                let txt = fetch_url_text_limited(&m_url, 4 * 1024 * 1024, 12)
                     .await
                     .ok()?;
-                if !r.status().is_success() {
-                    return None;
-                }
-                let txt = r.text().await.ok()?;
                 Some((m_url, txt))
             });
         }
@@ -410,23 +703,9 @@ pub async fn fetch_marketplace_extensions(
         return Ok(out);
     }
 
-    if !clean_url.starts_with("http://") && !clean_url.starts_with("https://") {
-        bail!("Marketplace URL must start with http://, https://, or gh:owner/repo");
-    }
-
-    let resp = http
-        .get(&clean_url)
-        .header(USER_AGENT, DEFAULT_EXT_UA)
-        .timeout(Duration::from_secs(15))
-        .send()
+    let body = fetch_url_text_limited(&clean_url, MAX_MANIFEST_FETCH_BYTES, 15)
         .await
-        .with_context(|| format!("Failed to fetch marketplace from {clean_url}"))?;
-
-    if !resp.status().is_success() {
-        bail!("Marketplace returned HTTP {}", resp.status());
-    }
-
-    let body = resp.text().await?;
+        .context("Failed to fetch marketplace manifest")?;
     let val: Value =
         serde_json::from_str(&body).context("Marketplace URL did not return valid JSON")?;
 
@@ -487,7 +766,7 @@ pub async fn fetch_marketplace_extensions(
 }
 
 pub async fn install_extension_from_source(
-    http: &reqwest::Client,
+    _http: &reqwest::Client,
     source: &str,
 ) -> Result<(
     String,
@@ -509,17 +788,10 @@ pub async fn install_extension_from_source(
 
     let (manifest_json, source_url) =
         if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-            let resp = http
-                .get(&trimmed)
-                .header(USER_AGENT, DEFAULT_EXT_UA)
-                .timeout(Duration::from_secs(15))
-                .send()
+            let txt = fetch_url_text_limited(&trimmed, MAX_MANIFEST_FETCH_BYTES, 15)
                 .await
-                .with_context(|| format!("Failed to download manifest from {trimmed}"))?;
-            if !resp.status().is_success() {
-                bail!("Manifest URL returned HTTP {}", resp.status());
-            }
-            (resp.text().await?, Some(trimmed))
+                .context("Failed to download extension manifest")?;
+            (txt, Some(trimmed))
         } else {
             (trimmed, None)
         };
@@ -559,17 +831,9 @@ pub async fn install_extension_from_source(
             } else {
                 raw_p_uri.to_string()
             };
-            let resp = http
-                .get(&resolved_p_uri)
-                .header(USER_AGENT, DEFAULT_EXT_UA)
-                .timeout(Duration::from_secs(15))
-                .send()
+            fetch_url_text_limited(&resolved_p_uri, MAX_MANIFEST_FETCH_BYTES, 15)
                 .await
-                .with_context(|| format!("SEANIME_MANIFEST_ERR: Failed to fetch payloadURI {resolved_p_uri}"))?;
-            if !resp.status().is_success() {
-                bail!("SEANIME_MANIFEST_ERR: payloadURI returned HTTP {}", resp.status());
-            }
-            resp.text().await?
+                .context("SEANIME_MANIFEST_ERR: Failed to fetch payloadURI")?
         }
     };
 
@@ -613,8 +877,6 @@ pub fn upsert_installed_extension(
     payload: &str,
     definition: Option<Value>,
 ) -> Result<InstalledExtension> {
-    let _ = conn.execute_batch(db::SCHEMA_V9);
-
     // Preserve existing user preference values and enabled flag if updating
     let existing = get_installed_extension(conn, id)?;
     let prev_values = existing
@@ -670,7 +932,6 @@ pub fn upsert_installed_extension(
 }
 
 pub fn toggle_extension(conn: &Connection, id: &str, enabled: bool) -> Result<()> {
-    let _ = conn.execute_batch(db::SCHEMA_V9);
     conn.execute(
         "UPDATE installed_extensions SET enabled = ?2, updated_at = ?3 WHERE id = ?1",
         params![id, if enabled { 1i64 } else { 0i64 }, db::now()],
@@ -680,7 +941,6 @@ pub fn toggle_extension(conn: &Connection, id: &str, enabled: bool) -> Result<()
 }
 
 pub fn remove_extension(conn: &Connection, id: &str) -> Result<()> {
-    let _ = conn.execute_batch(db::SCHEMA_V9);
     conn.execute("DELETE FROM installed_extensions WHERE id = ?1", [id])?;
     conn.execute(
         "DELETE FROM onlinestream_mappings WHERE provider_id = ?1",
@@ -695,7 +955,6 @@ pub fn set_extension_user_config(
     id: &str,
     values: Value,
 ) -> Result<InstalledExtension> {
-    let _ = conn.execute_batch(db::SCHEMA_V9);
     let existing = get_installed_extension(conn, id)?
         .ok_or_else(|| anyhow!("Extension '{id}' is not installed"))?;
     let definition = existing
@@ -757,41 +1016,24 @@ pub struct ExtensionFetchResp {
 }
 
 pub async fn extension_http_fetch(req: ExtensionFetchReq) -> Result<ExtensionFetchResp> {
-    let target_url = req.url.trim();
-    if !target_url.starts_with("http://") && !target_url.starts_with("https://") {
-        bail!("extension fetch only permits http:// and https:// URLs");
-    }
-
     let timeout_secs = req.timeout.unwrap_or(35).clamp(2, 120);
     let redirect_mode = req
         .redirect
         .as_deref()
         .unwrap_or("follow")
         .to_ascii_lowercase();
+    let follow_redirects = redirect_mode != "manual" && redirect_mode != "error";
 
-    let policy = match redirect_mode.as_str() {
-        "manual" => Policy::none(),
-        "error" => Policy::custom(|attempt| attempt.error("redirect disallowed by redirect=error")),
-        _ => Policy::limited(10),
-    };
-
-    let client = reqwest::Client::builder()
-        .redirect(policy)
-        .connect_timeout(Duration::from_secs(8))
-        .timeout(Duration::from_secs(timeout_secs))
-        .build()
-        .context("Failed to initialize extension HTTP client")?;
-
-    let method_str = req
+    let orig_method_str = req
         .method
         .as_deref()
         .unwrap_or("GET")
         .trim()
         .to_ascii_uppercase();
-    let method = reqwest::Method::from_bytes(method_str.as_bytes())
-        .with_context(|| format!("Invalid HTTP method '{method_str}'"))?;
+    let mut current_method = reqwest::Method::from_bytes(orig_method_str.as_bytes())
+        .with_context(|| format!("Invalid HTTP method '{orig_method_str}'"))?;
 
-    let mut header_map = HeaderMap::new();
+    let mut current_headers = HeaderMap::new();
     let mut has_ua = false;
     if let Some(hdrs) = &req.headers {
         for (k, v) in hdrs {
@@ -802,33 +1044,100 @@ pub async fn extension_http_fetch(req: ExtensionFetchReq) -> Result<ExtensionFet
                 HeaderName::from_bytes(k.trim().as_bytes()),
                 HeaderValue::from_str(v),
             ) {
-                header_map.insert(hn, hv);
+                current_headers.insert(hn, hv);
             }
         }
     }
     if !has_ua {
-        header_map.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_EXT_UA));
+        current_headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_EXT_UA));
     }
 
-    let mut builder = client.request(method, target_url).headers(header_map);
-    if let Some(b64) = &req.body_base64 {
-        let bytes = base64_decode(b64)?;
-        builder = builder.body(bytes);
-    } else if let Some(text_body) = req.body {
-        builder = builder.body(text_body);
+    let mut current_body: Option<Vec<u8>> = if let Some(b64) = &req.body_base64 {
+        Some(base64_decode(b64)?)
+    } else {
+        req.body.map(|t| t.into_bytes())
+    };
+
+    let mut current_url = req.url.trim().to_string();
+    let mut redirected = false;
+    let mut final_resp_opt: Option<(reqwest::Response, reqwest::Url)> = None;
+
+    for hop in 0..=10 {
+        let (hop_url, domain_opt, addrs) = validate_and_resolve_public_url(&current_url)
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        let client = build_pinned_http_client(
+            domain_opt.as_deref(),
+            &addrs,
+            Duration::from_secs(8),
+            None,
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+
+        let mut builder = client
+            .request(current_method.clone(), hop_url.clone())
+            .headers(current_headers.clone())
+            .timeout(Duration::from_secs(timeout_secs));
+        if let Some(ref body_bytes) = current_body {
+            builder = builder.body(body_bytes.clone());
+        }
+
+        let resp = builder
+            .send()
+            .await
+            .map_err(|e| anyhow::Error::new(e.without_url()))
+            .with_context(|| format!("HTTP {} failed", current_method.as_str()))?;
+
+        if redirect_mode == "error" && resp.status().is_redirection() {
+            bail!("redirect disallowed by redirect=error");
+        }
+
+        if follow_redirects && matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            if let Some(loc_val) = resp.headers().get(LOCATION) {
+                if hop >= 10 {
+                    bail!("too many redirects (exceeded 10 hops)");
+                }
+                let loc_str = loc_val
+                    .to_str()
+                    .context("Invalid redirect Location header")?;
+                let next_url = hop_url
+                    .join(loc_str)
+                    .context("Invalid redirect Location URL")?;
+                if !same_origin(&hop_url, &next_url) {
+                    current_headers.remove(AUTHORIZATION);
+                    current_headers.remove(PROXY_AUTHORIZATION);
+                    current_headers.remove(COOKIE);
+                }
+                let code = resp.status().as_u16();
+                if code == 303
+                    || ((code == 301 || code == 302)
+                        && current_method != reqwest::Method::GET
+                        && current_method != reqwest::Method::HEAD)
+                {
+                    current_method = reqwest::Method::GET;
+                    current_body = None;
+                    current_headers.remove(CONTENT_LENGTH);
+                    current_headers.remove(CONTENT_TYPE);
+                }
+                current_url = next_url.to_string();
+                redirected = true;
+                continue;
+            }
+        }
+
+        final_resp_opt = Some((resp, hop_url));
+        break;
     }
 
-    let resp = builder
-        .send()
-        .await
-        .with_context(|| format!("HTTP {method_str} {target_url} failed"))?;
+    let (mut resp, final_hop_url) =
+        final_resp_opt.ok_or_else(|| anyhow!("too many redirects"))?;
 
     let status = resp.status();
     let status_code = status.as_u16();
     let status_text = status.canonical_reason().unwrap_or("").to_string();
     let ok = status.is_success();
-    let final_url = resp.url().to_string();
-    let redirected = final_url != target_url;
+    let final_url = final_hop_url.to_string();
+    let effective_method_str = current_method.as_str().to_string();
 
     let mut headers = HashMap::new();
     let mut raw_headers: HashMap<String, Vec<String>> = HashMap::new();
@@ -852,16 +1161,38 @@ pub async fn extension_http_fetch(req: ExtensionFetchReq) -> Result<ExtensionFet
         }
     }
 
+    if let Some(cl) = resp.content_length() {
+        if cl > MAX_EXT_RESPONSE_BYTES as u64 {
+            bail!("extension fetch response exceeds 16 MiB limit ({cl} bytes)");
+        }
+    }
+
     let content_type = headers.get("content-type").cloned().unwrap_or_default();
-    let bytes = resp.bytes().await?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| anyhow::Error::new(e.without_url()))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_EXT_RESPONSE_BYTES {
+            bail!("extension fetch response exceeds 16 MiB limit");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+
     let content_length = bytes.len() as i64;
-    let body_text = String::from_utf8_lossy(&bytes).into_owned();
-    let body_base64 = base64_encode(&bytes);
+    let (body_text, body_base64) = match String::from_utf8(bytes) {
+        Ok(text) => (text, String::new()),
+        Err(err) => {
+            let raw_bytes = err.into_bytes();
+            (String::new(), base64_encode(&raw_bytes))
+        }
+    };
 
     Ok(ExtensionFetchResp {
         status: status_code,
         status_text,
-        method: method_str,
+        method: effective_method_str,
         ok,
         url: final_url,
         redirected,
@@ -940,8 +1271,54 @@ mod tests {
         let listed = list_installed_extensions(&conn).unwrap();
         assert_eq!(listed.len(), 1);
         assert!(!listed[0].enabled);
+        assert!(listed[0].payload.is_empty());
+        assert_eq!(
+            get_extension_payload(&conn, "test-stream").unwrap(),
+            "class Provider { /* v1.1 */ }"
+        );
 
         remove_extension(&conn, "test-stream").unwrap();
         assert!(list_installed_extensions(&conn).unwrap().is_empty());
+        assert!(get_extension_payload(&conn, "test-stream").is_err());
+    }
+
+    #[test]
+    fn ssrf_url_filter_blocks_private_loopback_and_link_local() {
+        for blocked in [
+            "http://127.0.0.1:8765/",
+            "http://localhost:14876/oauth/token",
+            "http://localhost.:14876/oauth/token",
+            "http://[::1]:8080/",
+            "http://0.0.0.0/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.5/api",
+            "http://172.16.12.1/",
+            "http://192.168.1.1/",
+            "http://[fe80::1]/",
+            "http://[fc00::1]/",
+            "http://[::ffff:127.0.0.1]:8080/",
+            "http://[64:ff9b::7f00:1]/",
+            "http://[2002:7f00:1::]/",
+            "http://[2001:0000::1]/",
+            "http://[2001:db8::1]/",
+            "http://[2001:10::1]/",
+            "http://[2001:20::1]/",
+            "http://printer.local/status",
+            "file:///etc/passwd",
+        ] {
+            let ok = reqwest::Url::parse(blocked)
+                .map(|u| is_safe_redirect_url(&u))
+                .unwrap_or(false);
+            assert!(!ok, "expected {blocked} to be rejected by SSRF guard");
+        }
+
+        for allowed in [
+            "https://graphql.anilist.co/",
+            "https://8.8.8.8/dns-query",
+            "https://raw.githubusercontent.com/owner/repo/main/manifest.json",
+        ] {
+            let u = reqwest::Url::parse(allowed).unwrap();
+            assert!(is_safe_redirect_url(&u), "expected {allowed} to be allowed");
+        }
     }
 }

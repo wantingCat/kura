@@ -23,10 +23,10 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost https: data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; media-src 'self' asset: http://asset.localhost http://127.0.0.1:* blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": ["$APPDATA/images/**", "$LOCALAPPDATA/**/images/**"]
       }
     }
   },
