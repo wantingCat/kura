@@ -19,7 +19,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -129,14 +129,113 @@ fn rows<T>(conn: &Connection, sql: &str, f: impl FnMut(&rusqlite::Row<'_>) -> ru
     iter.flatten().collect()
 }
 
+fn is_sensitive_setting_key(k: &str) -> bool {
+    let low = k.trim().to_ascii_lowercase();
+    matches!(
+        low.as_str(),
+        "anilist.token"
+            | "pref.player_path"
+            | "pref.jimaku_api_key"
+            | "pref.fanart_api_key"
+            | "fanart_api_key"
+            | "jimaku_api_key"
+    ) || low.contains("token")
+        || low.contains("api_key")
+        || low.contains("apikey")
+        || low.contains("passkey")
+        || low.contains("secret")
+        || low.contains("password")
+}
+
+fn is_sensitive_field_name(name: &str) -> bool {
+    let low = name.trim().to_ascii_lowercase();
+    low.contains("token")
+        || low.contains("key")
+        || low.contains("secret")
+        || low.contains("password")
+        || low.contains("passwd")
+        || low.contains("pwd")
+        || low.contains("auth")
+        || low.contains("cookie")
+}
+
+fn strip_sensitive_url_params(raw: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(raw.trim()) else {
+        return crate::db::redact_sensitive_text(raw);
+    };
+    let pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(k, _)| !is_sensitive_field_name(k))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    if pairs.is_empty() {
+        parsed.set_query(None);
+    } else {
+        let mut qp = parsed.query_pairs_mut();
+        qp.clear();
+        for (k, v) in pairs {
+            qp.append_pair(&k, &v);
+        }
+    }
+    parsed.to_string()
+}
+
+fn sanitize_torrent_extensions_json(raw: &str) -> String {
+    let Ok(mut arr) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {
+        return raw.to_string();
+    };
+    for item in &mut arr {
+        if let Some(obj) = item.as_object_mut() {
+            if let Some(u) = obj.get("url").and_then(|v| v.as_str()).map(str::to_string) {
+                obj.insert("url".to_string(), serde_json::Value::String(strip_sensitive_url_params(&u)));
+            }
+        }
+    }
+    serde_json::to_string(&arr).unwrap_or_else(|_| raw.to_string())
+}
+
+fn sanitize_extension_user_config_json(raw: &str) -> String {
+    let Ok(mut val) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return "{}".to_string();
+    };
+    let mut password_fields = std::collections::HashSet::new();
+    if let Some(fields) = val
+        .get("definition")
+        .and_then(|d| d.get("fields"))
+        .and_then(|f| f.as_array())
+    {
+        for f in fields {
+            let fname = f.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            let ftype = f.get("type").and_then(|x| x.as_str()).unwrap_or("");
+            if ftype.eq_ignore_ascii_case("password") || is_sensitive_field_name(fname) {
+                password_fields.insert(fname.to_string());
+            }
+        }
+    }
+    if let Some(values_obj) = val.get_mut("values").and_then(|v| v.as_object_mut()) {
+        values_obj.retain(|k, _| !password_fields.contains(k) && !is_sensitive_field_name(k));
+    } else if let Some(top_obj) = val.as_object_mut() {
+        top_obj.retain(|k, _| k == "definition" || (!password_fields.contains(k) && !is_sensitive_field_name(k)));
+    }
+    serde_json::to_string(&val).unwrap_or_else(|_| "{}".to_string())
+}
+
 /// Read every piece of user data into a [`Backup`].
 pub fn snapshot(conn: &Connection) -> Backup {
     let settings: HashMap<String, String> = rows(
         conn,
-        "SELECT key, value FROM settings WHERE key != 'anilist.token'",
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        "SELECT key, value FROM settings",
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
     )
     .into_iter()
+    .filter(|(k, _)| !is_sensitive_setting_key(k))
+    .map(|(k, v)| {
+        if k == "pref.torrent_extensions" {
+            (k, sanitize_torrent_extensions_json(&v))
+        } else {
+            (k, v)
+        }
+    })
     .collect();
 
     let libs: Vec<(i64, String, String)> =
@@ -225,12 +324,12 @@ pub fn snapshot(conn: &Connection) -> Backup {
                 version: r.get(2)?,
                 ext_type: r.get(3)?,
                 language: r.get(4)?,
-                manifest_uri: r.get(5)?,
+                manifest_uri: strip_sensitive_url_params(&r.get::<_, String>(5)?),
                 icon_url: r.get(6)?,
                 author: r.get(7)?,
                 description: r.get(8)?,
                 payload: r.get(9)?,
-                user_config_json: r.get(10)?,
+                user_config_json: sanitize_extension_user_config_json(&r.get::<_, String>(10)?),
                 enabled: r.get::<_, i64>(11)? != 0,
                 updated_at: r.get(12)?,
             })
@@ -280,10 +379,19 @@ pub struct ImportOptions {
     pub history: bool,
     pub track_prefs: bool,
     pub matches: bool,
+    #[serde(default)]
+    pub extensions: bool,
 }
 
 impl ImportOptions {
-    pub const ALL: Self = Self { settings: true, libraries: true, history: true, track_prefs: true, matches: true };
+    pub const ALL: Self = Self {
+        settings: true,
+        libraries: true,
+        history: true,
+        track_prefs: true,
+        matches: true,
+        extensions: true,
+    };
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -297,6 +405,86 @@ pub struct ImportReport {
     pub track_prefs: usize,
     pub matches: usize,
     pub matches_skipped: usize,
+    pub extensions: usize,
+}
+
+fn is_safe_library_folder(raw: &str) -> bool {
+    let s = raw.trim();
+    if s.is_empty() || s.contains('\0') {
+        return false;
+    }
+    // Reject UNC network shares and Win32 device namespace paths (`\\server\share`, `\\?\`, `\\.\`)
+    if s.starts_with("\\\\") || s.starts_with("//") {
+        return false;
+    }
+    // Reject parent traversal segments
+    if s.split(['/', '\\']).any(|seg| seg == "..") {
+        return false;
+    }
+
+    let bytes = s.as_bytes();
+    let is_win_drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    let is_unix_abs = s.starts_with('/');
+    if !is_win_drive && !is_unix_abs {
+        return false;
+    }
+
+    let trimmed = s.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return false;
+    }
+    if is_win_drive && trimmed.len() <= 2 {
+        // Bare drive root like `C:\` or `D:/`
+        return false;
+    }
+    if Path::new(s).parent().is_none() {
+        return false;
+    }
+
+    let norm = trimmed.replace('\\', "/").to_ascii_lowercase();
+    if is_win_drive {
+        let after_drive = &norm[2..]; // starts with `/`
+        for forbidden in [
+            "/windows",
+            "/program files",
+            "/program files (x86)",
+            "/programdata",
+            "/system volume information",
+            "/$recycle.bin",
+        ] {
+            if after_drive == forbidden
+                || after_drive
+                    .strip_prefix(forbidden)
+                    .map_or(false, |rest| rest.starts_with('/'))
+            {
+                return false;
+            }
+        }
+        if after_drive == "/users" {
+            return false;
+        }
+    } else {
+        for forbidden in [
+            "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/proc", "/sys", "/dev", "/boot",
+            "/system", "/var/run", "/private/etc",
+        ] {
+            if norm == forbidden
+                || norm
+                    .strip_prefix(forbidden)
+                    .map_or(false, |rest| rest.starts_with('/'))
+            {
+                return false;
+            }
+        }
+        if matches!(norm.as_str(), "/home" | "/users" | "/root" | "/var" | "/tmp") {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Pick which current folder of `lib_id` a backed-up folder `root` corresponds to.
@@ -330,8 +518,11 @@ pub fn apply(conn: &Connection, b: &Backup, o: &ImportOptions) -> Result<ImportR
 
     if o.settings {
         for (k, v) in &b.settings {
-            // A player path from another machine would break playback.
-            if k == "pref.player_path" && !v.is_empty() && !Path::new(v).is_file() {
+            // Never import arbitrary executable paths or tokens/keys from a backup file.
+            if is_sensitive_setting_key(k) {
+                continue;
+            }
+            if !k.starts_with("pref.") && !k.starts_with("anilist.") {
                 continue;
             }
             tx.execute(
@@ -340,13 +531,20 @@ pub fn apply(conn: &Connection, b: &Backup, o: &ImportOptions) -> Result<ImportR
             )?;
             rep.settings += 1;
         }
-        let _ = tx.execute_batch(crate::db::SCHEMA_V9);
+    }
+
+    if o.extensions {
         for ext in &b.extensions {
-            let _ = tx.execute(
+            if ext.id.trim().is_empty() || !crate::extensions::is_supported_ext_type(&ext.ext_type) {
+                continue;
+            }
+            // Restored JS/TS extensions are always inserted disabled (`enabled = 0`) and never
+            // auto-enable an existing disabled extension on conflict (`V-C03` / `C-02`).
+            rep.extensions += tx.execute(
                 "INSERT INTO installed_extensions
                  (id, name, version, ext_type, language, manifest_uri, icon_url, author, description,
                   payload, user_config_json, enabled, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12)
                  ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     version = excluded.version,
@@ -358,25 +556,23 @@ pub fn apply(conn: &Connection, b: &Backup, o: &ImportOptions) -> Result<ImportR
                     description = excluded.description,
                     payload = excluded.payload,
                     user_config_json = excluded.user_config_json,
-                    enabled = excluded.enabled,
                     updated_at = excluded.updated_at
                  WHERE excluded.updated_at >= installed_extensions.updated_at",
                 params![
-                    ext.id,
+                    ext.id.trim(),
                     ext.name,
                     ext.version,
-                    ext.ext_type,
+                    ext.ext_type.trim(),
                     ext.language,
-                    ext.manifest_uri,
+                    strip_sensitive_url_params(&ext.manifest_uri),
                     ext.icon_url,
                     ext.author,
                     ext.description,
                     ext.payload,
-                    ext.user_config_json,
-                    if ext.enabled { 1i64 } else { 0i64 },
+                    sanitize_extension_user_config_json(&ext.user_config_json),
                     ext.updated_at,
                 ],
-            );
+            )?;
         }
     }
 
@@ -398,8 +594,14 @@ pub fn apply(conn: &Connection, b: &Backup, o: &ImportOptions) -> Result<ImportR
                 }
             };
             for f in &lib.folders {
-                rep.folders_added +=
-                    tx.execute("INSERT OR IGNORE INTO library_folders (library_id, path) VALUES (?1, ?2)", params![id, f])?;
+                let trimmed = f.trim();
+                if !is_safe_library_folder(trimmed) {
+                    continue;
+                }
+                rep.folders_added += tx.execute(
+                    "INSERT OR IGNORE INTO library_folders (library_id, path) VALUES (?1, ?2)",
+                    params![id, trimmed],
+                )?;
             }
         }
     }
@@ -483,7 +685,6 @@ pub fn apply(conn: &Connection, b: &Backup, o: &ImportOptions) -> Result<ImportR
             }
             rep.matches += 1;
         }
-        let _ = tx.execute_batch(crate::db::SCHEMA_V9);
         for m in &b.onlinestream_mappings {
             let _ = tx.execute(
                 "INSERT INTO onlinestream_mappings
@@ -529,14 +730,12 @@ pub fn read_file(path: &Path) -> Result<Backup> {
     parse(&json)
 }
 
-/// Write via a temp file + rename so a crash mid-write never leaves a truncated backup.
-pub fn write_file(path: &Path, b: &Backup) -> Result<()> {
+fn write_bytes_atomic(path: &Path, json_bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(b)?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
+    std::fs::write(&tmp, json_bytes)?;
     std::fs::rename(&tmp, path).or_else(|_| {
         // rename can fail across some network shares; fall back to a direct write.
         let r = std::fs::copy(&tmp, path).map(|_| ());
@@ -544,6 +743,12 @@ pub fn write_file(path: &Path, b: &Backup) -> Result<()> {
         r
     })?;
     Ok(())
+}
+
+/// Write via a temp file + rename so a crash mid-write never leaves a truncated backup.
+pub fn write_file(path: &Path, b: &Backup) -> Result<()> {
+    let json_bytes = serde_json::to_vec_pretty(b)?;
+    write_bytes_atomic(path, &json_bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +783,7 @@ pub fn safety_paths(data_dir: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Whether a snapshot holds anything worth protecting (default settings alone don't count).
+/// Whether a snapshot holds anything worth protecting on an initial untouched install.
 fn meaningful(b: &Backup) -> bool {
     !b.libraries.is_empty()
         || !b.watched.is_empty()
@@ -587,31 +792,55 @@ fn meaningful(b: &Backup) -> bool {
         || !b.onlinestream_mappings.is_empty()
 }
 
+/// Write `b` once as pretty JSON to all safety paths (including when `meaningful(b)` became
+/// `false` after deleting the last library or extension so stale data is never left behind).
 pub fn write_safety_copy_from(b: &Backup, data_dir: &Path) {
-    if !meaningful(b) {
+    let Ok(json_bytes) = serde_json::to_vec_pretty(b) else {
+        return;
+    };
+    let paths = safety_paths(data_dir);
+    let any_exists = paths.iter().any(|p| p.exists());
+    if !meaningful(b) && !any_exists && DIRTY_REVISION.load(Ordering::Acquire) == 0 {
         return;
     }
-    for path in safety_paths(data_dir) {
-        if let Err(e) = write_file(&path, b) {
+    for path in paths {
+        if let Err(e) = write_bytes_atomic(&path, &json_bytes) {
             crate::klog!("[kura] safety backup to {} failed: {e:#}", path.display());
         }
     }
 }
 
-/// Synchronous safety copy (used at startup, before the async runtime is involved).
-pub fn write_safety_copy(conn: &Connection, data_dir: &Path) {
+/// Synchronous safety copy helper for a raw connection + data_dir.
+pub fn write_safety_copy_conn(conn: &Connection, data_dir: &Path) {
     write_safety_copy_from(&snapshot(conn), data_dir);
 }
 
-/// On startup: fill whatever is empty in the database from the newest readable safety copy.
+/// Synchronous safety copy flush on app shutdown (writes if dirty or if no safety copy exists yet for meaningful data).
+pub fn write_safety_copy(st: &AppState) {
+    let cur_rev = DIRTY_REVISION.load(Ordering::Acquire);
+    let last_rev = FLUSHED_REVISION.load(Ordering::Acquire);
+    let paths = safety_paths(&st.data_dir);
+    let any_exists = paths.iter().any(|p| p.exists());
+    if cur_rev == last_rev && any_exists {
+        return;
+    }
+    let snap = snapshot(&st.db());
+    if cur_rev != last_rev || meaningful(&snap) {
+        write_safety_copy_from(&snap, &st.data_dir);
+        FLUSHED_REVISION.store(cur_rev, Ordering::Release);
+    }
+}
+
+/// On startup: restore ONLY when the database is genuinely empty (fresh install / wiped DB),
+/// never resurrecting deleted libraries/extensions or overwriting live settings.
 pub fn restore_if_needed(conn: &Connection, data_dir: &Path) -> Result<bool> {
     let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
-    let no_settings = count("SELECT COUNT(*) FROM settings WHERE key LIKE 'pref.%' AND key NOT LIKE 'pref.%_v1'") == 0;
-    let no_libraries = count("SELECT COUNT(*) FROM libraries") == 0;
-    let no_history = count("SELECT COUNT(*) FROM watch_state") == 0 && count("SELECT COUNT(*) FROM watch_progress") == 0;
-    let no_track_prefs = count("SELECT COUNT(*) FROM media_track_prefs") == 0;
-    let no_extensions = count("SELECT COUNT(*) FROM installed_extensions") == 0;
-    if !(no_settings || no_libraries || no_history || no_track_prefs || no_extensions) {
+    let watch_state = count("SELECT COUNT(*) FROM watch_state") + count("SELECT COUNT(*) FROM watch_progress");
+    let libraries = count("SELECT COUNT(*) FROM libraries");
+    let user_prefs = count("SELECT COUNT(*) FROM settings WHERE key LIKE 'pref.%' AND key NOT LIKE 'pref.%_v1'");
+    let extensions = count("SELECT COUNT(*) FROM installed_extensions");
+
+    if !(watch_state == 0 && libraries == 0 && user_prefs == 0 && extensions == 0) {
         return Ok(false);
     }
 
@@ -622,12 +851,12 @@ pub fn restore_if_needed(conn: &Connection, data_dir: &Path) -> Result<bool> {
     let Some((path, b)) = newest else { return Ok(false) };
 
     let opts = ImportOptions {
-        settings: (no_settings && !b.settings.is_empty()) || (no_extensions && !b.extensions.is_empty()),
-        libraries: no_libraries && !b.libraries.is_empty(),
-        history: no_history && (!b.watched.is_empty() || !b.progress.is_empty()),
-        track_prefs: no_track_prefs && !b.track_prefs.is_empty(),
-        // Manual matches only make sense together with freshly restored libraries (or online stream mappings).
-        matches: (no_libraries && !b.manual_matches.is_empty()) || !b.onlinestream_mappings.is_empty(),
+        settings: !b.settings.is_empty(),
+        libraries: !b.libraries.is_empty(),
+        history: !b.watched.is_empty() || !b.progress.is_empty(),
+        track_prefs: !b.track_prefs.is_empty(),
+        matches: !b.manual_matches.is_empty() || !b.onlinestream_mappings.is_empty(),
+        extensions: false,
     };
     if !(opts.settings || opts.libraries || opts.history || opts.track_prefs || opts.matches) {
         return Ok(false);
@@ -637,53 +866,36 @@ pub fn restore_if_needed(conn: &Connection, data_dir: &Path) -> Result<bool> {
     Ok(true)
 }
 
-static DIRTY: AtomicBool = AtomicBool::new(false);
+static DIRTY_REVISION: AtomicU64 = AtomicU64::new(0);
+static FLUSHED_REVISION: AtomicU64 = AtomicU64::new(0);
 
-/// Ask for a safety copy soon. Cheap — the actual write is debounced in the background.
+/// Ask for a safety copy soon. Cheap atomic revision bump — flushed on a 60s debounce in the background.
 pub fn mark_dirty() {
-    DIRTY.store(true, Ordering::Relaxed);
+    DIRTY_REVISION.fetch_add(1, Ordering::AcqRel);
 }
 
-/// Cheap change detector for data written outside of commands (e.g. playback progress).
-fn fingerprint(conn: &Connection) -> String {
-    conn.query_row(
-        "SELECT
-            (SELECT COUNT(*) || ':' || IFNULL(MAX(watched_at), 0) FROM watch_state) || '|' ||
-            (SELECT COUNT(*) || ':' || IFNULL(MAX(updated_at), 0) FROM watch_progress) || '|' ||
-            (SELECT COUNT(*) || ':' || IFNULL(MAX(updated_at), 0) FROM media_track_prefs) || '|' ||
-            (SELECT COUNT(*) || ':' || IFNULL(SUM(anilist_id), 0) FROM match_groups WHERE manual = 1) || '|' ||
-            (SELECT COUNT(*) || ':' || IFNULL(MAX(updated_at), 0) FROM installed_extensions) || '|' ||
-            (SELECT COUNT(*) || ':' || IFNULL(MAX(updated_at), 0) FROM onlinestream_mappings)",
-        [],
-        |r| r.get(0),
-    )
-    .unwrap_or_default()
-}
-
-/// Background writer: flushes within ~5 s of [`mark_dirty`], and checks for other changes
-/// (watch progress, auto-watched episodes…) once a minute.
+/// Background writer: debounced to 60s and driven by [`DIRTY_REVISION`] without full-table `MAX(...)` scans.
 pub fn start_auto(st: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
-        let mut last = fingerprint(&st.db());
-        let mut ticks: u32 = 0;
         loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            ticks = ticks.wrapping_add(1);
-            let dirty = DIRTY.swap(false, Ordering::Relaxed);
-            if !dirty && ticks % 12 != 0 {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let cur_rev = DIRTY_REVISION.load(Ordering::Acquire);
+            if cur_rev == FLUSHED_REVISION.load(Ordering::Acquire) {
                 continue;
             }
-            let (fp, snap) = {
-                let conn = st.db();
-                let fp = fingerprint(&conn);
-                if !dirty && fp == last {
-                    continue;
-                }
-                (fp, snapshot(&conn))
-            };
-            last = fp;
-            let dir = st.data_dir.clone();
-            let _ = tauri::async_runtime::spawn_blocking(move || write_safety_copy_from(&snap, &dir)).await;
+            let st_clone = st.clone();
+            let flushed = tauri::async_runtime::spawn_blocking(move || {
+                let snap = {
+                    let conn = st_clone.db_read();
+                    snapshot(&conn)
+                };
+                write_safety_copy_from(&snap, &st_clone.data_dir);
+                cur_rev
+            })
+            .await;
+            if let Ok(done_rev) = flushed {
+                FLUSHED_REVISION.store(done_rev, Ordering::Release);
+            }
         }
     });
 }
@@ -713,12 +925,27 @@ pub struct BackupSummary {
     pub progress: usize,
     pub track_prefs: usize,
     pub manual_matches: usize,
+    pub extensions: usize,
+    pub extension_names: Vec<String>,
 }
 
 pub fn summarize(path: &Path, b: &Backup) -> BackupSummary {
     let mut shows: Vec<i64> = b.watched.iter().map(|w| w.anilist_id).collect();
     shows.sort_unstable();
     shows.dedup();
+    let extension_names: Vec<String> = b
+        .extensions
+        .iter()
+        .filter(|e| !e.id.trim().is_empty() && crate::extensions::is_supported_ext_type(&e.ext_type))
+        .map(|e| {
+            let name = e.name.trim();
+            if name.is_empty() {
+                e.id.trim().to_string()
+            } else {
+                name.to_string()
+            }
+        })
+        .collect();
     BackupSummary {
         path: path.to_string_lossy().to_string(),
         created_at: b.updated_at,
@@ -731,6 +958,8 @@ pub fn summarize(path: &Path, b: &Backup) -> BackupSummary {
         progress: b.progress.len(),
         track_prefs: b.track_prefs.len(),
         manual_matches: b.manual_matches.len(),
+        extensions: extension_names.len(),
+        extension_names,
     }
 }
 
@@ -829,5 +1058,162 @@ mod tests {
         assert!(b.watched.is_empty());
         assert!(parse("{\"hello\":1}").is_err());
         assert!(parse(r#"{"app":"kura","version":99,"updated_at":1}"#).is_err());
+    }
+
+    #[test]
+    fn strips_secrets_player_path_and_blocks_zombie_resurrection() {
+        let a = fresh();
+        seed(&a);
+        crate::db::set_setting(&a, "anilist.token", "secret-jwt").unwrap();
+        crate::db::set_setting(&a, "pref.player_path", r"C:\Windows\System32\cmd.exe").unwrap();
+        crate::db::set_setting(&a, "pref.jimaku_api_key", "jimaku-secret").unwrap();
+        crate::db::set_setting(&a, "pref.fanart_api_key", "fanart-secret").unwrap();
+
+        let mut snap = snapshot(&a);
+        assert!(!snap.settings.contains_key("anilist.token"));
+        assert!(!snap.settings.contains_key("pref.player_path"));
+        assert!(!snap.settings.contains_key("pref.jimaku_api_key"));
+        assert!(!snap.settings.contains_key("pref.fanart_api_key"));
+
+        // Even if crafted JSON injects player_path or unsupported ext_type, apply() must reject them
+        snap.settings
+            .insert("pref.player_path".into(), r"C:\Windows\System32\cmd.exe".into());
+        snap.settings
+            .insert("anilist.token".into(), "evil-token".into());
+        snap.extensions.push(ExtensionBackupRow {
+            id: "bad-ext".into(),
+            name: "Bad".into(),
+            version: "1.0".into(),
+            ext_type: "arbitrary-rce".into(),
+            language: "javascript".into(),
+            manifest_uri: String::new(),
+            icon_url: None,
+            author: None,
+            description: None,
+            payload: "console.log(1)".into(),
+            user_config_json: "{}".into(),
+            enabled: true,
+            updated_at: 1,
+        });
+
+        let c = fresh();
+        apply(&c, &snap, &ImportOptions::ALL).unwrap();
+        assert_eq!(crate::db::get_setting(&c, "pref.player_path").unwrap(), None);
+        assert_eq!(crate::db::get_setting(&c, "anilist.token").unwrap(), None);
+        let ext_cnt: i64 = c
+            .query_row("SELECT COUNT(*) FROM installed_extensions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ext_cnt, 0);
+
+        // Deleting last library flushes empty libraries to kura_backup.json and never resurrects when user_prefs > 0
+        let tmp = std::env::temp_dir().join(format!("kura_h14_test_{}", crate::db::random_hex_token(6)));
+        std::fs::create_dir_all(&tmp).unwrap();
+        write_safety_copy_from(&snapshot(&a), &tmp);
+        assert_eq!(read_file(&tmp.join("kura_backup.json")).unwrap().libraries.len(), 1);
+
+        let cleared = fresh();
+        crate::db::seed_default_prefs_if_missing(&cleared).unwrap();
+        mark_dirty();
+        write_safety_copy_from(&snapshot(&cleared), &tmp);
+        assert_eq!(read_file(&tmp.join("kura_backup.json")).unwrap().libraries.len(), 0);
+        assert!(!restore_if_needed(&cleared, &tmp).unwrap());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn extension_opt_in_disabled_on_import_and_safe_folder_validation() {
+        let mut b = Backup {
+            app: "kura".into(),
+            version: FORMAT,
+            updated_at: 100,
+            app_version: "0.5.0".into(),
+            ..Default::default()
+        };
+        b.libraries.push(BackupLibrary {
+            name: "Mixed".into(),
+            kind: "anime".into(),
+            folders: vec![
+                r"D:\Anime".into(),
+                r"C:\".into(),
+                r"C:\Windows".into(),
+                r"C:\Windows\System32".into(),
+                r"\\evil\share\anime".into(),
+                "relative/folder".into(),
+                "/".into(),
+                "/etc".into(),
+                "/usr".into(),
+                "/System".into(),
+                String::new(),
+            ],
+        });
+        b.extensions.push(ExtensionBackupRow {
+            id: "stream-ext".into(),
+            name: "Stream Provider".into(),
+            version: "1.0.0".into(),
+            ext_type: "onlinestream-provider".into(),
+            language: "javascript".into(),
+            manifest_uri: "https://example.com/manifest.json".into(),
+            icon_url: None,
+            author: None,
+            description: None,
+            payload: "class Provider {}".into(),
+            user_config_json: "{}".into(),
+            enabled: true,
+            updated_at: 50,
+        });
+
+        let summary = summarize(Path::new("backup.json"), &b);
+        assert_eq!(summary.extensions, 1);
+        assert_eq!(summary.extension_names, vec!["Stream Provider".to_string()]);
+
+        // 1. `extensions: false` skips extension import completely and filters unsafe folders
+        let c1 = fresh();
+        let rep1 = apply(
+            &c1,
+            &b,
+            &ImportOptions {
+                extensions: false,
+                ..ImportOptions::ALL
+            },
+        )
+        .unwrap();
+        assert_eq!(rep1.extensions, 0);
+        assert_eq!(rep1.folders_added, 1);
+        let ext_cnt1: i64 = c1
+            .query_row("SELECT COUNT(*) FROM installed_extensions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ext_cnt1, 0);
+        let saved_folder: String = c1
+            .query_row("SELECT path FROM library_folders", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(saved_folder, r"D:\Anime");
+
+        // 2. `extensions: true` imports valid extensions with `enabled = 0` (never auto-enabled!)
+        let c2 = fresh();
+        let rep2 = apply(&c2, &b, &ImportOptions::ALL).unwrap();
+        assert_eq!(rep2.extensions, 1);
+        let enabled_val: i64 = c2
+            .query_row(
+                "SELECT enabled FROM installed_extensions WHERE id = 'stream-ext'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(enabled_val, 0);
+
+        // 3. `restore_if_needed` never auto-imports JS extensions on fresh boot
+        let tmp = std::env::temp_dir().join(format!(
+            "kura_ext_restore_test_{}",
+            crate::db::random_hex_token(6)
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        write_file(&tmp.join("kura_backup.json"), &b).unwrap();
+        let c3 = fresh();
+        assert!(restore_if_needed(&c3, &tmp).unwrap());
+        let ext_cnt3: i64 = c3
+            .query_row("SELECT COUNT(*) FROM installed_extensions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ext_cnt3, 0);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

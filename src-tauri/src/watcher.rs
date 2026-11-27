@@ -77,30 +77,52 @@ fn is_image_asset(path: &Path) -> bool {
 
 /// Check if a file is ready to be processed:
 /// 1. Exists and size > 0
-/// 2. Size matches previous observation (has stopped growing)
+/// 2. Size matches a previous non-zero observation (`last_size == Some(len)` — requires at least two samples!)
 /// 3. File can be opened with read permissions (not locked exclusively by a downloader/copier)
-fn is_file_ready(path: &Path, last_size: Option<u64>) -> (bool, u64) {
+fn is_file_ready(path: &Path, last_size: Option<u64>) -> (bool, Option<u64>) {
     let Ok(meta) = std::fs::metadata(path) else {
-        return (false, 0);
+        return (false, None);
     };
     let len = meta.len();
     if len == 0 {
-        return (false, 0);
+        return (false, None);
     }
-    if let Some(prev) = last_size {
-        if prev != len {
-            return (false, len);
-        }
+    let Some(prev) = last_size else {
+        return (false, Some(len));
+    };
+    if prev != len {
+        return (false, Some(len));
     }
     match std::fs::OpenOptions::new().read(true).open(path) {
-        Ok(_) => (true, len),
-        Err(_) => (false, len),
+        Ok(_) => (true, Some(len)),
+        Err(_) => (false, Some(len)),
     }
 }
 
+#[derive(Clone)]
 struct PendingItem {
     last_event: Instant,
     last_size: Option<u64>,
+}
+
+fn collect_dir_candidates(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(dir)
+        .follow_links(true)
+        .into_iter()
+        .filter_entry(|e| !e.file_name().to_string_lossy().starts_with('.'))
+    {
+        if let Ok(entry) = entry {
+            let ep = entry.path();
+            if ep.is_file()
+                && (crate::parser::is_video_file(ep) || is_image_asset(ep))
+                && !is_temp_path(ep)
+            {
+                out.push(ep.to_path_buf());
+            }
+        }
+    }
+    out
 }
 
 async fn run_worker(app: AppHandle, st: Arc<AppState>, mut reload_rx: UnboundedReceiver<()>) {
@@ -133,54 +155,81 @@ async fn run_worker(app: AppHandle, st: Arc<AppState>, mut reload_rx: UnboundedR
             }
             Some(res) = event_rx.recv() => {
                 if let Ok(event) = res {
-                    handle_fs_event(event, &mut pending);
+                    let event_paths = event.paths;
+                    if let Ok(discovered) = tauri::async_runtime::spawn_blocking(move || {
+                        expand_fs_event_paths(event_paths)
+                    }).await {
+                        let now = Instant::now();
+                        for path in discovered {
+                            pending.entry(path).and_modify(|item| item.last_event = now).or_insert(PendingItem {
+                                last_event: now,
+                                last_size: None,
+                            });
+                        }
+                    }
                 }
             }
             _ = ticker.tick() => {
                 if !pending.is_empty() {
-                    let mut ready = Vec::new();
                     let now = Instant::now();
-                    let mut to_remove = Vec::new();
+                    let due: Vec<(PathBuf, Option<u64>)> = pending
+                        .iter()
+                        .filter(|(_, item)| now.duration_since(item.last_event) >= debounce_duration)
+                        .map(|(p, item)| (p.clone(), item.last_size))
+                        .collect();
 
-                    for (path, item) in pending.iter_mut() {
-                        if now.duration_since(item.last_event) < debounce_duration {
-                            continue;
-                        }
-                        if !path.exists() {
-                            // File or folder was deleted
-                            to_remove.push(path.clone());
-                            ready.push(path.clone());
-                        } else if path.is_file() {
-                            let (is_ready, size) = is_file_ready(path, item.last_size);
-                            if is_ready {
-                                to_remove.push(path.clone());
-                                ready.push(path.clone());
-                            } else {
-                                item.last_size = Some(size);
-                                item.last_event = now; // Give another debounce window to settle
-                            }
-                        } else if path.is_dir() {
-                            // Directory changed: check if any video/image files were added
-                            to_remove.push(path.clone());
-                            for entry in walkdir::WalkDir::new(path)
-                                .follow_links(true)
-                                .into_iter()
-                                .filter_entry(|e| !e.file_name().to_string_lossy().starts_with('.'))
-                            {
-                                if let Ok(entry) = entry {
-                                    let ep = entry.path();
-                                    if ep.is_file() && (crate::parser::is_video_file(ep) || is_image_asset(ep)) && !is_temp_path(ep) {
-                                        ready.push(ep.to_path_buf());
-                                    }
-                                }
-                            }
-                        } else {
-                            to_remove.push(path.clone());
-                        }
+                    if due.is_empty() {
+                        continue;
                     }
 
+                    let Ok((ready, updates, to_remove, newly_discovered)) =
+                        tauri::async_runtime::spawn_blocking(move || {
+                            let mut ready = Vec::new();
+                            let mut updates = Vec::new();
+                            let mut to_remove = Vec::new();
+                            let mut newly_discovered = Vec::new();
+
+                            for (path, last_size) in due {
+                                if !path.exists() {
+                                    to_remove.push(path.clone());
+                                    ready.push(path);
+                                } else if path.is_file() {
+                                    let (is_ready, next_size) = is_file_ready(&path, last_size);
+                                    if is_ready {
+                                        to_remove.push(path.clone());
+                                        ready.push(path);
+                                    } else {
+                                        updates.push((path, next_size));
+                                    }
+                                } else if path.is_dir() {
+                                    to_remove.push(path.clone());
+                                    newly_discovered.extend(collect_dir_candidates(&path));
+                                } else {
+                                    to_remove.push(path);
+                                }
+                            }
+                            (ready, updates, to_remove, newly_discovered)
+                        })
+                        .await
+                    else {
+                        continue;
+                    };
+
+                    let tick_now = Instant::now();
                     for path in to_remove {
                         pending.remove(&path);
+                    }
+                    for (path, next_size) in updates {
+                        if let Some(item) = pending.get_mut(&path) {
+                            item.last_size = next_size;
+                            item.last_event = tick_now;
+                        }
+                    }
+                    for ep in newly_discovered {
+                        pending.entry(ep).or_insert(PendingItem {
+                            last_event: tick_now,
+                            last_size: None,
+                        });
                     }
 
                     if !ready.is_empty() {
@@ -261,69 +310,66 @@ fn reload_watches(
     }
 }
 
-fn handle_fs_event(event: Event, pending: &mut HashMap<PathBuf, PendingItem>) {
-    let now = Instant::now();
-    for path in event.paths {
+fn expand_fs_event_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for path in paths {
         if is_temp_path(&path) {
             continue;
         }
         if path.is_file() {
             if crate::parser::is_video_file(&path) || is_image_asset(&path) {
-                pending.entry(path).and_modify(|item| item.last_event = now).or_insert(PendingItem {
-                    last_event: now,
-                    last_size: None,
-                });
+                out.push(path);
             }
         } else if path.is_dir() {
             if path.exists() {
-                // Directory created or modified: scan immediate children for video or image files
-                for entry in walkdir::WalkDir::new(&path)
-                    .follow_links(true)
-                    .into_iter()
-                    .filter_entry(|e| !e.file_name().to_string_lossy().starts_with('.'))
-                {
-                    let Ok(entry) = entry else { continue };
-                    let ep = entry.path();
-                    if ep.is_file() && (crate::parser::is_video_file(ep) || is_image_asset(ep)) && !is_temp_path(ep) {
-                        pending.entry(ep.to_path_buf()).and_modify(|item| item.last_event = now).or_insert(PendingItem {
-                            last_event: now,
-                            last_size: None,
-                        });
-                    }
-                }
+                out.extend(collect_dir_candidates(&path));
             } else {
-                // Directory removed
-                pending.entry(path).and_modify(|item| item.last_event = now).or_insert(PendingItem {
-                    last_event: now,
-                    last_size: None,
-                });
+                out.push(path);
             }
         } else if !path.exists() {
-            // Path was deleted or renamed
-            pending.entry(path).and_modify(|item| item.last_event = now).or_insert(PendingItem {
-                last_event: now,
-                last_size: None,
-            });
+            out.push(path);
         }
     }
+    out
+}
+
+fn escape_sql_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 async fn process_ready_batch(app: &AppHandle, st: &Arc<AppState>, paths: Vec<PathBuf>) {
-    let mut deleted_paths = Vec::new();
-    let mut video_paths = Vec::new();
-    let mut image_paths = Vec::new();
-
-    for p in paths {
-        if !p.exists() {
-            deleted_paths.push(p);
-        } else if p.is_file() {
-            if crate::parser::is_video_file(&p) {
-                video_paths.push(p);
-            } else if is_image_asset(&p) {
-                image_paths.push(p);
+    let Ok((deleted_paths, video_paths, image_paths)) =
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut deleted_paths = Vec::new();
+            let mut video_paths = Vec::new();
+            let mut image_paths = Vec::new();
+            for p in paths {
+                if !p.exists() {
+                    deleted_paths.push(p);
+                } else if p.is_file() {
+                    if crate::parser::is_video_file(&p) {
+                        video_paths.push(p);
+                    } else if is_image_asset(&p) {
+                        image_paths.push(p);
+                    }
+                }
             }
-        }
-    }
+            (deleted_paths, video_paths, image_paths)
+        })
+        .await
+    else {
+        return;
+    };
 
     let mut changed = false;
     let mut needs_scan = false;
@@ -338,12 +384,14 @@ async fn process_ready_batch(app: &AppHandle, st: &Arc<AppState>, paths: Vec<Pat
                 changed = true;
                 println!("[kura-watcher] removed deleted file: {p_str}");
             } else {
-                // Handle deleted directory: remove all files prefixed by directory path
-                let dir_pattern1 = format!("{p_str}/%");
-                let dir_pattern2 = format!("{p_str}\\%");
+                // Handle deleted directory: remove all files prefixed by directory path + separator
+                let trimmed = p_str.trim_end_matches(['/', '\\']);
+                let escaped = escape_sql_like(trimmed);
+                let dir_pattern1 = format!("{escaped}/%");
+                let dir_pattern2 = format!("{escaped}\\\\%");
                 let dir_deleted = conn
                     .execute(
-                        "DELETE FROM local_files WHERE path = ?1 OR path LIKE ?2 OR path LIKE ?3",
+                        "DELETE FROM local_files WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\' OR path LIKE ?3 ESCAPE '\\'",
                         rusqlite::params![p_str, dir_pattern1, dir_pattern2],
                     )
                     .unwrap_or(0);
@@ -359,21 +407,35 @@ async fn process_ready_batch(app: &AppHandle, st: &Arc<AppState>, paths: Vec<Pat
     if !image_paths.is_empty() {
         for img in image_paths {
             if let Some(parent) = img.parent() {
-                let p_str = parent.to_string_lossy().to_string();
+                let p_str = parent.to_string_lossy();
+                let trimmed_parent = p_str.trim_end_matches(['/', '\\']);
+                let escaped_parent = escape_sql_like(trimmed_parent);
+                let parent_fwd = format!("{escaped_parent}/%");
+                let parent_win = format!("{escaped_parent}\\\\%");
                 let anilist_id: Option<i64> = {
-                    let conn = st.db();
+                    let conn = st.db_read();
                     conn.query_row(
-                        "SELECT anilist_id FROM local_files WHERE path LIKE ?1 || '%' AND anilist_id IS NOT NULL LIMIT 1",
-                        [&p_str],
+                        "SELECT anilist_id FROM local_files
+                         WHERE (path LIKE ?1 ESCAPE '\\' OR path LIKE ?2 ESCAPE '\\')
+                           AND anilist_id IS NOT NULL
+                         LIMIT 1",
+                        rusqlite::params![parent_fwd, parent_win],
                         |r| r.get(0),
                     )
                     .ok()
                 };
                 if let Some(id) = anilist_id {
                     let dirs = vec![parent.to_path_buf()];
-                    let local = crate::scan::scan_folder_assets(&dirs);
+                    let Ok(local) = tauri::async_runtime::spawn_blocking(move || {
+                        crate::scan::scan_folder_assets(&dirs)
+                    })
+                    .await
+                    else {
+                        continue;
+                    };
                     let conn = st.db();
                     if let Some(poster) = local.poster {
+                        crate::commands::allow_artwork_file_in_asset_scope(app, &poster);
                         let _ = conn.execute(
                             "UPDATE media SET cover_path = ?2 WHERE anilist_id = ?1",
                             rusqlite::params![id, poster.to_string_lossy().to_string()],
@@ -381,6 +443,7 @@ async fn process_ready_batch(app: &AppHandle, st: &Arc<AppState>, paths: Vec<Pat
                         changed = true;
                     }
                     if let Some(backdrop) = local.backdrop {
+                        crate::commands::allow_artwork_file_in_asset_scope(app, &backdrop);
                         let _ = conn.execute(
                             "UPDATE media SET banner_path = ?2 WHERE anilist_id = ?1",
                             rusqlite::params![id, backdrop.to_string_lossy().to_string()],
@@ -388,6 +451,7 @@ async fn process_ready_batch(app: &AppHandle, st: &Arc<AppState>, paths: Vec<Pat
                         changed = true;
                     }
                     if let Some(logo) = local.logo {
+                        crate::commands::allow_artwork_file_in_asset_scope(app, &logo);
                         let _ = conn.execute(
                             "UPDATE media SET logo_path = ?2 WHERE anilist_id = ?1",
                             rusqlite::params![id, logo.to_string_lossy().to_string()],
@@ -627,7 +691,10 @@ mod tests {
 
     #[test]
     fn test_file_readiness_lifecycle() {
-        let temp_dir = std::env::temp_dir().join("kura_watcher_test");
+        let temp_dir = std::env::temp_dir().join(format!(
+            "kura_watcher_test_{}",
+            crate::db::random_hex_token(6)
+        ));
         let _ = std::fs::create_dir_all(&temp_dir);
         let test_file = temp_dir.join("test_episode.mkv");
 
@@ -635,21 +702,74 @@ mod tests {
         std::fs::write(&test_file, b"").unwrap();
         let (ready, len) = is_file_ready(&test_file, None);
         assert!(!ready);
-        assert_eq!(len, 0);
+        assert_eq!(len, None);
 
-        // 2. Growing file: size mismatch with previous observation
+        // 2. First non-zero observation (`last_size == None`): records size, waits for stability sample
         std::fs::write(&test_file, b"video data chunk 1").unwrap();
+        let (ready, len) = is_file_ready(&test_file, None);
+        assert!(!ready);
+        assert_eq!(len, Some(18));
+
+        // 3. Growing file: size mismatch with previous observation
         let (ready, len) = is_file_ready(&test_file, Some(5)); // prev size was 5, now 18
         assert!(!ready);
-        assert_eq!(len, 18);
+        assert_eq!(len, Some(18));
 
-        // 3. Stable file: size matches previous observation and readable
+        // 4. Stable file: size matches previous observation and readable
         let (ready, len) = is_file_ready(&test_file, Some(18));
         assert!(ready);
-        assert_eq!(len, 18);
+        assert_eq!(len, Some(18));
 
         let _ = std::fs::remove_file(&test_file);
         let _ = std::fs::remove_dir(&temp_dir);
+    }
+
+    #[test]
+    fn test_escape_sql_like_and_prefix_isolation() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE local_files (path TEXT PRIMARY KEY, anilist_id INTEGER);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO local_files VALUES (?1, 100), (?2, 200), (?3, 300)",
+            rusqlite::params![
+                r"D:\Anime\Evangelion\01.mkv",
+                r"D:\Anime\Eva\01.mkv",
+                r"D:\Anime\100%_Completed\ep_01.mkv",
+            ],
+        )
+        .unwrap();
+
+        // `D:\Anime\Eva` must match `D:\Anime\Eva\01.mkv` (200), NOT `D:\Anime\Evangelion\01.mkv` (100)
+        let escaped_eva = escape_sql_like(r"D:\Anime\Eva");
+        let fwd_eva = format!("{escaped_eva}/%");
+        let win_eva = format!("{escaped_eva}\\\\%");
+        let matched: Vec<i64> = conn
+            .prepare(
+                "SELECT anilist_id FROM local_files
+                 WHERE path LIKE ?1 ESCAPE '\\' OR path LIKE ?2 ESCAPE '\\'",
+            )
+            .unwrap()
+            .query_map(rusqlite::params![fwd_eva, win_eva], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(matched, vec![200]);
+
+        // Literal `%` and `_` in folder names must be escaped rather than acting as wildcards
+        let escaped_pct = escape_sql_like(r"D:\Anime\100%_Completed");
+        let fwd_pct = format!("{escaped_pct}/%");
+        let win_pct = format!("{escaped_pct}\\\\%");
+        let pct_id: i64 = conn
+            .query_row(
+                "SELECT anilist_id FROM local_files
+                 WHERE path LIKE ?1 ESCAPE '\\' OR path LIKE ?2 ESCAPE '\\'",
+                rusqlite::params![fwd_pct, win_pct],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pct_id, 300);
     }
 }
 

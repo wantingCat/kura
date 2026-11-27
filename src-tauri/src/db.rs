@@ -119,7 +119,7 @@ CREATE TABLE local_files (
     added_at    INTEGER NOT NULL
 );
 CREATE INDEX idx_files_media ON local_files(anilist_id);
-CREATE INDEX idx_files_group ON local_files(group_id);
+CREATE INDEX idx_files_group ON local_files(group_id, path);
 
 CREATE TABLE watch_state (
     anilist_id  INTEGER NOT NULL,
@@ -355,6 +355,71 @@ CREATE TABLE IF NOT EXISTS stream_library (
 );
 "#;
 
+pub fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut buf = [0u8; N];
+    fill_random_bytes(&mut buf);
+    buf
+}
+
+pub fn random_hex_token(num_bytes: usize) -> String {
+    let mut buf = vec![0u8; num_bytes];
+    fill_random_bytes(&mut buf);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(num_bytes * 2);
+    for b in buf {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn fill_random_bytes(buf: &mut [u8]) {
+    if buf.is_empty() {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "bcrypt")]
+        extern "system" {
+            fn BCryptGenRandom(
+                hAlgorithm: *mut std::ffi::c_void,
+                pbBuffer: *mut u8,
+                cbBuffer: u32,
+                dwFlags: u32,
+            ) -> i32;
+        }
+        const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
+        for chunk in buf.chunks_mut(u32::MAX as usize) {
+            let status = unsafe {
+                BCryptGenRandom(
+                    std::ptr::null_mut(),
+                    chunk.as_mut_ptr(),
+                    chunk.len() as u32,
+                    BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+                )
+            };
+            assert_eq!(status, 0, "BCryptGenRandom failed with NTSTATUS {status:#x}");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        use std::io::Read;
+        let mut f = std::fs::File::open("/dev/urandom").expect("failed to open /dev/urandom");
+        f.read_exact(buf).expect("failed to read /dev/urandom");
+    }
+}
+
+/// Redact sensitive query/log parameters (`api_key=`, `token=`, `passkey=`, etc.) from diagnostic/log strings.
+pub fn redact_sensitive_text(s: &str) -> String {
+    static RE_SECRET_PARAM: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)\b(api_key|apikey|access_token|refresh_token|token|passkey|password|passwd|pwd|secret|auth)=([^&\s\x22\x27\)]+)",
+        )
+        .unwrap()
+    });
+    RE_SECRET_PARAM.replace_all(s, "$1=[REDACTED]").into_owned()
+}
+
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(
@@ -364,20 +429,14 @@ pub fn open(path: &Path) -> Result<Connection> {
          PRAGMA busy_timeout = 5000;",
     )?;
     migrate(&conn)?;
-    let _ = conn.execute(
-        "UPDATE media SET logo_url = NULL, logo_path = NULL WHERE logo_url LIKE '%/icons/%'",
-        [],
-    );
 
-    // Check if user data needs to be restored from persistent backup
+    // Check if user data needs to be restored from persistent backup (only when DB is genuinely empty)
     let data_dir = path.parent().unwrap_or(Path::new("."));
     let restored = restore_user_data_if_needed(&conn, data_dir).unwrap_or(false);
     let _ = seed_default_prefs_if_missing(&conn);
     if restored {
         crate::klog!("[kura] database was missing user data; filled it from the safety backup");
     }
-    // Refresh the safety copy shortly after launch (written in the background, see backup::start_auto).
-    crate::backup::mark_dirty();
 
     Ok(conn)
 }
@@ -389,63 +448,65 @@ pub struct BackupLibrary {
     pub folders: Vec<String>,
 }
 
-/// Synchronously write the automatic safety copy (see [`crate::backup`]).
+/// Synchronously write the automatic safety copy in tests (see [`crate::backup`]).
+#[cfg(test)]
 pub fn backup_user_data(conn: &Connection, data_dir: &Path) {
-    crate::backup::write_safety_copy(conn, data_dir);
+    crate::backup::write_safety_copy_conn(conn, data_dir);
 }
 
-/// Fill empty parts of the database from the newest safety copy (see [`crate::backup`]).
+/// Fill empty database from the newest safety copy (see [`crate::backup`]).
 pub fn restore_user_data_if_needed(conn: &Connection, data_dir: &Path) -> Result<bool> {
     crate::backup::restore_if_needed(conn, data_dir)
 }
 
-pub fn seed_default_prefs_if_missing(conn: &Connection) -> Result<()> {
-    let defaults = [
-        ("pref.theme", "comic"),
-        ("pref.player", "builtin"),
-        ("pref.audio_lang", "jpn"),
-        ("pref.sub_lang", "jpn"),
-        ("pref.sub_fallback", "eng"),
-        ("pref.watched_threshold", "90"),
-        ("pref.resume", "1"),
-        ("pref.autoplay", "1"),
-        ("pref.group_seasons", "1"),
-        ("pref.auto_update", "1"),
-        ("pref.folder_watcher", "1"),
-        ("pref.discord_rpc", "1"),
-        ("pref.discord_spoilers", "0"),
-        ("pref.discord_buttons", "1"),
-        ("pref.mpc_port", "13579"),
-        ("pref.anilist_auto_scrobble", "1"),
-        ("pref.airing_notifications", "1"),
-        ("pref.jimaku_auto_retime", "1"),
-        ("pref.jimaku_auto_fetch", "0"),
-        ("pref.app_mode", "local"),
-        ("pref.torrent_action", "stream"),
-        ("pref.torrent_quality", "1080p"),
-        ("pref.torrent_auto_subs", "1"),
-        ("pref.torrent_seeding", "0"),
-        ("pref.nyaa_url", ""),
-        ("pref.torrent_extensions", "[]"),
-        ("pref.builtin_player_migrated_v1", "0"),
-        ("pref.immersion_daily_goal", "60"),
-        ("pref.stream_source", "web"),
-        ("pref.stream_softsub_only", "1"),
-        ("pref.anime4k_preset", "off"),
-        ("pref.torrent_groups", ""),
-        ("pref.torrent_codec", "any"),
-        ("pref.torrent_min_seeders", "0"),
-        ("pref.torrent_exclude", ""),
-        ("pref.extension_marketplace_url", ""),
-        ("pref.anilist_immersion_list", ""),
-    ];
+pub const DEFAULT_PREFS: &[(&str, &str)] = &[
+    ("pref.player", "builtin"),
+    ("pref.audio_lang", "jpn"),
+    ("pref.sub_lang", "jpn"),
+    ("pref.sub_fallback", "eng"),
+    ("pref.watched_threshold", "90"),
+    ("pref.resume", "1"),
+    ("pref.autoplay", "1"),
+    ("pref.group_seasons", "1"),
+    ("pref.auto_update", "1"),
+    ("pref.folder_watcher", "1"),
+    ("pref.minimize_to_tray", "1"),
+    ("pref.discord_rpc", "1"),
+    ("pref.discord_spoilers", "0"),
+    ("pref.discord_buttons", "1"),
+    ("pref.mpc_port", "13579"),
+    ("pref.anilist_auto_scrobble", "1"),
+    ("pref.airing_notifications", "1"),
+    ("pref.jimaku_auto_retime", "1"),
+    ("pref.app_mode", "local"),
+    ("pref.torrent_action", "stream"),
+    ("pref.torrent_quality", "1080p"),
+    ("pref.torrent_auto_subs", "1"),
+    ("pref.torrent_seeding", "0"),
+    ("pref.torrent_extensions", "[]"),
+    ("pref.builtin_player_migrated_v1", "0"),
+    ("pref.immersion_daily_goal", "60"),
+    ("pref.stream_source", "web"),
+    ("pref.stream_softsub_only", "1"),
+    ("pref.anime4k_preset", "off"),
+    ("pref.torrent_groups", ""),
+    ("pref.torrent_codec", "any"),
+    ("pref.torrent_min_seeders", "0"),
+    ("pref.torrent_exclude", ""),
+    ("pref.extension_marketplace_url", ""),
+    ("pref.anilist_immersion_list", ""),
+];
 
-    for (k, v) in defaults {
-        conn.execute(
-            "INSERT OR IGNORE INTO settings(key, value) VALUES (?1, ?2)",
-            params![k, v],
-        )?;
+pub fn seed_default_prefs_if_missing(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt =
+            tx.prepare_cached("INSERT OR IGNORE INTO settings(key, value) VALUES (?1, ?2)")?;
+        for &(k, v) in DEFAULT_PREFS {
+            stmt.execute(params![k, v])?;
+        }
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -475,38 +536,48 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch(&format!(
             "BEGIN; {SCHEMA_V5} PRAGMA user_version = 6; COMMIT;"
         ))?;
-    } else {
-        conn.execute_batch(SCHEMA_V5)?;
     }
     if version < 7 {
         conn.execute_batch(&format!(
             "BEGIN; {SCHEMA_V6} PRAGMA user_version = 7; COMMIT;"
         ))?;
-    } else {
-        conn.execute_batch(SCHEMA_V6)?;
     }
-    let _ = conn.execute("ALTER TABLE linked_subtitles ADD COLUMN content TEXT", []);
+    if version < 8 {
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA_V7} PRAGMA user_version = 8; COMMIT;"
+        ))?;
+    }
     if version < 9 {
         conn.execute_batch(&format!(
             "BEGIN; {SCHEMA_V8} PRAGMA user_version = 9; COMMIT;"
         ))?;
-    } else {
-        conn.execute_batch(SCHEMA_V8)?;
     }
     if version < 10 {
         conn.execute_batch(&format!(
             "BEGIN; {SCHEMA_V9} PRAGMA user_version = 10; COMMIT;"
         ))?;
-    } else {
-        conn.execute_batch(SCHEMA_V9)?;
     }
-    let _ = backfill_immersion_from_watch_state(conn);
-    if version < 8 {
-        conn.execute_batch(&format!(
-            "BEGIN; {SCHEMA_V7} PRAGMA user_version = 10; COMMIT;"
-        ))?;
-    } else {
-        conn.execute_batch(SCHEMA_V7)?;
+    if version < 11 {
+        if version > 0 {
+            // Reconcile any legacy out-of-order user_version 8..10 upgrades once
+            conn.execute_batch(SCHEMA_V5)?;
+            conn.execute_batch(SCHEMA_V6)?;
+            conn.execute_batch(SCHEMA_V7)?;
+            conn.execute_batch(SCHEMA_V8)?;
+            conn.execute_batch(SCHEMA_V9)?;
+            let _ = conn.execute("ALTER TABLE linked_subtitles ADD COLUMN content TEXT", []);
+            let _ = conn.execute(
+                "UPDATE media SET logo_url = NULL, logo_path = NULL WHERE logo_url LIKE '%/icons/%'",
+                [],
+            );
+            let _ = backfill_immersion_from_watch_state(conn);
+        }
+        conn.execute_batch(
+            "BEGIN;
+             CREATE INDEX IF NOT EXISTS idx_files_group_path ON local_files(group_id, path);
+             PRAGMA user_version = 11;
+             COMMIT;",
+        )?;
     }
     Ok(())
 }
@@ -518,15 +589,6 @@ pub(crate) fn migrate_for_tests(conn: &Connection) -> Result<()> {
 
 pub fn today_day_key() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
-}
-
-pub fn timestamp_to_day_key(ts: i64) -> String {
-    use chrono::TimeZone;
-    if let chrono::LocalResult::Single(dt) = chrono::Local.timestamp_opt(ts, 0) {
-        dt.format("%Y-%m-%d").to_string()
-    } else {
-        today_day_key()
-    }
 }
 
 /// Record active unpaused immersion time (in seconds) for today and the given anime episode.

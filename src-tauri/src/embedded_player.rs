@@ -65,7 +65,6 @@ pub struct BuiltinPlayerState {
     pub ep_key: String,
     pub path: String,
     pub stream_url: String,
-    pub transcode_base_url: Option<String>,
     pub show_title: String,
     pub episode_title: String,
     pub paused: bool,
@@ -101,7 +100,6 @@ impl Default for BuiltinPlayerState {
             ep_key: String::new(),
             path: String::new(),
             stream_url: String::new(),
-            transcode_base_url: None,
             show_title: String::new(),
             episode_title: String::new(),
             paused: false,
@@ -134,10 +132,7 @@ impl Default for BuiltinPlayerState {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BuiltinCommand {
     PlayPause,
-    Pause,
-    Resume,
     Seek { position: f64 },
-    SeekRelative { delta: f64 },
     SetVolume { volume: f64 },
     ToggleMute,
     SetSpeed { speed: f64 },
@@ -147,13 +142,6 @@ pub enum BuiltinCommand {
     LoadSubFile { path: String },
     SetShaderPreset { preset: String },
     NextEpisode,
-    OpenExternalMpv,
-    Html5Tick {
-        position: f64,
-        duration: f64,
-        paused: bool,
-        ended: bool,
-    },
     SyncBounds,
     Stop,
 }
@@ -201,6 +189,8 @@ struct RuntimeSession {
     pending_start_pos: f64,
     user_adjusted_offset: bool,
     auto_aligned_offset: bool,
+    live_mkv_align_done: bool,
+    last_live_align_file_len: u64,
     user_selected_sub_track: bool,
     track_prefs: player::EffectiveTrackPrefs,
     last_unpaused_tick: Option<Instant>,
@@ -229,6 +219,8 @@ fn runtime() -> &'static Mutex<RuntimeSession> {
             pending_start_pos: 0.0,
             user_adjusted_offset: false,
             auto_aligned_offset: false,
+            live_mkv_align_done: false,
+            last_live_align_file_len: 0,
             user_selected_sub_track: false,
             track_prefs: player::EffectiveTrackPrefs::default(),
             last_unpaused_tick: None,
@@ -238,14 +230,6 @@ fn runtime() -> &'static Mutex<RuntimeSession> {
     })
 }
 
-pub fn get_state() -> BuiltinPlayerState {
-    runtime()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .state
-        .clone()
-}
-
 pub fn sync_bounds(app: &AppHandle) {
     let active = runtime()
         .lock()
@@ -253,6 +237,60 @@ pub fn sync_bounds(app: &AppHandle) {
         .state
         .active;
     libmpv::sync_surface_bounds(app, active);
+}
+
+/// Synchronously flush active playback progress, immersion seconds, and torrent stream state on app exit (`M-07`).
+pub fn shutdown_sync(app: &AppHandle, st: &Arc<AppState>) {
+    SESSION_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let active_snapshot = {
+        let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+        if !g.state.active {
+            None
+        } else {
+            let cur_ep = Ep {
+                anilist_id: g.state.anilist_id,
+                ep_key: g.state.ep_key.clone(),
+                path: g.state.path.clone(),
+            };
+            let pos = g.state.position;
+            let dur = g.state.duration;
+            let marked = g.marked_watched;
+            let flush_sec = g.unflushed_immersion_sec.round() as i64;
+            let show_title = g.state.show_title.clone();
+            let mpv_opt = g.mpv;
+            g.unflushed_immersion_sec = 0.0;
+            g.last_unpaused_tick = None;
+            g.state.active = false;
+            Some((cur_ep, pos, dur, marked, flush_sec, show_title, mpv_opt))
+        }
+    };
+
+    libmpv::sync_surface_bounds(app, false);
+    let Some((cur_ep, pos, dur, marked, flush_sec, show_title, mpv_opt)) = active_snapshot else {
+        return;
+    };
+
+    if let Some(mpv) = mpv_opt {
+        let _ = mpv.command(&["stop"]);
+    }
+    {
+        let conn = st.db();
+        if flush_sec > 0 {
+            let _ = db::record_immersion_time(
+                &conn,
+                Some(cur_ep.anilist_id),
+                Some(&cur_ep.ep_key),
+                Some(&show_title),
+                flush_sec,
+            );
+        }
+        if !marked && pos > 15.0 && dur > 0.0 {
+            save_ep_progress(&conn, &cur_ep, pos, dur);
+        }
+    }
+    *st.active_mpv_ipc.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    st.discord.clear();
+    crate::torrent::on_player_stopped(cur_ep.anilist_id, &cur_ep.ep_key);
 }
 
 fn ensure_mpv(app: &AppHandle, st: &Arc<AppState>) -> Result<MpvInstance> {
@@ -517,16 +555,16 @@ fn run_mpv_event_loop(app: AppHandle, st: Arc<AppState>, mpv: MpvInstance) {
     loop {
         let ev_ptr = mpv.wait_event(0.20);
 
-        // Periodically keep the video surface aligned with the main window.
-        // Read `active` and RELEASE the runtime lock before syncing (never hold it across
-        // anything that touches the UI thread), and throttle to ~4x/sec instead of every event.
+        // Periodically keep the video surface aligned with the main window ONLY when active (`H-23`).
         if last_surface_sync
             .map(|t| t.elapsed().as_millis() >= 250)
             .unwrap_or(true)
         {
             last_surface_sync = Some(Instant::now());
             let active = runtime().lock().unwrap_or_else(|e| e.into_inner()).state.active;
-            libmpv::sync_surface_bounds(&app, active);
+            if active {
+                libmpv::sync_surface_bounds(&app, true);
+            }
         }
 
         if ev_ptr.is_null() {
@@ -544,7 +582,7 @@ fn run_mpv_event_loop(app: AppHandle, st: Arc<AppState>, mpv: MpvInstance) {
         }
 
         if event_id == MPV_EVENT_FILE_LOADED {
-            let (dur_for_aniskip, cur_ep, sess_id) = {
+            let aniskip_job = {
                 let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
                 if !g.state.active {
                     continue;
@@ -557,18 +595,23 @@ fn run_mpv_event_loop(app: AppHandle, st: Arc<AppState>, mpv: MpvInstance) {
                 }
                 refresh_tracks_and_chapters_from_mpv(&mpv, &mut g);
                 emit_state(&app, &g.state);
-                (
-                    g.state.duration,
-                    Ep {
-                        anilist_id: g.state.anilist_id,
-                        ep_key: g.state.ep_key.clone(),
-                        path: g.state.path.clone(),
-                    },
-                    SESSION_COUNTER.load(Ordering::SeqCst),
-                )
+                if g.state.duration > 0.0 && !g.aniskip_queried {
+                    g.aniskip_queried = true;
+                    Some((
+                        g.state.duration,
+                        Ep {
+                            anilist_id: g.state.anilist_id,
+                            ep_key: g.state.ep_key.clone(),
+                            path: g.state.path.clone(),
+                        },
+                        SESSION_COUNTER.load(Ordering::SeqCst),
+                    ))
+                } else {
+                    None
+                }
             };
 
-            if dur_for_aniskip > 0.0 {
+            if let Some((dur_for_aniskip, cur_ep, sess_id)) = aniskip_job {
                 let app_c = app.clone();
                 let st_c = st.clone();
                 tauri::async_runtime::spawn(async move {
@@ -581,7 +624,7 @@ fn run_mpv_event_loop(app: AppHandle, st: Arc<AppState>, mpv: MpvInstance) {
         if event_id == MPV_EVENT_END_FILE && !ev.data.is_null() {
             let end_ev = unsafe { &*(ev.data as *const MpvEventEndFile) };
             if end_ev.reason == MPV_END_FILE_REASON_EOF {
-                let (active, autoplay, has_next_ep, stream_kind, cur_ep) = {
+                let (active, autoplay, has_next_ep, stream_kind, cur_ep, ended_sess_id) = {
                     let g = runtime().lock().unwrap_or_else(|e| e.into_inner());
                     (
                         g.state.active,
@@ -593,24 +636,44 @@ fn run_mpv_event_loop(app: AppHandle, st: Arc<AppState>, mpv: MpvInstance) {
                             ep_key: g.state.ep_key.clone(),
                             path: g.state.path.clone(),
                         },
+                        SESSION_COUNTER.load(Ordering::SeqCst),
                     )
                 };
                 if active && autoplay {
-                    let next = player::next_episode(&st.db(), &cur_ep);
-                    if let Some(next_ep) = next {
-                        let _ = start(app.clone(), st.clone(), next_ep);
-                    } else if has_next_ep {
-                        if let Ok(num) = cur_ep.ep_key.parse::<i64>() {
-                            let _ = app.emit(
-                                "play-next-stream-episode",
-                                serde_json::json!({
-                                    "anilistId": cur_ep.anilist_id,
-                                    "nextEpisode": num + 1,
-                                    "streamKind": stream_kind.unwrap_or_else(|| "web".to_string()),
-                                }),
-                            );
+                    // Dispatch next-episode transition off `kura-libmpv-events` (`H-15`).
+                    let app_eof = app.clone();
+                    let st_eof = st.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if SESSION_COUNTER.load(Ordering::SeqCst) != ended_sess_id {
+                            return;
                         }
-                    }
+                        let st_for_next = st_eof.clone();
+                        let cur_for_next = cur_ep.clone();
+                        let next = tokio::task::spawn_blocking(move || {
+                            player::next_episode(&st_for_next.db_read(), &cur_for_next)
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+
+                        if SESSION_COUNTER.load(Ordering::SeqCst) != ended_sess_id {
+                            return;
+                        }
+                        if let Some(next_ep) = next {
+                            let _ = start(app_eof, st_eof, next_ep);
+                        } else if has_next_ep {
+                            if let Ok(num) = cur_ep.ep_key.parse::<i64>() {
+                                let _ = app_eof.emit(
+                                    "play-next-stream-episode",
+                                    serde_json::json!({
+                                        "anilistId": cur_ep.anilist_id,
+                                        "nextEpisode": num + 1,
+                                        "streamKind": stream_kind.unwrap_or_else(|| "web".to_string()),
+                                    }),
+                                );
+                            }
+                        }
+                    });
                 }
             }
             continue;
@@ -634,10 +697,34 @@ fn run_mpv_event_loop(app: AppHandle, st: Arc<AppState>, mpv: MpvInstance) {
                 "duration" if prop.format == MPV_FORMAT_DOUBLE && !prop.data.is_null() => {
                     let dur = unsafe { *(prop.data as *const f64) };
                     if dur > 0.0 && dur.is_finite() {
-                        let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-                        if g.state.active {
-                            g.state.duration = dur;
-                            emit_state(&app, &g.state);
+                        let aniskip_job = {
+                            let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                            if g.state.active {
+                                g.state.duration = dur;
+                                emit_state(&app, &g.state);
+                                if !g.aniskip_queried {
+                                    g.aniskip_queried = true;
+                                    Some((
+                                        Ep {
+                                            anilist_id: g.state.anilist_id,
+                                            ep_key: g.state.ep_key.clone(),
+                                            path: g.state.path.clone(),
+                                        },
+                                        SESSION_COUNTER.load(Ordering::SeqCst),
+                                    ))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some((cur_ep, sess_id)) = aniskip_job {
+                            let app_c = app.clone();
+                            let st_c = st.clone();
+                            tauri::async_runtime::spawn(async move {
+                                fetch_and_apply_aniskip(&app_c, &st_c, &cur_ep, dur, sess_id).await;
+                            });
                         }
                     }
                 }
@@ -786,11 +873,13 @@ fn handle_mpv_time_tick(app: &AppHandle, st: &Arc<AppState>, position: f64) {
         g.tick_count += 1;
         let try_live_align = !g.user_adjusted_offset
             && !g.auto_aligned_offset
+            && !g.live_mkv_align_done
             && g.state.sid == Some(EXTERNAL_SUB_TRACK_ID)
             && g.state.stream_kind.as_deref() != Some("web")
             && !g.cues.is_empty()
             && (g.tick_count == 5 || g.tick_count % 60 == 0)
             && g.tick_count <= 600;
+        let prev_align_len = g.last_live_align_file_len;
         let threshold = g.threshold;
         let should_mark_watched =
             !g.marked_watched && player::reached(position, eff_dur, threshold);
@@ -836,7 +925,7 @@ fn handle_mpv_time_tick(app: &AppHandle, st: &Arc<AppState>, position: f64) {
                 path: g.state.path.clone(),
             },
             if try_live_align {
-                Some(g.cues.clone())
+                Some((g.cues.clone(), prev_align_len))
             } else {
                 None
             },
@@ -858,7 +947,7 @@ fn handle_mpv_time_tick(app: &AppHandle, st: &Arc<AppState>, position: f64) {
         }
     }
 
-    if let Some(cues_snapshot) = try_live_align {
+    if let Some((cues_snapshot, prev_file_len)) = try_live_align {
         let ep_clone = cur_ep.clone();
         let app_clone = app.clone();
         let sess_id = SESSION_COUNTER.load(Ordering::SeqCst);
@@ -868,24 +957,38 @@ fn handle_mpv_time_tick(app: &AppHandle, st: &Arc<AppState>, position: f64) {
             else {
                 return;
             };
-            if let Some(off_sec) = subtitles::compute_live_mkv_cue_offset_sec(&cues_snapshot, &mkv_path)
+            let cur_len = std::fs::metadata(&mkv_path).map(|m| m.len()).unwrap_or(0);
+            if cur_len > 0 && cur_len == prev_file_len {
+                return;
+            }
+            let outcome =
+                subtitles::compute_live_mkv_cue_offset_outcome(&cues_snapshot, &mkv_path);
+            if SESSION_COUNTER.load(Ordering::SeqCst) != sess_id {
+                return;
+            }
+            let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+            if !g.state.active
+                || g.state.anilist_id != ep_clone.anilist_id
+                || g.state.ep_key != ep_clone.ep_key
             {
-                if SESSION_COUNTER.load(Ordering::SeqCst) != sess_id {
-                    return;
+                return;
+            }
+            g.last_live_align_file_len = cur_len;
+            match outcome {
+                subtitles::LiveMkvAlignOutcome::NoEmbeddedSubTracks => {
+                    g.live_mkv_align_done = true;
                 }
-                let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-                if g.state.active
-                    && !g.user_adjusted_offset
-                    && !g.auto_aligned_offset
-                    && g.state.anilist_id == ep_clone.anilist_id
-                    && g.state.ep_key == ep_clone.ep_key
-                {
-                    g.auto_aligned_offset = true;
-                    g.state.sub_offset_sec = off_sec;
-                    let pos = g.state.position;
-                    g.state.sub_text = find_cue_at(&g.cues, pos, off_sec).unwrap_or_default();
-                    emit_state(&app_clone, &g.state);
+                subtitles::LiveMkvAlignOutcome::Aligned(off_sec) => {
+                    g.live_mkv_align_done = true;
+                    if !g.user_adjusted_offset && !g.auto_aligned_offset {
+                        g.auto_aligned_offset = true;
+                        g.state.sub_offset_sec = off_sec;
+                        let pos = g.state.position;
+                        g.state.sub_text = find_cue_at(&g.cues, pos, off_sec).unwrap_or_default();
+                        emit_state(&app_clone, &g.state);
+                    }
                 }
+                subtitles::LiveMkvAlignOutcome::NotReady => {}
             }
         });
     }
@@ -988,8 +1091,11 @@ pub fn reload_cues_if_active(anilist_id: i64, ep_key: &str, sub_path: &str) -> b
             }
             if !g.user_adjusted_offset {
                 g.auto_aligned_offset = false;
+                g.live_mkv_align_done = false;
+                g.last_live_align_file_len = 0;
                 if let Some(off_sec) = precomputed_offset {
                     g.auto_aligned_offset = true;
+                    g.live_mkv_align_done = true;
                     g.state.sub_offset_sec = off_sec;
                 }
             }
@@ -1163,6 +1269,8 @@ fn resolve_titles(conn: &rusqlite::Connection, anilist_id: i64, ep_key: &str) ->
         } else {
             prefix
         }
+    } else if let Some(name) = ep_key.strip_prefix("extra:") {
+        format!("Extra · {name}")
     } else if let Ok(num) = ep_key.parse::<i64>() {
         format!("Episode {:02}", num)
     } else {
@@ -1309,11 +1417,61 @@ fn pick_best_sub_track_id(
 // Launching & Controlling the Built-in libmpv Player
 // ---------------------------------------------------------------------------
 
-pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
+fn init_mpv_playback_session(
+    app: &AppHandle,
+    st: &Arc<AppState>,
+    ep: &Ep,
+    display_stream_url: String,
+    stream_kind: Option<String>,
+    load_candidate_subs: bool,
+) -> Result<(u64, BuiltinPlayerState, Vec<String>)> {
     let session_id = SESSION_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
     let _play_session = st.play_session.fetch_add(1, Ordering::SeqCst) + 1;
 
-    let mpv = ensure_mpv(&app, &st)?;
+    // If a previous episode was actively playing in the built-in player, flush its progress &
+    // immersion time and release any active torrent session (`C-04`).
+    let prev_active = {
+        let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+        if g.state.active {
+            let prev_ep = Ep {
+                anilist_id: g.state.anilist_id,
+                ep_key: g.state.ep_key.clone(),
+                path: g.state.path.clone(),
+            };
+            let pos = g.state.position;
+            let dur = g.state.duration;
+            let marked = g.marked_watched;
+            let flush_sec = g.unflushed_immersion_sec.round() as i64;
+            let show_title = g.state.show_title.clone();
+            g.unflushed_immersion_sec = 0.0;
+            g.last_unpaused_tick = None;
+            Some((prev_ep, pos, dur, marked, flush_sec, show_title))
+        } else {
+            None
+        }
+    };
+    if let Some((prev_ep, prev_pos, prev_dur, prev_marked, prev_flush, prev_title)) = prev_active {
+        {
+            let conn = st.db();
+            if prev_flush > 0 {
+                let _ = db::record_immersion_time(
+                    &conn,
+                    Some(prev_ep.anilist_id),
+                    Some(&prev_ep.ep_key),
+                    Some(&prev_title),
+                    prev_flush,
+                );
+            }
+            if !prev_marked && prev_pos > 15.0 && prev_dur > 0.0 {
+                save_ep_progress(&conn, &prev_ep, prev_pos, prev_dur);
+            }
+        }
+        if prev_ep.anilist_id != ep.anilist_id || prev_ep.ep_key != ep.ep_key {
+            crate::torrent::on_player_stopped(prev_ep.anilist_id, &prev_ep.ep_key);
+        }
+    }
+
+    let mpv = ensure_mpv(app, st)?;
 
     let (
         start_pos,
@@ -1338,9 +1496,12 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             0.0
         };
         let (show_title, episode_title) = resolve_titles(&conn, ep.anilist_id, &ep.ep_key);
-        let has_next = has_next_stream_or_local_episode(&conn, &ep);
-        let candidate_sub_paths =
-            subtitles::candidate_subtitle_paths_for_episode(&conn, ep.anilist_id, &ep.ep_key);
+        let has_next = has_next_stream_or_local_episode(&conn, ep);
+        let candidate_sub_paths = if load_candidate_subs {
+            subtitles::candidate_subtitle_paths_for_episode(&conn, ep.anilist_id, &ep.ep_key)
+        } else {
+            Vec::new()
+        };
         let track_prefs = player::effective_track_prefs(&conn, ep.anilist_id);
         let today_sec: i64 = conn
             .query_row(
@@ -1374,20 +1535,13 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         )
     };
 
-    let inferred_stream_kind = if ep.path.starts_with("http://127.0.0.1:") {
-        Some("torrent".to_string())
-    } else {
-        None
-    };
-
     let initial_state = BuiltinPlayerState {
         active: true,
         backend: "libmpv".to_string(),
         anilist_id: ep.anilist_id,
         ep_key: ep.ep_key.clone(),
         path: ep.path.clone(),
-        stream_url: String::new(),
-        transcode_base_url: None,
+        stream_url: display_stream_url,
         show_title,
         episode_title,
         paused: false,
@@ -1411,7 +1565,7 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         external_sub_path: None,
         today_immersion_sec,
         shader_preset: shader_preset.clone(),
-        stream_kind: inferred_stream_kind,
+        stream_kind,
     };
 
     {
@@ -1428,6 +1582,8 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         g.pending_start_pos = start_pos;
         g.user_adjusted_offset = false;
         g.auto_aligned_offset = false;
+        g.live_mkv_align_done = false;
+        g.last_live_align_file_len = 0;
         g.user_selected_sub_track = false;
         g.track_prefs = track_prefs;
         g.last_unpaused_tick = None;
@@ -1435,12 +1591,9 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         g.last_emit_at = None;
     }
 
-    // Open the player HUD & reveal the Win32 hardware surface immediately before any
-    // filesystem subtitle parsing or Discord RPC work.
-    libmpv::sync_surface_bounds(&app, true);
-    emit_state(&app, &initial_state);
+    libmpv::sync_surface_bounds(app, true);
+    emit_state(app, &initial_state);
 
-    // Load file into native libmpv right away so demux + D3D11 decode start immediately.
     let shader_paths = libmpv::resolve_shader_preset_paths(&shader_preset);
     let _ = mpv.set_property_string("glsl-shaders", &shader_paths);
     let _ = mpv.set_property_double("volume", prev_volume);
@@ -1449,6 +1602,20 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
     let _ = mpv.set_property_double("sub-delay", 0.0);
     let _ = mpv.set_property_bool("pause", false);
     mpv.command(&["loadfile", &ep.path, "replace"])?;
+
+    Ok((session_id, initial_state, candidate_sub_paths))
+}
+
+pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
+    let stream_kind = if ep.path.starts_with("http://") || ep.path.starts_with("https://") {
+        Some("torrent".to_string())
+    } else {
+        None
+    };
+
+    let (session_id, initial_state, candidate_sub_paths) =
+        init_mpv_playback_session(&app, &st, &ep, String::new(), stream_kind, true)?;
+    let start_pos = initial_state.position;
 
     // Parse external subtitle cues (.ass/.srt) & update Discord Rich Presence in parallel
     // without blocking player open or video decode startup.
@@ -1513,153 +1680,33 @@ pub fn start(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
         player::sync_discord_activity(&st_bg, &ep_bg, start_pos, 0.0, true);
     });
 
-    // Query AniSkip in parallel
-    let app_srv = app.clone();
-    let st_srv = st.clone();
-    let ep_srv = ep.clone();
-    tauri::async_runtime::spawn(async move {
-        fetch_and_apply_aniskip(&app_srv, &st_srv, &ep_srv, 0.0, session_id).await;
-    });
-
     Ok(())
 }
 
 /// Start playing a direct soft-sub web stream (`.m3u8` / `.mp4`) in native `libmpv` via Kura's
 /// local header-injecting proxy, load companion `.vtt` tracks, and auto-fetch + piecewise-retime
 /// Jimaku Japanese subtitles against the stream's soft-sub cues.
-pub fn start_web_stream(app: AppHandle, st: Arc<AppState>, req: StartWebStreamReq) -> Result<()> {
-    let session_id = SESSION_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
-    let _play_session = st.play_session.fetch_add(1, Ordering::SeqCst) + 1;
-
-    let mpv = ensure_mpv(&app, &st)?;
+pub fn start_web_stream(
+    app: AppHandle,
+    st: Arc<AppState>,
+    req: StartWebStreamReq,
+) -> Result<BuiltinPlayerState> {
     let proxy_url = crate::onlinestream::build_proxy_url(&req.url, &req.headers)?;
     let ep = Ep {
         anilist_id: req.anilist_id,
         ep_key: req.ep_key.clone(),
-        path: proxy_url.clone(),
+        path: proxy_url,
     };
 
-    let (
-        start_pos,
-        threshold,
-        autoplay,
-        show_title,
-        episode_title,
-        has_next,
-        track_prefs,
-        today_immersion_sec,
-        prev_volume,
-        prev_muted,
-        shader_preset,
-    ) = {
-        let conn = st.db();
-        let p = player::prefs(&conn);
-        let saved = player::saved_progress(&conn, ep.anilist_id, &ep.ep_key);
-        let start_pos = if p.resume {
-            player::resume_point(saved, p.threshold)
-        } else {
-            0.0
-        };
-        let (show_title, episode_title) = resolve_titles(&conn, ep.anilist_id, &ep.ep_key);
-        let has_next = has_next_stream_or_local_episode(&conn, &ep);
-        let track_prefs = player::effective_track_prefs(&conn, ep.anilist_id);
-        let today_sec: i64 = conn
-            .query_row(
-                "SELECT active_seconds FROM immersion_daily WHERE day_key = ?1",
-                [db::today_day_key()],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        let preset = db::get_setting(&conn, "pref.anime4k_preset")
-            .ok()
-            .flatten()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "off".to_string());
-        let (vol, muted) = {
-            let g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-            (g.state.volume, g.state.muted)
-        };
-        (
-            start_pos,
-            p.threshold,
-            p.autoplay,
-            show_title,
-            episode_title,
-            has_next,
-            track_prefs,
-            today_sec,
-            vol,
-            muted,
-            preset,
-        )
-    };
-
-    let initial_state = BuiltinPlayerState {
-        active: true,
-        backend: "libmpv".to_string(),
-        anilist_id: ep.anilist_id,
-        ep_key: ep.ep_key.clone(),
-        path: proxy_url.clone(),
-        stream_url: req.url.clone(),
-        transcode_base_url: None,
-        show_title,
-        episode_title,
-        paused: false,
-        position: start_pos,
-        duration: 0.0,
-        volume: prev_volume,
-        muted: prev_muted,
-        speed: 1.0,
-        aid: None,
-        sid: None,
-        sub_text: String::new(),
-        sub_offset_sec: 0.0,
-        audio_tracks: Vec::new(),
-        sub_tracks: Vec::new(),
-        chapters: Vec::new(),
-        op_start: None,
-        op_end: None,
-        ed_start: None,
-        ed_end: None,
-        has_next_episode: has_next,
-        external_sub_path: None,
-        today_immersion_sec,
-        shader_preset: shader_preset.clone(),
-        stream_kind: Some("web".to_string()),
-    };
-
-    {
-        let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-        g.state = initial_state.clone();
-        g.cues = Vec::new();
-        g.cues_by_track = HashMap::new();
-        g.threshold = threshold;
-        g.autoplay = autoplay;
-        g.marked_watched = false;
-        g.next_preloaded = false;
-        g.aniskip_queried = false;
-        g.tick_count = 0;
-        g.pending_start_pos = start_pos;
-        g.user_adjusted_offset = false;
-        g.auto_aligned_offset = false;
-        g.user_selected_sub_track = false;
-        g.track_prefs = track_prefs;
-        g.last_unpaused_tick = None;
-        g.unflushed_immersion_sec = 0.0;
-        g.last_emit_at = None;
-    }
-
-    libmpv::sync_surface_bounds(&app, true);
-    emit_state(&app, &initial_state);
-
-    let shader_paths = libmpv::resolve_shader_preset_paths(&shader_preset);
-    let _ = mpv.set_property_string("glsl-shaders", &shader_paths);
-    let _ = mpv.set_property_double("volume", prev_volume);
-    let _ = mpv.set_property_bool("mute", prev_muted);
-    let _ = mpv.set_property_double("speed", 1.0);
-    let _ = mpv.set_property_double("sub-delay", 0.0);
-    let _ = mpv.set_property_bool("pause", false);
-    mpv.command(&["loadfile", &proxy_url, "replace"])?;
+    let (session_id, initial_state, _) = init_mpv_playback_session(
+        &app,
+        &st,
+        &ep,
+        req.url.clone(),
+        Some("web".to_string()),
+        false,
+    )?;
+    let start_pos = initial_state.position;
 
     // Background task: fetch companion soft-sub `.vtt` tracks, register them in the player HUD,
     // and auto-download + piecewise-retime Jimaku Japanese subtitles against the `.vtt` reference!
@@ -1674,10 +1721,12 @@ pub fn start_web_stream(app: AppHandle, st: Arc<AppState>, req: StartWebStreamRe
             if sub.url.trim().is_empty() {
                 continue;
             }
-            // Skip thumbnail sprite VTT tracks (`thumbnails.vtt` / `sprite`)
             let lang_low = sub.language.to_ascii_lowercase();
             let lbl_low = sub.label.as_deref().unwrap_or("").to_ascii_lowercase();
-            if lang_low.contains("thumb") || lbl_low.contains("thumb") || sub.url.to_ascii_lowercase().contains("thumbnails") {
+            if lang_low.contains("thumb")
+                || lbl_low.contains("thumb")
+                || sub.url.to_ascii_lowercase().contains("thumbnails")
+            {
                 continue;
             }
             if let Ok(cues) =
@@ -1716,7 +1765,6 @@ pub fn start_web_stream(app: AppHandle, st: Arc<AppState>, req: StartWebStreamRe
             }
         }
 
-        // Register companion `.vtt` tracks so fallback English/other subtitles are selectable right away
         if !loaded_companion_tracks.is_empty()
             && SESSION_COUNTER.load(Ordering::SeqCst) == session_id
         {
@@ -1750,7 +1798,6 @@ pub fn start_web_stream(app: AppHandle, st: Arc<AppState>, req: StartWebStreamRe
             }
         }
 
-        // Pick best reference cue set (prefer English dialogue with >= 10 cues, else largest cue set)
         let best_ref: Vec<SubtitleCue> = loaded_companion_tracks
             .iter()
             .filter(|(_, item, cues)| {
@@ -1787,14 +1834,7 @@ pub fn start_web_stream(app: AppHandle, st: Arc<AppState>, req: StartWebStreamRe
         }
     });
 
-    // Query AniSkip in parallel
-    let app_srv = app.clone();
-    let st_srv = st.clone();
-    tauri::async_runtime::spawn(async move {
-        fetch_and_apply_aniskip(&app_srv, &st_srv, &ep, 0.0, session_id).await;
-    });
-
-    Ok(())
+    Ok(initial_state)
 }
 
 async fn fetch_and_apply_aniskip(
@@ -1804,8 +1844,11 @@ async fn fetch_and_apply_aniskip(
     duration: f64,
     session_id: u64,
 ) {
+    if duration <= 0.0 {
+        return;
+    }
     let mal_id: Option<i64> = st
-        .db()
+        .db_read()
         .query_row(
             "SELECT id_mal FROM media WHERE anilist_id = ?1",
             [ep.anilist_id],
@@ -1816,16 +1859,13 @@ async fn fetch_and_apply_aniskip(
     let ep_num: Option<i64> = ep.ep_key.parse().ok();
     let Some(mid) = mal_id else { return };
     let Some(enum_val) = ep_num else { return };
-    let Ok(client) = reqwest::Client::builder().no_proxy().build() else {
-        return;
-    };
 
     if let Some(AniSkipTimes {
         op_start,
         op_end,
         ed_start,
         ed_end,
-    }) = player::fetch_aniskip(&client, mid, enum_val, duration).await
+    }) = player::fetch_aniskip(&st.providers.http, mid, enum_val, duration).await
     {
         if SESSION_COUNTER.load(Ordering::SeqCst) != session_id {
             return;
@@ -1855,6 +1895,7 @@ fn save_ep_progress(conn: &rusqlite::Connection, ep: &Ep, pos: f64, dur: f64) {
            updated_at = excluded.updated_at",
         params![ep.anilist_id, ep.ep_key, pos, dur, db::now()],
     );
+    crate::backup::mark_dirty();
 }
 
 fn save_watched(conn: &rusqlite::Connection, ep: &Ep) {
@@ -1879,6 +1920,7 @@ fn save_watched(conn: &rusqlite::Connection, ep: &Ep) {
         "DELETE FROM watch_progress WHERE anilist_id = ?1 AND ep_key = ?2",
         params![ep.anilist_id, ep.ep_key],
     );
+    crate::backup::mark_dirty();
 }
 
 pub async fn dispatch_command(
@@ -1909,69 +1951,48 @@ pub async fn dispatch_command(
             }
             libmpv::sync_surface_bounds(&app, false);
 
-            let (pos, dur, flush_sec, show_title) = {
+            let (was_active, pos, dur, marked, flush_sec, show_title) = {
                 let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                let was_active = g.state.active;
                 let pos = g.state.position;
                 let dur = g.state.duration;
+                let marked = g.marked_watched;
                 let flush_sec = g.unflushed_immersion_sec.round() as i64;
                 let show_title = g.state.show_title.clone();
                 g.unflushed_immersion_sec = 0.0;
                 g.last_unpaused_tick = None;
                 g.state.active = false;
                 emit_state(&app, &g.state);
-                (pos, dur, flush_sec, show_title)
+                (was_active, pos, dur, marked, flush_sec, show_title)
             };
-            if flush_sec > 0 {
-                let _ = db::record_immersion_time(
-                    &st.db(),
-                    Some(cur_ep.anilist_id),
-                    Some(&cur_ep.ep_key),
-                    Some(&show_title),
-                    flush_sec,
-                );
-            }
-            if pos > 15.0 && dur > 0.0 {
-                save_ep_progress(&st.db(), &cur_ep, pos, dur);
-            }
-            *st.active_mpv_ipc.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            st.discord.clear();
-            crate::torrent::on_player_stopped(cur_ep.anilist_id, &cur_ep.ep_key);
-            let _ = app.emit("library-changed", ());
-        }
-        BuiltinCommand::OpenExternalMpv => {
-            SESSION_COUNTER.fetch_add(1, Ordering::SeqCst);
-            if let Some(mpv) = mpv_opt {
-                let _ = mpv.command(&["stop"]);
-            }
-            libmpv::sync_surface_bounds(&app, false);
-
-            let (pos, dur, ext_sub) = {
-                let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-                let pos = g.state.position;
-                let dur = g.state.duration;
-                let ext_sub = g.state.external_sub_path.clone();
-                g.state.active = false;
-                emit_state(&app, &g.state);
-                (pos, dur, ext_sub)
-            };
-            if pos > 15.0 && dur > 0.0 {
-                save_ep_progress(&st.db(), &cur_ep, pos, dur);
-            }
-            if let Some(mpv_exe) = player::detect(Kind::Mpv) {
-                let mut c = std::process::Command::new(mpv_exe);
-                c.arg("--force-window=yes");
-                if pos > 3.0 {
-                    c.arg(format!("--start=+{pos:.0}"));
+            if was_active {
+                if flush_sec > 0 {
+                    let _ = db::record_immersion_time(
+                        &st.db(),
+                        Some(cur_ep.anilist_id),
+                        Some(&cur_ep.ep_key),
+                        Some(&show_title),
+                        flush_sec,
+                    );
                 }
-                if let Some(sub) = ext_sub {
-                    c.arg(format!("--sub-file={sub}"));
+                if !marked && pos > 15.0 && dur > 0.0 {
+                    save_ep_progress(&st.db(), &cur_ep, pos, dur);
                 }
-                c.arg("--").arg(&cur_ep.path);
-                let _ = c.spawn();
+                *st.active_mpv_ipc.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                st.discord.clear();
+                crate::torrent::on_player_stopped(cur_ep.anilist_id, &cur_ep.ep_key);
+                let _ = app.emit("library-changed", ());
             }
         }
         BuiltinCommand::NextEpisode => {
-            let next = player::next_episode(&st.db(), &cur_ep);
+            let st_for_next = st.clone();
+            let cur_for_next = cur_ep.clone();
+            let next = tokio::task::spawn_blocking(move || {
+                player::next_episode(&st_for_next.db_read(), &cur_for_next)
+            })
+            .await
+            .ok()
+            .flatten();
             if let Some(next_ep) = next {
                 start(app.clone(), st.clone(), next_ep)?;
             } else {
@@ -2004,45 +2025,12 @@ pub async fn dispatch_command(
                 let _ = mpv.set_property_bool("pause", next_paused);
             }
         }
-        BuiltinCommand::Pause => {
-            {
-                let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-                g.state.paused = true;
-                emit_state(&app, &g.state);
-            }
-            if let Some(mpv) = mpv_opt {
-                let _ = mpv.set_property_bool("pause", true);
-            }
-        }
-        BuiltinCommand::Resume => {
-            {
-                let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-                g.state.paused = false;
-                emit_state(&app, &g.state);
-            }
-            if let Some(mpv) = mpv_opt {
-                let _ = mpv.set_property_bool("pause", false);
-            }
-        }
         BuiltinCommand::Seek { position } => {
             let target = position.max(0.0);
             if let Some(mpv) = mpv_opt {
                 let _ = mpv.command(&["seek", &format!("{target:.3}"), "absolute", "exact"]);
             }
             let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-            g.state.position = target;
-            if is_overlay_cue_track(g.state.sid) {
-                let offset = g.state.sub_offset_sec;
-                g.state.sub_text = find_cue_at(&g.cues, target, offset).unwrap_or_default();
-            }
-            emit_state(&app, &g.state);
-        }
-        BuiltinCommand::SeekRelative { delta } => {
-            if let Some(mpv) = mpv_opt {
-                let _ = mpv.command(&["seek", &format!("{delta:.3}"), "relative", "exact"]);
-            }
-            let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
-            let target = (g.state.position + delta).max(0.0);
             g.state.position = target;
             if is_overlay_cue_track(g.state.sid) {
                 let offset = g.state.sub_offset_sec;
@@ -2233,10 +2221,7 @@ pub async fn dispatch_command(
             g.cues = cues;
             emit_state(&app, &g.state);
         }
-        BuiltinCommand::Html5Tick { .. } => {
-            // Legacy no-op when running on native libmpv
-        }
     }
 
-    Ok(get_state())
+    Ok(runtime().lock().unwrap_or_else(|e| e.into_inner()).state.clone())
 }

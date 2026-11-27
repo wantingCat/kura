@@ -105,7 +105,6 @@ pub fn upsert_media(conn: &Connection, m: &AlMedia) -> Result<()> {
         );
     }
     if let Some(entry) = &m.media_list_entry {
-        let _ = conn.execute_batch(crate::db::SCHEMA_V5);
         let eff_prog = if entry.status == "COMPLETED" {
             entry.progress.max(m.episodes.unwrap_or(1))
         } else {
@@ -202,7 +201,6 @@ pub fn upsert_credits(
     characters: Option<&AlCharacters>,
     staff: Option<&AlStaff>,
 ) -> Result<()> {
-    let _ = conn.execute_batch(crate::db::SCHEMA_V6);
     if let Some(chars) = characters {
         conn.execute("DELETE FROM media_characters WHERE anilist_id = ?1", [anilist_id])?;
         let mut stmt = conn.prepare(

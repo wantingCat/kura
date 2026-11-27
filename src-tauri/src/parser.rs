@@ -71,9 +71,38 @@ re!(RE_SEASON_S, r"(?i)\bS(\d{1,2})\b");
 re!(RE_SEASON_WORD, r"(?i)\b(?:season|saison)\s*(\d{1,2})\b");
 re!(RE_SEASON_ORD, r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b");
 re!(RE_SEASON_NAMED, r"(?i)\b(second|third|fourth|fifth|sixth)\s+season\b");
+re!(RE_SEASON_ROMAN, r"^(\S.*?)\s+(II|III|IV|V)\s*$");
 re!(RE_PART, r"(?i)\b(?:part|cour)\s*(\d)\b");
 re!(RE_JP_SEASON, r"第\s?(\d{1,2})\s?期");
+re!(RE_YEAR_SUFFIX, r"\s((?:19|20)\d{2})$");
+re!(RE_BATCH_RANGE, r"\s-?\s*\d{1,4}\s?[-~]\s?\d{1,4}\s*$");
 re!(RE_SPACES, r"\s+");
+
+/// Fold Romaji macrons and circumflexes (`ā`->`a`, `ī`->`i`, `ū`->`u`, `ē`->`e`, `ō`->`o`).
+pub fn fold_macrons(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        out.push(fold_macron_char(c));
+    }
+    out
+}
+
+#[inline]
+pub fn fold_macron_char(c: char) -> char {
+    match c {
+        'ā' | 'â' => 'a',
+        'ī' | 'î' => 'i',
+        'ū' | 'û' => 'u',
+        'ē' | 'ê' => 'e',
+        'ō' | 'ô' => 'o',
+        'Ā' | 'Â' => 'A',
+        'Ī' | 'Î' => 'I',
+        'Ū' | 'Û' => 'U',
+        'Ē' | 'Ê' => 'E',
+        'Ō' | 'Ô' => 'O',
+        _ => c,
+    }
+}
 
 pub fn is_video_file(path: &std::path::Path) -> bool {
     path.extension()
@@ -129,6 +158,15 @@ fn find_season(s: &str) -> Option<u32> {
     if let Some(c) = RE_SEASON_S.captures(s) {
         return c[1].parse().ok();
     }
+    if let Some(c) = RE_SEASON_ROMAN.captures(s.trim()) {
+        return match &c[2] {
+            "II" => Some(2),
+            "III" => Some(3),
+            "IV" => Some(4),
+            "V" => Some(5),
+            _ => None,
+        };
+    }
     None
 }
 
@@ -137,7 +175,12 @@ fn strip_season_markers(s: &str) -> String {
     for re in [&*RE_SEASON_WORD, &*RE_SEASON_ORD, &*RE_SEASON_NAMED, &*RE_JP_SEASON, &*RE_SEASON_S, &*RE_PART] {
         out = re.replace_all(&out, " ").to_string();
     }
-    clean_title(&out)
+    let cleaned = clean_title(&out);
+    if let Some(c) = RE_SEASON_ROMAN.captures(&cleaned) {
+        clean_title(&c[1])
+    } else {
+        cleaned
+    }
 }
 
 /// Shared normalisation: group, brackets, separators, tech tokens.
@@ -211,7 +254,7 @@ fn finish_title(p: &mut Parsed, raw_title: &str) {
     // Year at the end of the title, e.g. "Hunter x Hunter 2011"
     let mut title = strip_season_markers(&raw);
     if p.year.is_none() {
-        if let Some(c) = Regex::new(r"\s((?:19|20)\d{2})$").unwrap().captures(&title) {
+        if let Some(c) = RE_YEAR_SUFFIX.captures(&title) {
             p.year = c[1].parse().ok();
             title = title[..c.get(0).unwrap().start()].trim().to_string();
         }
@@ -302,7 +345,7 @@ pub fn parse_folder(name: &str) -> Parsed {
     let s = normalise(name, &mut p);
     let mut end = s.len();
     // Batch ranges like "Title - 01-12" or "Title (01-24)" (brackets already removed)
-    if let Some(m) = Regex::new(r"\s-?\s*\d{1,4}\s?[-~]\s?\d{1,4}\s*$").unwrap().find(&s) {
+    if let Some(m) = RE_BATCH_RANGE.find(&s) {
         end = m.start();
     }
     if let Some(c) = RE_SPECIAL.captures(&s[..end]) {
@@ -604,5 +647,18 @@ mod tests {
         assert_eq!(classify_subfolder("Specials"), Some(SubfolderKind::Specials));
         assert_eq!(classify_subfolder("Extras"), Some(SubfolderKind::Extras));
         assert_eq!(classify_subfolder("Season 2"), None);
+    }
+
+    #[test]
+    fn roman_numeral_seasons_and_macrons() {
+        assert_eq!(
+            ep("[SubsPlease] Overlord IV - 01 (1080p).mkv"),
+            ("Overlord".into(), Some(4), Some(1))
+        );
+        assert_eq!(
+            ep("[Group] Mob Psycho 100 II - 05 [1080p].mkv"),
+            ("Mob Psycho 100".into(), Some(2), Some(5))
+        );
+        assert_eq!(fold_macrons("Sōsō no Frieren: Yūsha Āīūēō"), "Soso no Frieren: Yusha Aiueo");
     }
 }

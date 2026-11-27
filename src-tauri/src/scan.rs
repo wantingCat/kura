@@ -151,7 +151,7 @@ pub(crate) fn compute_group(root: &Path, path: &Path, parsed: &Parsed) -> Option
 
 fn discover(st: &AppState, library_id: Option<i64>) -> Result<(Vec<Found>, Vec<i64>)> {
     let folders: Vec<(i64, String)> = {
-        let conn = st.db();
+        let conn = st.db_read();
         let mut stmt = conn.prepare(
             "SELECT library_id, path FROM library_folders WHERE (?1 IS NULL OR library_id = ?1) ORDER BY id",
         )?;
@@ -159,7 +159,7 @@ fn discover(st: &AppState, library_id: Option<i64>) -> Result<(Vec<Found>, Vec<i
         rows
     };
     let libraries: Vec<i64> = {
-        let conn = st.db();
+        let conn = st.db_read();
         let mut stmt = conn.prepare("SELECT id FROM libraries WHERE (?1 IS NULL OR id = ?1)")?;
         let rows = stmt.query_map([library_id], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
         rows
@@ -302,20 +302,20 @@ struct PendingGroup {
 }
 
 fn pending_groups(st: &AppState, libraries: &[i64]) -> Result<Vec<PendingGroup>> {
-    let conn = st.db();
-    let mut stmt = conn.prepare(
+    let conn = st.db_read();
+    let mut stmt = conn.prepare_cached(
         "SELECT id, library_id, title_guess, title_full, year_hint FROM match_groups WHERE anilist_id IS NULL AND manual = 0",
     )?;
     let rows: Vec<(i64, i64, String, String, Option<u32>)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
         .collect::<Result<Vec<_>, _>>()?;
 
+    let mut fstmt = conn.prepare_cached("SELECT parsed, special_hint FROM local_files WHERE group_id = ?1")?;
     let mut out = Vec::new();
     for (id, lib, title_guess, title_full, year) in rows {
         if !libraries.contains(&lib) {
             continue;
         }
-        let mut fstmt = conn.prepare("SELECT parsed, special_hint FROM local_files WHERE group_id = ?1")?;
         let files: Vec<(Parsed, Option<String>)> = fstmt
             .query_map([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?
             .filter_map(|r| r.ok())
@@ -397,8 +397,8 @@ struct PendingFile {
 }
 
 fn pending_files(st: &AppState) -> Result<Vec<PendingFile>> {
-    let conn = st.db();
-    let mut stmt = conn.prepare(
+    let conn = st.db_read();
+    let mut stmt = conn.prepare_cached(
         "SELECT f.id, g.anilist_id, f.parsed, f.season_hint, f.special_hint
          FROM local_files f JOIN match_groups g ON g.id = f.group_id
          WHERE f.anilist_id IS NULL AND g.anilist_id IS NOT NULL",
@@ -462,6 +462,7 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
     // 4. Resolve files → episodes
     let files = pending_files(st)?;
     let total = files.len();
+    let mut resolved_updates: Vec<(i64, i64, Option<String>)> = Vec::with_capacity(total);
     for (i, f) in files.iter().enumerate() {
         if i % 5 == 0 {
             progress(app, "resolve", i, total, "Mapping files to episodes…");
@@ -477,16 +478,24 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
             },
         )
         .await;
-        let conn = st.db();
         match res {
-            Ok(Some((id, key))) => {
-                conn.execute("UPDATE local_files SET anilist_id = ?2, ep_key = ?3 WHERE id = ?1", params![f.id, id, key])?;
-            }
-            Ok(None) => {
-                conn.execute("UPDATE local_files SET anilist_id = ?2, ep_key = NULL WHERE id = ?1", params![f.id, f.base])?;
-            }
+            Ok(Some((id, key))) => resolved_updates.push((f.id, id, Some(key))),
+            Ok(None) => resolved_updates.push((f.id, f.base, None)),
             Err(e) => crate::klog!("[kura] resolving file {} failed: {e:#}", f.id),
         }
+    }
+    if !resolved_updates.is_empty() {
+        let conn = st.db();
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE local_files SET anilist_id = ?2, ep_key = ?3 WHERE id = ?1",
+            )?;
+            for (file_id, aid, ep_key) in &resolved_updates {
+                stmt.execute(params![file_id, aid, ep_key])?;
+            }
+        }
+        tx.commit()?;
     }
     if !files.is_empty() || !groups.is_empty() {
         let _ = app.emit("library-changed", ());
@@ -494,7 +503,7 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
 
     // 5. Episodes + fresh metadata for every owned entry
     let owned: Vec<i64> = {
-        let conn = st.db();
+        let conn = st.db_read();
         let mut stmt = conn.prepare("SELECT DISTINCT anilist_id FROM local_files WHERE anilist_id IS NOT NULL")?;
         let rows = stmt.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
         rows
@@ -513,6 +522,7 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
     if changed > 0 || !files.is_empty() || !groups.is_empty() {
         let st_art = st.clone();
         let owned_art = owned.clone();
+        let app_art = app.clone();
         let updated_art = tauri::async_runtime::spawn_blocking(move || -> bool {
             let mut any_updated = false;
             for id in &owned_art {
@@ -555,6 +565,7 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
                 let local = scan_folder_assets(&dirs);
                 let conn = st_art.db();
                 if let Some(poster) = local.poster {
+                    crate::commands::allow_artwork_file_in_asset_scope(&app_art, &poster);
                     let s = poster.to_string_lossy().to_string();
                     let _ = conn.execute(
                         "UPDATE media SET cover_path = ?2 WHERE anilist_id = ?1",
@@ -563,6 +574,7 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
                     any_updated = true;
                 }
                 if let Some(backdrop) = local.backdrop {
+                    crate::commands::allow_artwork_file_in_asset_scope(&app_art, &backdrop);
                     let s = backdrop.to_string_lossy().to_string();
                     let _ = conn.execute(
                         "UPDATE media SET banner_path = ?2 WHERE anilist_id = ?1",
@@ -571,6 +583,7 @@ pub async fn run_scan(app: &AppHandle, st: &Arc<AppState>, library_id: Option<i6
                     any_updated = true;
                 }
                 if let Some(logo) = local.logo {
+                    crate::commands::allow_artwork_file_in_asset_scope(&app_art, &logo);
                     let s = logo.to_string_lossy().to_string();
                     let _ = conn.execute(
                         "UPDATE media SET logo_path = ?2 WHERE anilist_id = ?1",
@@ -654,18 +667,23 @@ fn ext_from_url(url: &str) -> &str {
 }
 
 async fn download_artwork(app: &AppHandle, st: &Arc<AppState>, owned: &[i64]) -> Result<()> {
-    let img_dir = st.data_dir.join("images");
-    let mut jobs = Vec::new();
-    {
-        let conn = st.db();
-        for id in owned {
-            let row: Option<(Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> = conn
-                .query_row(
-                    "SELECT cover_url, cover_path, banner_url, banner_path, logo_url, logo_path FROM media WHERE anilist_id = ?1",
-                    [id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
-                )
-                .optional()?;
+    let st_jobs = st.clone();
+    let owned_vec = owned.to_vec();
+    let jobs: Vec<ImageJob> = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<ImageJob>> {
+        let img_dir = st_jobs.data_dir.join("images");
+        let mut jobs = Vec::new();
+        let conn = st_jobs.db_read();
+        let mut media_stmt = conn.prepare_cached(
+            "SELECT cover_url, cover_path, banner_url, banner_path, logo_url, logo_path FROM media WHERE anilist_id = ?1",
+        )?;
+        let mut ep_stmt = conn.prepare_cached(
+            "SELECT ep_key, thumb_url, thumb_path FROM episodes WHERE anilist_id = ?1 AND thumb_url IS NOT NULL",
+        )?;
+        for id in &owned_vec {
+            let row: Option<(Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> =
+                media_stmt
+                    .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+                    .optional()?;
             let Some((cu, cp, bu, bp, lu, lp)) = row else { continue };
             let missing = |p: &Option<String>| p.as_ref().map_or(true, |p| !Path::new(p).exists());
             if let (Some(u), true) = (cu, missing(&cp)) {
@@ -682,10 +700,7 @@ async fn download_artwork(app: &AppHandle, st: &Arc<AppState>, owned: &[i64]) ->
                     jobs.push(ImageJob { kind: "logo", id: *id, key: None, url: u, dest });
                 }
             }
-            let mut stmt = conn.prepare(
-                "SELECT ep_key, thumb_url, thumb_path FROM episodes WHERE anilist_id = ?1 AND thumb_url IS NOT NULL",
-            )?;
-            let rows = stmt.query_map([id], |r| {
+            let rows = ep_stmt.query_map([id], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))
             })?;
             for row in rows.flatten() {
@@ -696,7 +711,10 @@ async fn download_artwork(app: &AppHandle, st: &Arc<AppState>, owned: &[i64]) ->
                 }
             }
         }
-    }
+        Ok(jobs)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("artwork scan task failed: {e}"))??;
 
     let total = jobs.len();
     if total == 0 {
@@ -719,10 +737,16 @@ async fn download_artwork(app: &AppHandle, st: &Arc<AppState>, owned: &[i64]) ->
                         .error_for_status()?
                         .bytes()
                         .await?;
-                    if let Some(parent) = job.dest.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    std::fs::write(&job.dest, &bytes)?;
+                    let dest = job.dest.clone();
+                    tauri::async_runtime::spawn_blocking(move || -> Result<()> {
+                        if let Some(parent) = dest.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&dest, &bytes)?;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("artwork write failed: {e}"))??;
                     Ok(())
                 }
                 .await;
@@ -746,7 +770,11 @@ async fn download_artwork(app: &AppHandle, st: &Arc<AppState>, owned: &[i64]) ->
                     )?,
                 };
             }
-            Err(e) => crate::klog!("[kura] image {} failed: {e}", job.url),
+            Err(e) => crate::klog!(
+                "[kura] image {} failed: {}",
+                crate::db::redact_sensitive_text(&job.url),
+                crate::db::redact_sensitive_text(&e.to_string())
+            ),
         }
         if done % 5 == 0 || done == total {
             progress(app, "artwork", done, total, "Downloading artwork…");

@@ -117,8 +117,6 @@ pub fn load(conn: &Connection) -> rusqlite::Result<HashMap<i64, Placement>> {
         .flatten()
         .map(|m| m == "streaming")
         .unwrap_or(false);
-    let _ = conn.execute_batch(crate::db::SCHEMA_V5);
-    let _ = conn.execute_batch(crate::db::SCHEMA_V7);
 
     let where_clause = if is_streaming {
         "EXISTS (SELECT 1 FROM local_files f WHERE f.anilist_id = m.anilist_id)

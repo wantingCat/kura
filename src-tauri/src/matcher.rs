@@ -2,11 +2,12 @@
 
 use crate::providers::AlMedia;
 
-/// Lowercase, strip punctuation (unicode aware), collapse whitespace.
+/// Lowercase, fold Romaji macrons (`ā`->`a`, `ī`->`i`, `ū`->`u`, `ē`->`e`, `ō`->`o`), strip punctuation, collapse whitespace.
 pub fn normalize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last_space = true;
-    for c in s.chars() {
+    for raw_c in s.chars() {
+        let c = crate::parser::fold_macron_char(raw_c);
         if c.is_alphanumeric() {
             for lc in c.to_lowercase() {
                 out.push(lc);
@@ -20,6 +21,10 @@ pub fn normalize(s: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+fn collapse_romaji_long_vowels(s: &str) -> String {
+    s.replace("ou", "o").replace("uu", "u")
 }
 
 fn tokens(s: &str) -> Vec<&str> {
@@ -41,6 +46,9 @@ pub fn similarity(query: &str, candidate: &str) -> f64 {
     let cs: String = c.chars().filter(|c| !c.is_whitespace()).collect();
     if qs == cs {
         return 0.98;
+    }
+    if qs.len() >= 4 && collapse_romaji_long_vowels(&qs) == collapse_romaji_long_vowels(&cs) {
+        return 0.97;
     }
 
     let lev = strsim::normalized_levenshtein(&qs, &cs);
@@ -149,6 +157,9 @@ pub fn titles_related(a: &str, b: &str) -> bool {
     }
     let sa: String = na.chars().filter(|c| !c.is_whitespace()).collect();
     let sb: String = nb.chars().filter(|c| !c.is_whitespace()).collect();
+    if collapse_romaji_long_vowels(&sa) == collapse_romaji_long_vowels(&sb) {
+        return true;
+    }
     strsim::normalized_levenshtein(&sa, &sb) >= 0.6
 }
 
@@ -163,12 +174,15 @@ mod tests {
     fn normalisation() {
         assert_eq!(normalize("Re:Zero kara Hajimeru"), "re zero kara hajimeru");
         assert_eq!(normalize("Frieren: Beyond Journey's End"), "frieren beyond journeys end");
+        assert_eq!(normalize("Sōsō no Frieren: Yūsha Āīē"), "soso no frieren yusha aie");
         assert_eq!(normalize("葬送のフリーレン"), "葬送のフリーレン");
     }
 
     #[test]
     fn similarity_cases() {
         assert!(similarity("Sousou no Frieren", "Sousou no Frieren") > 0.99);
+        assert!(similarity("Sōsō no Frieren", "Sousou no Frieren") > 0.95);
+        assert!(similarity("Yūsha", "Yuusha") > 0.95);
         assert!(similarity("Frieren", "Sousou no Frieren") > 0.8);
         assert!(similarity("Frieren Beyond Journeys End", "Frieren: Beyond Journey’s End") > 0.95);
         assert!(similarity("Re Zero", "Re:Zero") > 0.95);

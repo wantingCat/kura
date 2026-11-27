@@ -25,6 +25,7 @@ pub mod watcher;
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Manager;
@@ -41,51 +42,121 @@ fn restore_main_window(app_handle: &tauri::AppHandle) {
     }
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    // Enforce single-instance on desktop: if Kura is already running (e.g. minimized
-    // to the system tray), wake and focus the existing window and exit immediately
-    // before spawning another WebView2 process tree or opening SQLite.
-    let single_instance_listener = if std::env::var_os("KURA_DATA_DIR").is_none() {
-        let addr = SocketAddr::from(SINGLE_INSTANCE_ADDR);
-        match TcpListener::bind(addr) {
-            Ok(listener) => Some(listener),
-            Err(_) => {
-                if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(400))
-                {
-                    let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
-                    let _ = stream.write_all(b"KURA_SHOW\n");
-                    let _ = stream.flush();
-                    let mut ack = [0u8; 8];
-                    let _ = stream.read(&mut ack);
-                    return;
-                }
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Enable native GPU 10-bit HEVC (Main/Main10) hardware decoding inside Windows
-    // WebView2 so 10-bit HEVC anime plays directly on the GPU without CPU transcoding.
+fn resolve_instance_lock_path() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        const WV2_ARGS: &str = "--enable-features=PlatformHEVCDecoderSupport,PlatformHEVCEncoderSupport --autoplay-policy=no-user-gesture-required";
-        match std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") {
-            Ok(existing) if !existing.contains("PlatformHEVCDecoderSupport") => {
-                std::env::set_var(
-                    "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-                    format!("{existing} {WV2_ARGS}"),
-                );
-            }
-            Err(_) => {
-                std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", WV2_ARGS);
-            }
-            _ => {}
+        std::env::var_os("APPDATA")
+            .map(|p| PathBuf::from(p).join("io.github.kura.app").join(".instance_lock"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME").map(|p| {
+            PathBuf::from(p)
+                .join("Library")
+                .join("Application Support")
+                .join("io.github.kura.app")
+                .join(".instance_lock")
+        })
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share"))
+            })
+            .map(|p| p.join("io.github.kura.app").join(".instance_lock"))
+    }
+}
+
+fn write_instance_lock_secret(path: &std::path::Path, secret: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+        {
+            let _ = f.write_all(secret.as_bytes());
         }
     }
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::write(path, secret.as_bytes());
+    }
+}
+
+fn perform_graceful_shutdown(app_handle: &tauri::AppHandle) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+    if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if let Some(st) = app_handle.try_state::<Arc<service::AppState>>() {
+        let st_arc = st.inner().clone();
+        embedded_player::shutdown_sync(app_handle, &st_arc);
+        crate::torrent::shutdown_all_sessions();
+        crate::backup::write_safety_copy(&st_arc);
+        let conn = st_arc.db();
+        let _ = subtitles::cleanup_watched_subtitles(&conn, &st_arc.data_dir);
+    } else {
+        crate::torrent::shutdown_all_sessions();
+    }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    // Enforce authenticated single-instance IPC on desktop (`L-01`):
+    // Only focus an existing instance (and exit) when both processes share the CSPRNG secret
+    // stored in `.instance_lock`, preventing both focus-stealing and port-collision DoS.
+    let single_instance_listener: Option<(TcpListener, String)> =
+        if std::env::var_os("KURA_DATA_DIR").is_none() {
+            let addr = SocketAddr::from(SINGLE_INSTANCE_ADDR);
+            let lock_path = resolve_instance_lock_path();
+            match TcpListener::bind(addr) {
+                Ok(listener) => {
+                    let secret = db::random_hex_token(16);
+                    if let Some(ref lp) = lock_path {
+                        write_instance_lock_secret(lp, &secret);
+                    }
+                    Some((listener, secret))
+                }
+                Err(_) => {
+                    let existing_secret = lock_path
+                        .as_deref()
+                        .and_then(|lp| std::fs::read_to_string(lp).ok())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| s.len() >= 16);
+                    if let Some(secret) = existing_secret {
+                        if let Ok(mut stream) =
+                            TcpStream::connect_timeout(&addr, Duration::from_millis(400))
+                        {
+                            let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+                            let req = format!("KURA_SHOW {secret}\n");
+                            let expected_ack = format!("KURA_OK {secret}");
+                            if stream.write_all(req.as_bytes()).is_ok() && stream.flush().is_ok() {
+                                let mut ack = [0u8; 128];
+                                let n = stream.read(&mut ack).unwrap_or(0);
+                                let ack_str = std::str::from_utf8(&ack[..n]).unwrap_or("").trim();
+                                if ack_str == expected_ack {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -95,20 +166,29 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     builder
         .setup(move |app| {
-            if let Some(listener) = single_instance_listener {
+            #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+            let mut data_dir = app.path().app_data_dir()?;
+            #[cfg(debug_assertions)]
+            if let Ok(dir) = std::env::var("KURA_DATA_DIR") {
+                data_dir = PathBuf::from(dir);
+            }
+            std::fs::create_dir_all(&data_dir)?;
+
+            if let Some((listener, secret)) = single_instance_listener {
+                write_instance_lock_secret(&data_dir.join(".instance_lock"), &secret);
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
+                    let expected_req = format!("KURA_SHOW {secret}");
+                    let ok_reply = format!("KURA_OK {secret}\n");
                     for stream in listener.incoming().flatten() {
                         let mut stream = stream;
                         let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
                         let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
-                        let mut buf = [0u8; 32];
+                        let mut buf = [0u8; 128];
                         let n = stream.read(&mut buf).unwrap_or(0);
-                        if std::str::from_utf8(&buf[..n])
-                            .unwrap_or("")
-                            .starts_with("KURA_SHOW")
-                        {
-                            let _ = stream.write_all(b"KURA_OK\n");
+                        let msg = std::str::from_utf8(&buf[..n]).unwrap_or("").trim();
+                        if msg == expected_req {
+                            let _ = stream.write_all(ok_reply.as_bytes());
                             let _ = stream.flush();
                             restore_main_window(&app_handle);
                         }
@@ -116,13 +196,6 @@ pub fn run() {
                 });
             }
 
-            #[cfg_attr(not(debug_assertions), allow(unused_mut))]
-            let mut data_dir = app.path().app_data_dir()?;
-            #[cfg(debug_assertions)]
-            if let Ok(dir) = std::env::var("KURA_DATA_DIR") {
-                data_dir = std::path::PathBuf::from(dir);
-            }
-            std::fs::create_dir_all(&data_dir)?;
             logging::init(&data_dir);
             klog!(
                 "[kura] Kura {} starting on {} {}",
@@ -130,18 +203,25 @@ pub fn run() {
                 std::env::consts::OS,
                 std::env::consts::ARCH
             );
-            let _ = app.asset_protocol_scope().allow_directory(&data_dir, true);
+
+            // Only expose `data_dir/images` (never `kura.db` or `kura_backup.json`) to `asset://` (`C-01`).
+            let images_dir = data_dir.join("images");
+            let _ = std::fs::create_dir_all(&images_dir);
+            let _ = app.asset_protocol_scope().allow_directory(&images_dir, true);
+
+            // Purge stale temporary torrent stream cache files from prior sessions (`C-04`).
+            crate::torrent::purge_stream_cache(&data_dir);
+
             let conn = db::open(&data_dir.join("kura.db"))?;
             let _ = subtitles::cleanup_watched_subtitles(&conn, &data_dir);
             let (watcher, reload_rx) = watcher::WatcherHandle::new();
             let state = Arc::new(service::AppState::new(conn, data_dir.clone(), watcher));
             app.manage(state.clone());
 
-            // Seed starter Japanese Yomitan dictionary in background
+            // Seed starter Japanese Yomitan dictionary in background (`C-07`)
+            let dict_dir = data_dir.clone();
             std::thread::spawn(move || {
-                if let Ok(dconn) = dictionary::open_dict_db(&data_dir) {
-                    let _ = dictionary::ensure_starter_dictionary(&dconn);
-                }
+                let _ = dictionary::open_dict_db(&dict_dir);
             });
 
             // Development helper: seed a library from an env var (debug builds only).
@@ -164,9 +244,12 @@ pub fn run() {
                 }
             }
 
+            // Allow configured library folders in `asset://` so local `poster.jpg`/`fanart.jpg` render (`C-01`).
+            commands::allow_all_library_folders_in_scope(app.handle(), &state.db_read());
+
             // Pick up new / removed files on startup.
             let has_folders: bool = state
-                .db()
+                .db_read()
                 .query_row("SELECT EXISTS(SELECT 1 FROM library_folders)", [], |r| r.get(0))
                 .unwrap_or(false);
             if has_folders {
@@ -233,10 +316,7 @@ pub fn run() {
                             }
                         }
                         "quit" => {
-                            if let Some(st) = app_handle.try_state::<Arc<service::AppState>>() {
-                                let conn = st.db();
-                                let _ = subtitles::cleanup_watched_subtitles(&conn, &st.data_dir);
-                            }
+                            perform_graceful_shutdown(app_handle);
                             app_handle.exit(0);
                         }
                         _ => {}
@@ -290,7 +370,6 @@ pub fn run() {
             commands::play_episode,
             commands::get_up_next,
             commands::get_new_episodes,
-            commands::get_media_track_pref,
             commands::set_media_track_pref,
             commands::rebuild_metadata,
             commands::export_backup,
@@ -301,7 +380,6 @@ pub fn run() {
             commands::get_anilist_account,
             commands::anilist_update_entry,
             commands::anilist_start_oauth,
-            commands::anilist_login_token,
             commands::anilist_disconnect,
             commands::anilist_sync_now,
             commands::get_seasonal_calendar,
@@ -323,7 +401,6 @@ pub fn run() {
             commands::import_torrent_extension,
             commands::toggle_torrent_extension,
             commands::remove_torrent_extension,
-            commands::builtin_player_get_state,
             commands::builtin_player_command,
             commands::lookup_japanese_at,
             commands::list_dictionaries,
@@ -340,6 +417,7 @@ pub fn run() {
             commands::get_anilist_immersion_lists,
             commands::set_anilist_immersion_list,
             commands::list_extensions,
+            commands::get_extension_payload,
             commands::fetch_marketplace_extensions,
             commands::install_extension,
             commands::toggle_extension,
@@ -362,42 +440,35 @@ pub fn run() {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 let mut minimize_to_tray = true;
                 if let Some(st) = window.try_state::<Arc<service::AppState>>() {
-                    if embedded_player::get_state().active {
-                        let app_clone = window.app_handle().clone();
-                        let st_clone = st.inner().clone();
-                        tauri::async_runtime::spawn(async move {
-                            let _ = embedded_player::dispatch_command(
-                                app_clone,
-                                st_clone,
-                                embedded_player::BuiltinCommand::Stop,
-                            )
-                            .await;
-                        });
-                    }
-                    let conn = st.db();
-                    let _ = subtitles::cleanup_watched_subtitles(&conn, &st.data_dir);
-                    if let Ok(Some(val)) = db::get_setting(&conn, "pref.minimize_to_tray") {
+                    let st_arc = st.inner().clone();
+                    if let Ok(Some(val)) = db::get_setting(&st_arc.db_read(), "pref.minimize_to_tray") {
                         if val == "0" || val.eq_ignore_ascii_case("false") {
                             minimize_to_tray = false;
                         }
+                    }
+                    if minimize_to_tray && window.label() == "main" {
+                        embedded_player::shutdown_sync(window.app_handle(), &st_arc);
+                        let _ = subtitles::cleanup_watched_subtitles(&st_arc.db(), &st_arc.data_dir);
                     }
                 }
                 if minimize_to_tray && window.label() == "main" {
                     api.prevent_close();
                     let _ = window.hide();
+                } else if window.label() == "main" {
+                    perform_graceful_shutdown(window.app_handle());
                 }
             }
             tauri::WindowEvent::Moved(_)
             | tauri::WindowEvent::Resized(_)
-            | tauri::WindowEvent::Focused(_) => {
+            | tauri::WindowEvent::Focused(_)
+            | tauri::WindowEvent::ScaleFactorChanged { .. } => {
                 if window.label() == "main" {
                     embedded_player::sync_bounds(window.app_handle());
                 }
             }
             tauri::WindowEvent::Destroyed => {
-                if let Some(st) = window.try_state::<Arc<service::AppState>>() {
-                    let conn = st.db();
-                    let _ = subtitles::cleanup_watched_subtitles(&conn, &st.data_dir);
+                if window.label() == "main" {
+                    perform_graceful_shutdown(window.app_handle());
                 }
             }
             _ => {}

@@ -16,12 +16,13 @@
 use crate::db::{self, now};
 use crate::franchise;
 use crate::service::AppState;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf};
@@ -35,7 +36,6 @@ pub enum Kind {
     Builtin,
     System,
     Mpv,
-    Memento,
     Vlc,
     Mpc,
 }
@@ -44,8 +44,7 @@ impl Kind {
     pub fn parse(s: &str) -> Kind {
         match s {
             "builtin" => Kind::Builtin,
-            "mpv" => Kind::Mpv,
-            "memento" => Kind::Memento,
+            "mpv" | "memento" => Kind::Mpv,
             "vlc" => Kind::Vlc,
             "mpc" => Kind::Mpc,
             _ => Kind::System,
@@ -56,7 +55,6 @@ impl Kind {
             Kind::Builtin => "builtin",
             Kind::System => "system",
             Kind::Mpv => "mpv",
-            Kind::Memento => "memento",
             Kind::Vlc => "vlc",
             Kind::Mpc => "mpc",
         }
@@ -74,7 +72,6 @@ fn exe_names(kind: Kind) -> &'static [&'static str] {
     if cfg!(windows) {
         match kind {
             Kind::Mpv => &["mpv.exe"],
-            Kind::Memento => &["memento.exe"],
             Kind::Vlc => &["vlc.exe"],
             Kind::Mpc => &["mpc-hc64.exe", "mpc-hc.exe", "mpc-be64.exe", "mpc-be.exe"],
             Kind::Builtin | Kind::System => &[],
@@ -82,7 +79,6 @@ fn exe_names(kind: Kind) -> &'static [&'static str] {
     } else {
         match kind {
             Kind::Mpv => &["mpv"],
-            Kind::Memento => &["memento"],
             Kind::Vlc => &["vlc"],
             Kind::Mpc => &[],
             Kind::Builtin | Kind::System => &[],
@@ -103,7 +99,6 @@ fn known_locations(kind: Kind) -> Vec<PathBuf> {
             env("ProgramFiles").map(|p| p.join(r"WinGet\Links")),
             Some(PathBuf::from(r"C:\ProgramData\chocolatey\bin")),
             Some(PathBuf::from(r"C:\ProgramData")),
-            Some(PathBuf::from(r"C:\tools")),
         ]
         .into_iter()
         .flatten()
@@ -121,7 +116,6 @@ fn known_locations(kind: Kind) -> Vec<PathBuf> {
                 r"chocolatey\lib\mpvio\tools",
                 r"chocolatey\lib\mpv\tools",
             ],
-            Kind::Memento => &["Memento", ""],
             Kind::Vlc => &["VideoLAN\\VLC", ""],
             Kind::Mpc => &["MPC-HC", "MPC-HC x64", "MPC-BE x64", "MPC-BE", "K-Lite Codec Pack\\MPC-HC64", ""],
             Kind::Builtin | Kind::System => &[],
@@ -156,12 +150,11 @@ fn known_locations(kind: Kind) -> Vec<PathBuf> {
             let Ok(entries) = std::fs::read_dir(&root) else { continue };
             for e in entries.flatten() {
                 let dir = e.path();
-                let name = e.file_name().to_string_lossy().to_lowercase();
+                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
                 let wanted = match kind {
                     Kind::Mpv => name.contains("mpv"),
                     Kind::Vlc => name.contains("vlc"),
                     Kind::Mpc => name.contains("mpc-"),
-                    Kind::Memento => name.contains("memento"),
                     Kind::Builtin | Kind::System => false,
                 };
                 if !wanted {
@@ -188,7 +181,6 @@ fn known_locations(kind: Kind) -> Vec<PathBuf> {
                 out.push("/usr/local/bin/mpv".into());
             }
             Kind::Vlc => out.push("/Applications/VLC.app/Contents/MacOS/VLC".into()),
-            Kind::Memento => out.push("/Applications/Memento.app/Contents/MacOS/memento".into()),
             _ => {}
         }
     }
@@ -290,7 +282,7 @@ mod win {
         let s = if let Some(stripped) = raw.strip_prefix('"') {
             stripped.split('"').next()?.to_string()
         } else {
-            let lower = raw.to_lowercase();
+            let lower = raw.to_ascii_lowercase();
             let end = lower.find(".exe").map(|i| i + 4).unwrap_or(raw.len());
             raw[..end].to_string()
         };
@@ -396,6 +388,10 @@ mod win {
                 exe_from_command(r#""C:\Program Files\MPV Player\unins000.exe""#),
                 Some(PathBuf::from(r"C:\Program Files\MPV Player\unins000.exe"))
             );
+            assert_eq!(
+                exe_from_command(r#"C:\İ\mpv.exe "%1""#),
+                Some(PathBuf::from(r"C:\İ\mpv.exe"))
+            );
         }
 
         #[test]
@@ -469,7 +465,6 @@ pub fn detect(kind: Kind) -> Option<PathBuf> {
             Kind::Mpv => "mpv",
             Kind::Vlc => "vlc",
             Kind::Mpc => "mpc",
-            Kind::Memento => "memento",
             Kind::Builtin | Kind::System => return None,
         };
         if let Some(p) = win::uninstall_entries(hint, exes) {
@@ -480,7 +475,7 @@ pub fn detect(kind: Kind) -> Option<PathBuf> {
 }
 
 pub fn detect_all() -> Vec<Detected> {
-    [Kind::Mpv, Kind::Vlc, Kind::Mpc, Kind::Memento]
+    [Kind::Mpv, Kind::Vlc, Kind::Mpc]
         .into_iter()
         .filter_map(|k| detect(k).map(|p| Detected { kind: k.id(), path: p.to_string_lossy().to_string() }))
         .collect()
@@ -726,11 +721,11 @@ pub fn ensure_kura_mpv_script(data_dir: &std::path::Path) -> Result<PathBuf> {
 
 local mp = require 'mp'
 
--- Palette (ASS Color format: &HBBGGRR& or &HAABBGGRR&)
--- Coral: #F76D4D -> &H4D6DF7&
--- Plum:  #140C0D -> &H0D0C14&
--- Cream: #F7EDE2 -> &HE2EDF7&
--- White: #FFFFFF -> &HFFFFFF&
+-- Palette (ASS Color format: &HBBGGRR& or &HAABBGGRR&, Tokyo Night)
+-- Violet: #8B5CF6 -> &HF65C8B&
+-- Night:  #0E101A -> &H1A100E&
+-- Slate:  #E2E8F0 -> &HF0E8E2&
+-- White:  #FFFFFF -> &HFFFFFF&
 
 local skip_overlay = nil
 if mp.create_osd_overlay then
@@ -908,9 +903,9 @@ local function render_button()
 
     local fill, text, chip_fill, chip_text
     if is_hovered then
-        fill, text, chip_fill, chip_text = "&H4D6DF7&", "&H0D0C14&", "&H0D0C14&", "&HE2EDF7&"
+        fill, text, chip_fill, chip_text = "&HF65C8B&", "&H1A100E&", "&H1A100E&", "&HF0E8E2&"
     else
-        fill, text, chip_fill, chip_text = "&H0D0C14&", "&HE2EDF7&", "&H4D6DF7&", "&H0D0C14&"
+        fill, text, chip_fill, chip_text = "&H1A100E&", "&HF0E8E2&", "&HF65C8B&", "&H1A100E&"
     end
 
     local chip_x = x + w - 16 - chip_w
@@ -919,12 +914,12 @@ local function render_button()
     local icon_y = y + (h - 22) / 2
 
     local events = {
-        -- Pill body with coral outline and a hard offset "sticker" shadow.
-        string.format("{\\an7\\pos(%d,%d)\\bord3.5\\shad6\\1c%s\\1a&H10&\\3c&H4D6DF7&\\4c&H0D0C14&\\4a&H40&\\p1}%s{\\p0}",
+        -- Pill body with violet outline and a clean offset shadow.
+        string.format("{\\an7\\pos(%d,%d)\\bord3.5\\shad6\\1c%s\\1a&H10&\\3c&HF65C8B&\\4c&H1A100E&\\4a&H40&\\p1}%s{\\p0}",
             x, y, fill, rrect(w, h, 18)),
         -- Fast-forward icon drawn as vectors (no font glyph needed).
         string.format("{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c%s\\p1}m 0 0 l 13 11 l 0 22 m 13 0 l 26 11 l 13 22{\\p0}",
-            icon_x, icon_y, chip_fill == "&H4D6DF7&" and "&H4D6DF7&" or text),
+            icon_x, icon_y, chip_fill == "&HF65C8B&" and "&HF65C8B&" or text),
         -- Label.
         string.format("{\\an4\\pos(%d,%d)\\bord0\\shad0\\b1\\fs30\\fsp1\\1c%s}%s",
             icon_x + icon_w + 16, y + h / 2, text, label),
@@ -970,7 +965,7 @@ local function ass_escape(s)
 end
 
 local function osd(msg)
-    osd_ass("{\\an9\\b1\\fs20\\bord2.5\\shad0\\3c&H0D0C14&\\1c&H4D6DF7&}" .. msg, 2.0)
+    osd_ass("{\\an9\\b1\\fs20\\bord2.5\\shad0\\3c&H1A100E&\\1c&HF65C8B&}" .. msg, 2.0)
 end
 
 local function trigger_skip()
@@ -1064,7 +1059,7 @@ mp.register_event("file-loaded", function()
     update_state()
     local title = mp.get_property("media-title", "")
     if title ~= "" then
-        osd_ass("{\\an7\\b1\\fs17\\bord2.5\\shad0\\3c&H0D0C14&\\1c&H4D6DF7&}KURA  {\\b0\\fs15\\1c&HE2EDF7&}" .. ass_escape(title), 3.5)
+        osd_ass("{\\an7\\b1\\fs17\\bord2.5\\shad0\\3c&H1A100E&\\1c&HF65C8B&}KURA  {\\b0\\fs15\\1c&HF0E8E2&}" .. ass_escape(title), 3.5)
     end
 end)
 
@@ -1073,7 +1068,7 @@ local function sub_delay(step)
     local d = mp.get_property_number("sub-delay", 0.0) + step
     mp.set_property_number("sub-delay", d)
     local ms = math.floor(d * 1000 + 0.5)
-    osd_ass(string.format("{\\an8\\b1\\fs18\\bord2.5\\shad0\\3c&H0D0C14&\\1c&H4D6DF7&}SUBTITLE DELAY  {\\1c&HE2EDF7&}%+d ms", ms), 1.5)
+    osd_ass(string.format("{\\an8\\b1\\fs18\\bord2.5\\shad0\\3c&H1A100E&\\1c&HF65C8B&}SUBTITLE DELAY  {\\1c&HF0E8E2&}%+d ms", ms), 1.5)
 end
 mp.add_forced_key_binding("z", "kura_sub_delay_down", function() sub_delay(-0.1) end)
 mp.add_forced_key_binding("x", "kura_sub_delay_up", function() sub_delay(0.1) end)
@@ -1265,17 +1260,32 @@ fn save_progress(conn: &Connection, ep: &Ep, pos: f64, dur: f64) {
            updated_at = excluded.updated_at",
         params![ep.anilist_id, ep.ep_key, pos, dur, now()],
     );
+    crate::backup::mark_dirty();
 }
 
 fn mark_watched(conn: &Connection, ep: &Ep) {
     if ep.ep_key.starts_with("extra:") {
         return;
     }
+    let inserted = conn
+        .execute(
+            "INSERT OR IGNORE INTO watch_state (anilist_id, ep_key, watched_at) VALUES (?1, ?2, ?3)",
+            params![ep.anilist_id, ep.ep_key, now()],
+        )
+        .unwrap_or(0);
+    if inserted > 0 {
+        let _ = conn.execute(
+            "INSERT INTO immersion_daily (day_key, active_seconds, lookup_count, words_tracked, episodes_completed)
+             VALUES (?1, 0, 0, 0, 1)
+             ON CONFLICT(day_key) DO UPDATE SET episodes_completed = episodes_completed + 1",
+            params![db::today_day_key()],
+        );
+    }
     let _ = conn.execute(
-        "INSERT OR IGNORE INTO watch_state (anilist_id, ep_key, watched_at) VALUES (?1, ?2, ?3)",
-        params![ep.anilist_id, ep.ep_key, now()],
+        "DELETE FROM watch_progress WHERE anilist_id = ?1 AND ep_key = ?2",
+        params![ep.anilist_id, ep.ep_key],
     );
-    let _ = conn.execute("DELETE FROM watch_progress WHERE anilist_id = ?1 AND ep_key = ?2", params![ep.anilist_id, ep.ep_key]);
+    crate::backup::mark_dirty();
 }
 
 /// Whether a position counts as "watched" for a given threshold.
@@ -1303,31 +1313,51 @@ pub struct Ep {
     pub path: String,
 }
 
+fn first_owned_episode_after(conn: &Connection, id: i64, after: i64) -> Option<Ep> {
+    conn.query_row(
+        "SELECT ep_key, path FROM local_files
+         WHERE anilist_id = ?1 AND ep_key IS NOT NULL AND ep_key NOT LIKE 'S%' AND ep_key NOT LIKE 'extra:%'
+           AND CAST(ep_key AS INTEGER) > ?2
+         ORDER BY CAST(ep_key AS INTEGER), path LIMIT 1",
+        params![id, after],
+        |r| Ok(Ep { anilist_id: id, ep_key: r.get(0)?, path: r.get(1)? }),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// Variant of `next_episode` accepting a preloaded franchise map to avoid repeated full-graph queries (`H-22`).
+pub fn next_episode_with_franchises(
+    conn: &Connection,
+    cur: &Ep,
+    franchises: &HashMap<i64, franchise::Placement>,
+) -> Option<Ep> {
+    let num: i64 = cur.ep_key.parse().ok()?;
+    if let Some(e) = first_owned_episode_after(conn, cur.anilist_id, num) {
+        return Some(e);
+    }
+    let me = franchises.get(&cur.anilist_id)?;
+    let mut later: Vec<(usize, i64)> = franchises
+        .iter()
+        .filter(|(_, p)| p.root == me.root && p.index > me.index)
+        .map(|(id, p)| (p.index, *id))
+        .collect();
+    later.sort();
+    later
+        .into_iter()
+        .find_map(|(_, id)| first_owned_episode_after(conn, id, 0))
+}
+
 /// The next owned regular episode after `cur` — in the same entry, else the first one of the next
 /// owned season / movie of the franchise.
 pub fn next_episode(conn: &Connection, cur: &Ep) -> Option<Ep> {
     let num: i64 = cur.ep_key.parse().ok()?; // specials ("S1") have no "next"
-    let first_after = |id: i64, after: i64| -> Option<Ep> {
-        conn.query_row(
-            "SELECT ep_key, path FROM local_files
-             WHERE anilist_id = ?1 AND ep_key IS NOT NULL AND ep_key NOT LIKE 'S%' AND CAST(ep_key AS INTEGER) > ?2
-             ORDER BY CAST(ep_key AS INTEGER), path LIMIT 1",
-            params![id, after],
-            |r| Ok(Ep { anilist_id: id, ep_key: r.get(0)?, path: r.get(1)? }),
-        )
-        .optional()
-        .ok()
-        .flatten()
-    };
-    if let Some(e) = first_after(cur.anilist_id, num) {
+    if let Some(e) = first_owned_episode_after(conn, cur.anilist_id, num) {
         return Some(e);
     }
     let map = franchise::load(conn).ok()?;
-    let me = map.get(&cur.anilist_id)?;
-    let mut later: Vec<(usize, i64)> =
-        map.iter().filter(|(_, p)| p.root == me.root && p.index > me.index).map(|(id, p)| (p.index, *id)).collect();
-    later.sort();
-    later.into_iter().find_map(|(_, id)| first_after(id, 0))
+    next_episode_with_franchises(conn, cur, &map)
 }
 
 // ---------------------------------------------------------------------------
@@ -1361,7 +1391,7 @@ pub async fn fetch_aniskip(client: &reqwest::Client, mal_id: i64, ep_num: i64, e
     let url = format!("https://api.aniskip.com/v2/skip-times/{mal_id}/{ep_num}?types=op&types=ed&episodeLength={len}");
     let resp = client
         .get(&url)
-        .header("User-Agent", "Kura/0.3.7")
+        .header("User-Agent", concat!("Kura/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_millis(2500))
         .send()
         .await
@@ -1688,8 +1718,12 @@ impl Controller {
             Controller::Mpc(m) => {
                 m.last_ratio = 0.0;
                 // MPC reuses its running window by default ("Use the same player for each media file").
+                let safe_arg = sanitize_mpc_media_arg(path);
+                let Some(safe_arg) = safe_arg else {
+                    return false;
+                };
                 let mut cmd = std::process::Command::new(&m.exe);
-                cmd.arg(path);
+                cmd.arg(&safe_arg);
                 if start > 0.0 {
                     cmd.arg("/start").arg(((start * 1000.0) as i64).to_string());
                 }
@@ -1738,8 +1772,32 @@ fn free_port() -> u16 {
 }
 
 fn token() -> String {
-    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    format!("{:x}{:x}", n, std::process::id())
+    db::random_hex_token(16)
+}
+
+/// Guard MPC-HC / MPC-BE positional media arguments so a leading `/` can never be parsed as a CLI switch (`M-05`).
+fn sanitize_mpc_media_arg(raw_path: &str) -> Option<String> {
+    if raw_path.starts_with("http://") || raw_path.starts_with("https://") {
+        return Some(raw_path.to_string());
+    }
+    if cfg!(windows) && raw_path.starts_with('/') {
+        if let Ok(canon) = std::fs::canonicalize(raw_path) {
+            return Some(canon.to_string_lossy().to_string());
+        }
+        return None;
+    }
+    Some(raw_path.to_string())
+}
+
+fn resolve_media_show_title(conn: &Connection, anilist_id: i64) -> String {
+    conn.query_row(
+        "SELECT COALESCE(title_english, title_romaji, title_native) FROM media WHERE anilist_id = ?1",
+        [anilist_id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "Anime".to_string())
 }
 
 fn ipc_address(tag: &str) -> String {
@@ -1873,6 +1931,13 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
     let session = st.play_session.fetch_add(1, Ordering::SeqCst) + 1;
 
     if p.kind == Kind::System {
+        if ep.path.starts_with("http://") || ep.path.starts_with("https://") {
+            bail!("System default handler only supports local video files — switch Player to Built-in or MPV for streams.");
+        }
+        let local_path = Path::new(&ep.path);
+        if !local_path.is_file() || !crate::parser::is_video_file(local_path) {
+            bail!("Refusing to open non-video file with the system handler.");
+        }
         tauri_plugin_opener::open_path(&ep.path, None::<&str>).map_err(|e| anyhow!(e.to_string()))?;
         sync_discord_activity(&st, &ep, 0.0, 0.0, true);
         emit(&app, "untracked", p.kind, &ep, 0.0, 0.0, None);
@@ -1933,7 +1998,7 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
     };
 
     let pending = match p.kind {
-        Kind::Mpv | Kind::Memento => {
+        Kind::Mpv => {
             let addr = ipc_address(&tag);
             cmd.arg(format!("--input-ipc-server={addr}")).arg("--force-window=yes");
             if ep.path.starts_with("http://") || ep.path.starts_with("https://") {
@@ -1975,20 +2040,20 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             cmd.args([
                 "--osd-font=sans-serif",
                 "--osd-font-size=28",
-                "--osd-color=#F7EDE2",
-                "--osd-border-color=#140C0D",
+                "--osd-color=#E2E8F0",
+                "--osd-border-color=#0E101A",
                 "--osd-border-size=2.4",
                 "--osd-shadow-offset=1.5",
-                "--osd-shadow-color=#140C0D",
+                "--osd-shadow-color=#0E101A",
                 "--osd-bar-align-y=0.92",
                 "--osd-bar-h=3.2",
                 "--osd-bar-w=65",
                 "--sub-font=sans-serif",
-                "--sub-color=#F7EDE2",
-                "--sub-border-color=#140C0D",
+                "--sub-color=#E2E8F0",
+                "--sub-border-color=#0E101A",
                 "--sub-border-size=2.5",
                 "--sub-shadow-offset=1.2",
-                "--sub-shadow-color=#140C0D",
+                "--sub-shadow-color=#0E101A",
                 "--script-opts=osc-layout=bottombar,osc-seekbarstyle=bar,osc-seekrangestyle=bar,osc-deadzonesize=0.5,osc-minmousemove=3",
             ]);
 
@@ -2019,13 +2084,17 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             if let Some(sub_path) = linked_subs.first() {
                 cmd.arg(format!("--sub-file={sub_path}"));
             }
-            cmd.arg(&ep.path);
+            cmd.arg("--").arg(&ep.path);
             Pending::Vlc { base: format!("http://127.0.0.1:{port}"), password }
         }
         Kind::Mpc => {
-            cmd.arg(&ep.path);
+            let safe_arg = sanitize_mpc_media_arg(&ep.path)
+                .ok_or_else(|| anyhow!("Invalid media path for MPC: {}", ep.path))?;
+            cmd.arg(&safe_arg);
             for sub_path in &linked_subs {
-                cmd.arg("/sub").arg(sub_path);
+                if let Some(safe_sub) = sanitize_mpc_media_arg(sub_path) {
+                    cmd.arg("/sub").arg(safe_sub);
+                }
             }
             if start > 0.0 {
                 cmd.arg("/start").arg(((start * 1000.0) as i64).to_string());
@@ -2047,17 +2116,38 @@ enum Pending {
     Mpc { base: String, exe: PathBuf },
 }
 
+fn loopback_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 async fn connect(p: &Pending) -> Option<Controller> {
-    let http = || reqwest::Client::builder().no_proxy().build().ok();
     match p {
         Pending::Mpv(addr) => Mpv::connect(addr).await.ok().map(Controller::Mpv),
         Pending::Vlc { base, password } => {
-            let c = Vlc { http: http()?, base: base.clone(), password: password.clone(), seen_playing: false, last_ratio: 0.0 };
+            let c = Vlc {
+                http: loopback_http_client().clone(),
+                base: base.clone(),
+                password: password.clone(),
+                seen_playing: false,
+                last_ratio: 0.0,
+            };
             let mut ctl = Controller::Vlc(c);
             ctl.status(0.9).await.map(|_| ctl)
         }
         Pending::Mpc { base, exe } => {
-            let c = Mpc { http: http()?, base: base.clone(), exe: exe.clone(), last_ratio: 0.0 };
+            let c = Mpc {
+                http: loopback_http_client().clone(),
+                base: base.clone(),
+                exe: exe.clone(),
+                last_ratio: 0.0,
+            };
             let mut ctl = Controller::Mpc(c);
             ctl.status(0.9).await.map(|_| ctl)
         }
@@ -2066,15 +2156,18 @@ async fn connect(p: &Pending) -> Option<Controller> {
 
 async fn sync_aniskip_to_player(ctl: &mut Controller, st: &AppState, ep: &Ep) {
     if let Controller::Mpv(ref mut mpv) = ctl {
-        let http_client = reqwest::Client::builder().no_proxy().build().ok();
-        let mal_id: Option<i64> = st.db().query_row(
-            "SELECT id_mal FROM media WHERE anilist_id = ?1",
-            [ep.anilist_id],
-            |r| r.get(0),
-        ).ok().flatten();
+        let mal_id: Option<i64> = st
+            .db_read()
+            .query_row(
+                "SELECT id_mal FROM media WHERE anilist_id = ?1",
+                [ep.anilist_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
         let ep_num: Option<i64> = ep.ep_key.parse().ok();
 
-        if let (Some(ref client), Some(mid), Some(enum_val)) = (http_client.as_ref(), mal_id, ep_num) {
+        if let (Some(mid), Some(enum_val)) = (mal_id, ep_num) {
             // Wait (up to ~6s) until mpv has loaded *this* file and knows its duration,
             // so AniSkip results can be matched to this exact cut of the episode.
             let mut duration = 0.0;
@@ -2092,9 +2185,9 @@ async fn sync_aniskip_to_player(ctl: &mut Controller, st: &AppState, ep: &Ep) {
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
             if duration <= 0.0 {
-                return; // unknown length → can't trust AniSkip timestamps; chapters are used instead
+                return;
             }
-            if let Some(skip) = fetch_aniskip(client, mid, enum_val, duration).await {
+            if let Some(skip) = fetch_aniskip(&st.providers.http, mid, enum_val, duration).await {
                 let _ = mpv.send_skip_times(skip).await;
             }
         }
@@ -2123,7 +2216,6 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
     let Some(mut ctl) = ctl else {
         let hint = match p.kind {
             Kind::Mpc => Some("Turn on MPC's web interface (Options → Player → Web Interface → \"Listen on port\") so Kura can track progress.".into()),
-            Kind::Memento => Some("This Memento build doesn't accept mpv's IPC option, so progress can't be tracked.".into()),
             _ => Some("Couldn't connect to the player to track progress.".into()),
         };
         emit(&app, "untracked", p.kind, &ep, 0.0, 0.0, hint);
@@ -2153,6 +2245,7 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
     let mut last_discord_sync = std::time::Instant::now();
     let mut last_discord_pos: f64 = 0.0;
     let mut unflushed_immersion_sec: i64 = 0;
+    let mut show_title = resolve_media_show_title(&st.db_read(), ep.anilist_id);
     sync_discord_activity(&st, &ep, 0.0, 0.0, true);
     emit(&app, "tracking", p.kind, &ep, 0.0, 0.0, None);
     loop {
@@ -2192,7 +2285,7 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
                     &st.db(),
                     Some(ep.anilist_id),
                     Some(&ep.ep_key),
-                    None,
+                    Some(&show_title),
                     unflushed_immersion_sec,
                 );
                 unflushed_immersion_sec = 0;
@@ -2202,7 +2295,7 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
                 &st.db(),
                 Some(ep.anilist_id),
                 Some(&ep.ep_key),
-                None,
+                Some(&show_title),
                 unflushed_immersion_sec,
             );
             unflushed_immersion_sec = 0;
@@ -2249,7 +2342,7 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
             };
             let start = if p.resume { resume_point(saved_progress(&st.db(), next.anilist_id, &next.ep_key), p.threshold) } else { 0.0 };
             ctl.notify(&format!("Up next: episode {}", next.ep_key)).await;
-            let (next_tracks, next_subs) = {
+            let (next_tracks, next_subs, next_title) = {
                 let conn = st.db();
                 let tr = effective_track_prefs(&conn, next.anilist_id);
                 let subs = crate::subtitles::episode_subtitle_paths_for_pref(
@@ -2258,12 +2351,14 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
                     &next.ep_key,
                     tr.sub.as_deref(),
                 );
-                (tr, subs)
+                let nt = resolve_media_show_title(&conn, next.anilist_id);
+                (tr, subs, nt)
             };
             if !ctl.load(&next.path, start, &next_tracks, &next_subs).await {
                 break;
             }
             ep = next;
+            show_title = next_title;
             if let Pending::Mpv(ref addr) = pending {
                 *st.active_mpv_ipc.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some((ep.anilist_id, ep.ep_key.clone(), addr.clone()));
@@ -2285,7 +2380,7 @@ async fn track(app: AppHandle, st: Arc<AppState>, p: Prefs, mut ep: Ep, pending:
             &st.db(),
             Some(ep.anilist_id),
             Some(&ep.ep_key),
-            None,
+            Some(&show_title),
             unflushed_immersion_sec,
         );
     }

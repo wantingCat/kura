@@ -5,14 +5,62 @@ use crate::parser::{Parsed, SpecialKind};
 use crate::providers::{EpisodeMeta, Providers};
 use crate::store;
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Mutex, MutexGuard};
 
+const MAX_READ_POOL_CONNS: usize = 6;
+
+pub enum ReadConnGuard<'a> {
+    Pooled {
+        conn: Option<Connection>,
+        pool: &'a Mutex<Vec<Connection>>,
+    },
+    Ephemeral(Connection),
+    WriterFallback(MutexGuard<'a, Connection>),
+}
+
+impl Deref for ReadConnGuard<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        match self {
+            ReadConnGuard::Pooled { conn, .. } => conn.as_ref().expect("pooled connection active"),
+            ReadConnGuard::Ephemeral(c) => c,
+            ReadConnGuard::WriterFallback(g) => g,
+        }
+    }
+}
+
+impl Drop for ReadConnGuard<'_> {
+    fn drop(&mut self) {
+        if let ReadConnGuard::Pooled { conn, pool } = self {
+            if let Some(c) = conn.take() {
+                let mut p = pool.lock().unwrap_or_else(|e| e.into_inner());
+                if p.len() < MAX_READ_POOL_CONNS {
+                    p.push(c);
+                }
+            }
+        }
+    }
+}
+
+fn open_readonly_db_conn(db_path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    let _ = conn.execute_batch("PRAGMA query_only = ON;");
+    Ok(conn)
+}
+
 pub struct AppState {
     db: Mutex<Connection>,
+    read_pool: Mutex<Vec<Connection>>,
     pub providers: Providers,
     pub data_dir: PathBuf,
     pub scanning: AtomicBool,
@@ -29,6 +77,7 @@ impl AppState {
     pub fn new(conn: Connection, data_dir: PathBuf, watcher: crate::watcher::WatcherHandle) -> Self {
         Self {
             db: Mutex::new(conn),
+            read_pool: Mutex::new(Vec::with_capacity(MAX_READ_POOL_CONNS)),
             providers: Providers::new(),
             data_dir,
             scanning: AtomicBool::new(false),
@@ -43,10 +92,71 @@ impl AppState {
     pub fn db(&self) -> MutexGuard<'_, Connection> {
         self.db.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    /// Borrow a pooled read-only WAL connection (`SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX`,
+    /// `busy_timeout = 5s`, `PRAGMA query_only = ON`), recycling up to 6 connections and using
+    /// `try_lock()` (never blocking `self.db.lock()`) if `kura.db` is absent in in-memory tests.
+    pub fn db_read(&self) -> ReadConnGuard<'_> {
+        {
+            let mut pool = self.read_pool.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(conn) = pool.pop() {
+                return ReadConnGuard::Pooled {
+                    conn: Some(conn),
+                    pool: &self.read_pool,
+                };
+            }
+        }
+        let db_path = self.data_dir.join("kura.db");
+        if db_path.is_file() {
+            if let Ok(conn) = open_readonly_db_conn(&db_path) {
+                return ReadConnGuard::Pooled {
+                    conn: Some(conn),
+                    pool: &self.read_pool,
+                };
+            }
+        }
+        match self.db.try_lock() {
+            Ok(guard) => ReadConnGuard::WriterFallback(guard),
+            Err(std::sync::TryLockError::Poisoned(e)) => {
+                ReadConnGuard::WriterFallback(e.into_inner())
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                for _ in 0..10 {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    if db_path.is_file() {
+                        if let Ok(conn) = open_readonly_db_conn(&db_path) {
+                            return ReadConnGuard::Pooled {
+                                conn: Some(conn),
+                                pool: &self.read_pool,
+                            };
+                        }
+                    }
+                    match self.db.try_lock() {
+                        Ok(guard) => return ReadConnGuard::WriterFallback(guard),
+                        Err(std::sync::TryLockError::Poisoned(e)) => {
+                            return ReadConnGuard::WriterFallback(e.into_inner())
+                        }
+                        Err(std::sync::TryLockError::WouldBlock) => {}
+                    }
+                }
+                let fallback = open_readonly_db_conn(&db_path).unwrap_or_else(|_| {
+                    let mem = Connection::open_in_memory()
+                        .expect("failed to open fallback SQLite read connection");
+                    let _ = mem.execute_batch("PRAGMA query_only = ON;");
+                    mem
+                });
+                ReadConnGuard::Ephemeral(fallback)
+            }
+        }
+    }
 }
 
 const DAY: i64 = 86_400;
 const SERIES_FORMATS: &[&str] = &["TV", "TV_SHORT", "ONA"];
+
+fn safe_err_msg(err: &anyhow::Error) -> String {
+    db::redact_sensitive_text(&err.to_string())
+}
 
 fn is_airing(m: &MediaLite) -> bool {
     matches!(m.status.as_deref(), Some("RELEASING") | Some("NOT_YET_RELEASED"))
@@ -54,7 +164,7 @@ fn is_airing(m: &MediaLite) -> bool {
 
 /// Make sure a media entry is cached and reasonably fresh. Works offline if already cached.
 pub async fn ensure_media(st: &AppState, id: i64) -> Result<()> {
-    let existing = db::media_lite(&st.db(), id)?;
+    let existing = db::media_lite(&st.db_read(), id)?;
     let stale = match &existing {
         None => true,
         Some(m) => {
@@ -66,7 +176,7 @@ pub async fn ensure_media(st: &AppState, id: i64) -> Result<()> {
         return Ok(());
     }
     let token = {
-        let conn = st.db();
+        let conn = st.db_read();
         db::get_setting(&conn, "anilist.token")
             .ok()
             .flatten()
@@ -76,7 +186,7 @@ pub async fn ensure_media(st: &AppState, id: i64) -> Result<()> {
         Ok(m) => store::upsert_media(&st.db(), &m),
         // Offline / API error: fall back to whatever we have.
         Err(e) if existing.is_some() => {
-            crate::klog!("[kura] refresh of media {id} failed, using cache: {e}");
+            crate::klog!("[kura] refresh of media {id} failed, using cache: {}", safe_err_msg(&e));
             Ok(())
         }
         Err(e) => Err(e),
@@ -85,8 +195,7 @@ pub async fn ensure_media(st: &AppState, id: i64) -> Result<()> {
 
 pub async fn ensure_credits(st: &AppState, id: i64) -> Result<()> {
     let has_credits: bool = {
-        let conn = st.db();
-        let _ = conn.execute_batch(db::SCHEMA_V6);
+        let conn = st.db_read();
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM media_characters WHERE anilist_id = ?1)
              OR EXISTS(SELECT 1 FROM media_staff WHERE anilist_id = ?1)",
@@ -105,7 +214,7 @@ pub async fn ensure_credits(st: &AppState, id: i64) -> Result<()> {
 }
 
 pub async fn ensure_episodes(st: &AppState, id: i64) -> Result<()> {
-    let Some(m) = db::media_lite(&st.db(), id)? else { return Ok(()) };
+    let Some(m) = db::media_lite(&st.db_read(), id)? else { return Ok(()) };
     let stale = match m.episodes_fetched_at {
         None => true,
         Some(t) => {
@@ -117,7 +226,7 @@ pub async fn ensure_episodes(st: &AppState, id: i64) -> Result<()> {
         return Ok(());
     }
     if let Err(e) = fetch_episodes(st, &m).await {
-        crate::klog!("[kura] episode fetch for {id} failed: {e}");
+        crate::klog!("[kura] episode fetch for {id} failed: {}", safe_err_msg(&e));
     }
     Ok(())
 }
@@ -132,13 +241,13 @@ pub async fn fetch_episodes(st: &AppState, m: &MediaLite) -> Result<()> {
             (data.episodes, Some(data.images), data.thetvdb_id)
         }
         Err(e) => {
-            crate::klog!("[kura] ani.zip failed for {}: {e}", m.id);
+            crate::klog!("[kura] ani.zip failed for {}: {}", m.id, safe_err_msg(&e));
             (Vec::new(), None, None)
         }
     };
 
     let fanart_key = {
-        let conn = st.db();
+        let conn = st.db_read();
         db::get_setting(&conn, "pref.fanart_api_key")
             .ok()
             .flatten()
@@ -150,7 +259,7 @@ pub async fn fetch_episodes(st: &AppState, m: &MediaLite) -> Result<()> {
             match st.providers.fanart_tv_images(tvdb, key.trim()).await {
                 Ok(imgs) => Some(imgs),
                 Err(e) => {
-                    crate::klog!("[kura] Fanart.tv failed for TVDB {tvdb}: {e}");
+                    crate::klog!("[kura] Fanart.tv failed for TVDB {tvdb}: {}", safe_err_msg(&e));
                     None
                 }
             }
@@ -221,13 +330,13 @@ pub async fn fetch_episodes(st: &AppState, m: &MediaLite) -> Result<()> {
                     }
                 }
                 Ok(_) => {}
-                Err(e) => crate::klog!("[kura] Jikan failed for MAL {mal}: {e}"),
+                Err(e) => crate::klog!("[kura] Jikan failed for MAL {mal}: {}", safe_err_msg(&e)),
             }
         }
     }
 
     // Fill gaps so every expected episode has a row.
-    let remote_prog = crate::anilist_sync::get_remote_entry(&st.db(), m.id)
+    let remote_prog = crate::anilist_sync::get_remote_entry(&st.db_read(), m.id)
         .map(|r| r.progress)
         .unwrap_or(0);
     let expected = m

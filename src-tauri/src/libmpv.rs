@@ -12,30 +12,18 @@ use std::sync::{Mutex, OnceLock};
 // libmpv C API Constants & Types (<mpv/client.h>)
 // ---------------------------------------------------------------------------
 
-pub const MPV_FORMAT_NONE: c_int = 0;
 pub const MPV_FORMAT_STRING: c_int = 1;
-pub const MPV_FORMAT_OSD_STRING: c_int = 2;
 pub const MPV_FORMAT_FLAG: c_int = 3;
 pub const MPV_FORMAT_INT64: c_int = 4;
 pub const MPV_FORMAT_DOUBLE: c_int = 5;
 
 pub const MPV_EVENT_NONE: c_int = 0;
 pub const MPV_EVENT_SHUTDOWN: c_int = 1;
-pub const MPV_EVENT_LOG_MESSAGE: c_int = 2;
-pub const MPV_EVENT_START_FILE: c_int = 6;
 pub const MPV_EVENT_END_FILE: c_int = 7;
 pub const MPV_EVENT_FILE_LOADED: c_int = 8;
-pub const MPV_EVENT_IDLE: c_int = 11;
-pub const MPV_EVENT_VIDEO_RECONFIG: c_int = 17;
-pub const MPV_EVENT_AUDIO_RECONFIG: c_int = 18;
-pub const MPV_EVENT_SEEK: c_int = 20;
-pub const MPV_EVENT_PLAYBACK_RESTART: c_int = 21;
 pub const MPV_EVENT_PROPERTY_CHANGE: c_int = 22;
 
 pub const MPV_END_FILE_REASON_EOF: c_int = 0;
-pub const MPV_END_FILE_REASON_STOP: c_int = 2;
-pub const MPV_END_FILE_REASON_QUIT: c_int = 3;
-pub const MPV_END_FILE_REASON_ERROR: c_int = 4;
 
 #[repr(C)]
 pub struct MpvEvent {
@@ -168,7 +156,6 @@ fn candidate_libmpv_paths() -> Vec<PathBuf> {
         }
         let win_dirs = [
             r"C:\Program Files\Jellyfin\Jellyfin Media Player",
-            r"C:\Program Files\Memento",
             r"C:\Program Files\MPV Player",
             r"C:\Program Files\mpv",
             r"C:\Program Files\mpv.net",
@@ -202,10 +189,6 @@ fn candidate_libmpv_paths() -> Vec<PathBuf> {
                 out.push(PathBuf::from(d).join(name));
             }
         }
-    }
-
-    for name in lib_names {
-        out.push(PathBuf::from(name));
     }
 
     out
@@ -286,20 +269,37 @@ pub fn resolve_shader_preset_paths(preset: &str) -> String {
 }
 
 #[cfg(windows)]
-fn set_dll_directory(dir: &Path) {
+unsafe fn load_library_isolated(cand: &Path) -> std::result::Result<Library, String> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     extern "system" {
-        fn SetDllDirectoryW(lpPathName: *const u16) -> i32;
+        fn LoadLibraryExW(
+            lp_lib_file_name: *const u16,
+            h_file: *mut c_void,
+            dw_flags: u32,
+        ) -> *mut c_void;
+        fn GetLastError() -> u32;
     }
-    let wide: Vec<u16> = dir
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (0x0100) | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS (0x1000)
+    // Resolves transitive dependencies strictly from the DLL's own directory and System32,
+    // without mutating process-wide DLL search state or searching CWD (`H-15`).
+    const FLAGS: u32 = 0x0000_1100;
+    let wide: Vec<u16> = cand
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    unsafe {
-        let _ = SetDllDirectoryW(wide.as_ptr());
+    let handle = LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), FLAGS);
+    if handle.is_null() {
+        return Err(format!("LoadLibraryExW failed (win32 error {})", GetLastError()));
     }
+    let os_lib = libloading::os::windows::Library::from_raw(handle as _);
+    Ok(Library::from(os_lib))
+}
+
+#[cfg(not(windows))]
+unsafe fn load_library_isolated(cand: &Path) -> std::result::Result<Library, String> {
+    Library::new(cand).map_err(|e| e.to_string())
 }
 
 impl MpvApi {
@@ -311,19 +311,13 @@ impl MpvApi {
     }
 
     fn load() -> std::result::Result<MpvApi, String> {
-        let mut last_err = String::from("No libmpv candidates found");
+        let mut last_err = String::from("No verified libmpv candidates found");
         for cand in candidate_libmpv_paths() {
-            if cand.components().count() > 1 && !cand.is_file() {
+            if !cand.is_absolute() || !cand.is_file() {
                 continue;
             }
-            #[cfg(windows)]
-            if let Some(parent) = cand.parent() {
-                if !parent.as_os_str().is_empty() && parent.is_dir() {
-                    set_dll_directory(parent);
-                }
-            }
             unsafe {
-                match Library::new(&cand) {
+                match load_library_isolated(&cand) {
                     Ok(lib) => {
                         let res = (|| -> Result<MpvApi> {
                             let create = *lib.get::<FnMpvCreate>(b"mpv_create\0")?;
@@ -446,8 +440,6 @@ impl MpvInstance {
         let _ = inst.observe_property(3, "pause", MPV_FORMAT_FLAG);
         let _ = inst.observe_property(4, "sub-text", MPV_FORMAT_STRING);
         let _ = inst.observe_property(5, "aid", MPV_FORMAT_INT64);
-        let _ = inst.observe_property(6, "sid", MPV_FORMAT_INT64);
-        let _ = inst.observe_property(7, "core-idle", MPV_FORMAT_FLAG);
 
         Ok(inst)
     }
@@ -604,7 +596,6 @@ impl MpvInstance {
         let cname = CString::new(name).ok()?;
         let mut out: c_int = 0;
         let rc = unsafe {
-            (self.api.set_property); // keep symmetry
             (self.api.get_property)(
                 self.ctx,
                 cname.as_ptr(),
@@ -671,14 +662,14 @@ mod win_surface {
     const GWL_EXSTYLE: i32 = -20;
     const GWLP_HWNDPARENT: i32 = -8;
 
-    const SW_HIDE: i32 = 0;
-    const SW_SHOWNOACTIVATE: i32 = 4;
-
     const SWP_NOSIZE: UINT = 0x0001;
     const SWP_NOMOVE: UINT = 0x0002;
+    const SWP_NOZORDER: UINT = 0x0004;
     const SWP_NOACTIVATE: UINT = 0x0010;
     const SWP_SHOWWINDOW: UINT = 0x0040;
+    const SWP_HIDEWINDOW: UINT = 0x0080;
     const SWP_NOOWNERZORDER: UINT = 0x0200;
+    const SWP_ASYNCWINDOWPOS: UINT = 0x4000;
 
     const BLACK_BRUSH: i32 = 4;
     const WM_ERASEBKGND: UINT = 0x0014;
@@ -744,7 +735,6 @@ mod win_surface {
         fn GetMessageW(lp_msg: *mut MSG, h_wnd: HWND, w_msg_filter_min: UINT, w_msg_filter_max: UINT) -> BOOL;
         fn TranslateMessage(lp_msg: *const MSG) -> BOOL;
         fn DispatchMessageW(lp_msg: *const MSG) -> LRESULT;
-        fn ShowWindow(h_wnd: HWND, n_cmd_show: i32) -> BOOL;
         fn SetWindowPos(
             h_wnd: HWND,
             h_wnd_insert_after: HWND,
@@ -845,6 +835,10 @@ mod win_surface {
         Ok(hwnd as i64)
     }
 
+    pub fn is_surface_visible() -> bool {
+        LAST_BOUNDS.lock().unwrap_or_else(|e| e.into_inner()).4
+    }
+
     pub fn sync_surface_with_main(main_hwnd: isize, active_and_visible: bool) {
         let Some(&video_hwnd) = VIDEO_HWND.get() else {
             return;
@@ -854,12 +848,20 @@ mod win_surface {
         }
 
         unsafe {
+            let hide_async_flags = SWP_HIDEWINDOW
+                | SWP_NOMOVE
+                | SWP_NOSIZE
+                | SWP_NOZORDER
+                | SWP_NOACTIVATE
+                | SWP_NOOWNERZORDER
+                | SWP_ASYNCWINDOWPOS;
+
             if !active_and_visible {
                 let mut g = LAST_BOUNDS.lock().unwrap_or_else(|e| e.into_inner());
                 if g.4 {
                     g.4 = false;
                     SetWindowLongPtrW(main_hwnd, GWLP_HWNDPARENT, 0);
-                    ShowWindow(video_hwnd, SW_HIDE);
+                    SetWindowPos(video_hwnd, 0, 0, 0, 0, 0, hide_async_flags);
                 }
                 return;
             }
@@ -868,7 +870,7 @@ mod win_surface {
                 let mut g = LAST_BOUNDS.lock().unwrap_or_else(|e| e.into_inner());
                 if g.4 {
                     g.4 = false;
-                    ShowWindow(video_hwnd, SW_HIDE);
+                    SetWindowPos(video_hwnd, 0, 0, 0, 0, 0, hide_async_flags);
                 }
                 return;
             }
@@ -902,7 +904,6 @@ mod win_surface {
                 // Make main_hwnd owned by video_hwnd so DWM guarantees main_hwnd (WebView2 HUD)
                 // is always composited above video_hwnd (libmpv D3D11 swapchain).
                 SetWindowLongPtrW(main_hwnd, GWLP_HWNDPARENT, video_hwnd);
-                ShowWindow(video_hwnd, SW_SHOWNOACTIVATE);
             }
 
             if bounds_changed {
@@ -914,18 +915,7 @@ mod win_surface {
                     pt.y,
                     w,
                     h,
-                    SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW,
-                );
-            } else {
-                // Keep Z-order locked directly behind main_hwnd
-                SetWindowPos(
-                    video_hwnd,
-                    main_hwnd,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                    SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS,
                 );
             }
         }
@@ -945,16 +935,8 @@ pub fn ensure_video_surface() -> Result<Option<i64>> {
 
 /// Keep the libmpv video surface glued behind Kura's main window.
 ///
-/// IMPORTANT: this may be called from ANY thread (libmpv event loop, async commands,
-/// window events), but the actual Win32 work always runs on the main/UI thread.
-/// `WebviewWindow::hwnd()`, `SetWindowLongPtrW(main_hwnd, ...)` and
-/// `SetWindowPos(.., main_hwnd, ..)` all synchronously wait on the UI thread when called
-/// from a background thread. Doing that while holding a lock the UI thread also wants
-/// (the player runtime lock or `LAST_BOUNDS`) deadlocked the UI: the video kept playing
-/// in libmpv's own threads, but the window stopped responding.
-///
 /// Requests are coalesced: at most one job is queued on the main thread at a time, and
-/// it applies the most recently requested visibility.
+/// `SetWindowPos` only executes when `(x, y, w, h, visible)` actually changes (`H-23`).
 pub fn sync_surface_bounds(app: &tauri::AppHandle, active_and_visible: bool) {
     #[cfg(windows)]
     {
@@ -964,9 +946,15 @@ pub fn sync_surface_bounds(app: &tauri::AppHandle, active_and_visible: bool) {
         static JOB_QUEUED: AtomicBool = AtomicBool::new(false);
         static WANT_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+        if !active_and_visible
+            && !WANT_ACTIVE.load(Ordering::SeqCst)
+            && !win_surface::is_surface_visible()
+        {
+            return;
+        }
+
         WANT_ACTIVE.store(active_and_visible, Ordering::SeqCst);
         if JOB_QUEUED.swap(true, Ordering::SeqCst) {
-            // A queued job will pick up the latest WANT_ACTIVE value.
             return;
         }
 

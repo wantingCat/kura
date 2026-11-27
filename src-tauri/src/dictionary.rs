@@ -6,12 +6,13 @@
 use crate::db::now;
 use anyhow::{anyhow, bail, Context, Result};
 use flate2::read::DeflateDecoder;
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
-use std::path::Path;
+use std::io::{BufReader, Cursor, Read};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
 const DICT_SCHEMA: &str = r#"
@@ -63,17 +64,97 @@ CREATE TABLE IF NOT EXISTS kanji (
 CREATE INDEX IF NOT EXISTS idx_kanji_char ON kanji(character);
 "#;
 
-pub fn open_dict_db(data_dir: &Path) -> Result<Connection> {
+static INITIALIZED_DICT_DIRS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+static DICT_READ_POOL: OnceLock<Mutex<HashMap<PathBuf, Vec<Connection>>>> = OnceLock::new();
+
+const MAX_DICT_READ_POOL_PER_DIR: usize = 4;
+
+fn ensure_dict_db_initialized(data_dir: &Path) -> Result<PathBuf> {
     let db_path = data_dir.join("dictionary.db");
+    let initialized = INITIALIZED_DICT_DIRS.get_or_init(|| Mutex::new(HashSet::new()));
+    {
+        let guard = initialized.lock().unwrap();
+        if guard.contains(&db_path) && db_path.exists() {
+            return Ok(db_path);
+        }
+    }
+
+    if let Some(parent) = db_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let conn = Connection::open(&db_path)?;
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA foreign_keys = ON;
+         PRAGMA busy_timeout = 5000;",
+    )?;
+    conn.execute_batch(DICT_SCHEMA)?;
+    ensure_starter_dictionary(&conn)?;
+    drop(conn);
+
+    initialized.lock().unwrap().insert(db_path.clone());
+    Ok(db_path)
+}
+
+pub fn open_dict_db(data_dir: &Path) -> Result<Connection> {
+    let db_path = ensure_dict_db_initialized(data_dir)?;
     let conn = Connection::open(db_path)?;
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
-         PRAGMA foreign_keys = ON;",
+         PRAGMA foreign_keys = ON;
+         PRAGMA busy_timeout = 5000;",
     )?;
-    conn.execute_batch(DICT_SCHEMA)?;
-    ensure_starter_dictionary(&conn)?;
     Ok(conn)
+}
+
+struct PooledDictReadConn {
+    db_path: PathBuf,
+    conn: Option<Connection>,
+}
+
+impl Drop for PooledDictReadConn {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            let pool = DICT_READ_POOL.get_or_init(|| Mutex::new(HashMap::new()));
+            if let Ok(mut map) = pool.lock() {
+                let list = map.entry(self.db_path.clone()).or_default();
+                if list.len() < MAX_DICT_READ_POOL_PER_DIR {
+                    list.push(conn);
+                }
+            }
+        }
+    }
+}
+
+/// Fast read-only pooled lookup against `data_dir/dictionary.db` (`C-07`).
+pub fn lookup_in_dir(data_dir: &Path, text: &str, char_offset: usize) -> Result<LookupResult> {
+    let db_path = ensure_dict_db_initialized(data_dir)?;
+    let pool = DICT_READ_POOL.get_or_init(|| Mutex::new(HashMap::new()));
+    let conn = pool
+        .lock()
+        .ok()
+        .and_then(|mut map| map.get_mut(&db_path).and_then(|v| v.pop()));
+
+    let conn = match conn {
+        Some(c) => c,
+        None => {
+            let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+            let c = Connection::open_with_flags(&db_path, flags)?;
+            c.execute_batch(
+                "PRAGMA busy_timeout = 5000;
+                 PRAGMA query_only = ON;",
+            )?;
+            c
+        }
+    };
+
+    let guard = PooledDictReadConn {
+        db_path,
+        conn: Some(conn),
+    };
+    lookup_at(guard.conn.as_ref().unwrap(), text, char_offset)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -704,126 +785,174 @@ pub fn lookup_at(conn: &Connection, text: &str, char_offset: usize) -> Result<Lo
         });
     }
 
-    let mut term_stmt = conn.prepare(
-        "SELECT t.expression, t.reading, t.definition_tags, t.rules, t.score, t.glossary_json, t.term_tags, d.title
-         FROM terms t
-         JOIN dictionaries d ON d.id = t.dict_id
-         WHERE t.expression = ?1 OR t.reading = ?1
-         ORDER BY t.score DESC, t.id ASC
-         LIMIT 24",
-    )?;
+    struct PrefixCandidates {
+        sub: String,
+        len: usize,
+        candidates: Vec<DeinflectCandidate>,
+    }
 
-    let mut meta_stmt = conn.prepare(
-        "SELECT mode, data_json FROM term_meta WHERE expression = ?1 LIMIT 20",
-    )?;
-
-    let mut collected_terms: Vec<TermEntry> = Vec::new();
-    let mut best_match_text = String::new();
-    let mut best_match_len = 0usize;
-    let mut seen_entries: HashSet<(String, String, String)> = HashSet::new();
+    let mut prefixes: Vec<PrefixCandidates> = Vec::new();
+    let mut unique_texts: Vec<String> = Vec::new();
+    let mut seen_texts: HashSet<String> = HashSet::new();
 
     for len in (1..=rest.len()).rev() {
         let sub: String = rest[..len].iter().collect();
-        // Stop at punctuation if len > 1
-        if sub.chars().any(|c| matches!(c, '。' | '、' | '！' | '？' | '「' | '」' | '（' | '）' | '\n' | '\r')) {
+        if sub.chars().any(|c| {
+            matches!(
+                c,
+                '。' | '、' | '！' | '？' | '「' | '」' | '（' | '）' | '\n' | '\r'
+            )
+        }) {
             continue;
         }
         let hira_sub = katakana_to_hiragana(&sub);
         let mut candidates = deinflect(&sub);
         if hira_sub != sub {
             for hc in deinflect(&hira_sub) {
-                if !candidates.iter().any(|c| c.text == hc.text && c.conditions == hc.conditions) {
+                if !candidates
+                    .iter()
+                    .any(|c| c.text == hc.text && c.conditions == hc.conditions)
+                {
                     candidates.push(hc);
                 }
             }
         }
+        for c in &candidates {
+            if seen_texts.insert(c.text.clone()) {
+                unique_texts.push(c.text.clone());
+            }
+        }
+        prefixes.push(PrefixCandidates {
+            sub,
+            len,
+            candidates,
+        });
+    }
 
-        for cand in &candidates {
-            let rows = term_stmt.query_map([&cand.text], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, String>(6)?,
-                    r.get::<_, String>(7)?,
-                ))
+    #[derive(Clone)]
+    struct RawTermRow {
+        id: i64,
+        expr: String,
+        read: String,
+        def_tags: String,
+        rules: String,
+        score: i64,
+        gloss_json: String,
+        term_tags: String,
+        dict_title: String,
+    }
+
+    let mut fetched_rows_by_id: HashMap<i64, RawTermRow> = HashMap::new();
+    for chunk in unique_texts.chunks(64) {
+        let placeholders = std::iter::repeat("?")
+            .take(chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        for col in ["t.expression", "t.reading"] {
+            let sql = format!(
+                "SELECT t.id, t.expression, t.reading, t.definition_tags, t.rules, t.score, t.glossary_json, t.term_tags, d.title
+                 FROM terms t
+                 JOIN dictionaries d ON d.id = t.dict_id
+                 WHERE {col} IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(chunk.iter()), |r| {
+                Ok(RawTermRow {
+                    id: r.get(0)?,
+                    expr: r.get(1)?,
+                    read: r.get(2)?,
+                    def_tags: r.get(3)?,
+                    rules: r.get(4)?,
+                    score: r.get(5)?,
+                    gloss_json: r.get(6)?,
+                    term_tags: r.get(7)?,
+                    dict_title: r.get(8)?,
+                })
             })?;
-
             for row in rows.flatten() {
-                let (expr, read, def_tags, rules, score, gloss_json, term_tags, dict_title) = row;
-                // Validate Yomitan condition mask if this candidate came from a deinflection rule!
+                fetched_rows_by_id.entry(row.id).or_insert(row);
+            }
+        }
+    }
+
+    let mut all_rows: Vec<RawTermRow> = fetched_rows_by_id.into_values().collect();
+    all_rows.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
+
+    let mut rows_by_key: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, row) in all_rows.iter().enumerate() {
+        let expr_list = rows_by_key.entry(row.expr.clone()).or_default();
+        if expr_list.len() < 24 {
+            expr_list.push(idx);
+        }
+        if !row.read.is_empty() && row.read != row.expr {
+            let read_list = rows_by_key.entry(row.read.clone()).or_default();
+            if read_list.len() < 24 {
+                read_list.push(idx);
+            }
+        }
+    }
+
+    let mut collected_terms: Vec<TermEntry> = Vec::new();
+    let mut best_match_text = String::new();
+    let mut best_match_len = 0usize;
+    let mut seen_entries: HashSet<(String, String, String)> = HashSet::new();
+
+    for pref in &prefixes {
+        for cand in &pref.candidates {
+            let Some(indices) = rows_by_key.get(&cand.text) else {
+                continue;
+            };
+            for &row_idx in indices {
+                let row = &all_rows[row_idx];
                 if cand.conditions != 0 {
-                    let entry_mask = entry_condition_mask(&rules, &def_tags);
+                    let entry_mask = entry_condition_mask(&row.rules, &row.def_tags);
                     if entry_mask != 0 && (entry_mask & cand.conditions) == 0 {
                         continue;
                     }
-                    // If the dictionary entry has no verb/adj rules at all, don't match a conjugated candidate
-                    // unless the entry has no rules recorded (e.g. a simple glossary).
-                    if entry_mask == 0 && (!rules.is_empty() || !def_tags.is_empty()) {
+                    if entry_mask == 0 && (!row.rules.is_empty() || !row.def_tags.is_empty()) {
                         continue;
                     }
                 }
 
-                let eff_reading = if read.is_empty() { expr.clone() } else { read.clone() };
-                let dedup_key = (expr.clone(), eff_reading.clone(), dict_title.clone());
+                let eff_reading = if row.read.is_empty() {
+                    row.expr.clone()
+                } else {
+                    row.read.clone()
+                };
+                let dedup_key = (row.expr.clone(), eff_reading.clone(), row.dict_title.clone());
                 if !seen_entries.insert(dedup_key) {
                     continue;
                 }
 
-                let glossaries = extract_glossaries(&gloss_json);
+                let glossaries = extract_glossaries(&row.gloss_json);
                 if glossaries.is_empty() {
                     continue;
                 }
 
-                let mut frequencies = Vec::new();
-                let mut pitches = Vec::new();
-                if let Ok(meta_rows) = meta_stmt.query_map([&expr], |mr| {
-                    Ok((mr.get::<_, String>(0)?, mr.get::<_, String>(1)?))
-                }) {
-                    for (mode, data_str) in meta_rows.flatten() {
-                        if mode == "freq" {
-                            if let Some(f) = parse_freq_meta(&data_str) {
-                                if !frequencies.contains(&f) {
-                                    frequencies.push(f);
-                                }
-                            }
-                        } else if mode == "pitch" {
-                            for p in parse_pitch_meta(&data_str, &eff_reading) {
-                                if !pitches.iter().any(|x: &PitchAccent| x.downstep == p.downstep && x.reading == p.reading) {
-                                    pitches.push(p);
-                                }
-                            }
-                        }
-                    }
+                if pref.len > best_match_len {
+                    best_match_len = pref.len;
+                    best_match_text = pref.sub.clone();
                 }
 
-                if len > best_match_len {
-                    best_match_len = len;
-                    best_match_text = sub.clone();
-                }
-
-                let furigana = distribute_furigana(&expr, &eff_reading);
+                let furigana = distribute_furigana(&row.expr, &eff_reading);
                 let mut reasons = cand.reasons.clone();
-                reasons.reverse(); // Show root-to-surface order (e.g. causative -> passive -> past)
+                reasons.reverse();
 
                 collected_terms.push(TermEntry {
-                    expression: expr,
+                    expression: row.expr.clone(),
                     reading: eff_reading,
                     furigana,
-                    matched_text: sub.clone(),
-                    match_len: len,
+                    matched_text: pref.sub.clone(),
+                    match_len: pref.len,
                     deinflection_reasons: reasons,
-                    definition_tags: def_tags.split_whitespace().map(String::from).collect(),
-                    term_tags: term_tags.split_whitespace().map(String::from).collect(),
-                    rules: rules.split_whitespace().map(String::from).collect(),
+                    definition_tags: row.def_tags.split_whitespace().map(String::from).collect(),
+                    term_tags: row.term_tags.split_whitespace().map(String::from).collect(),
+                    rules: row.rules.split_whitespace().map(String::from).collect(),
                     glossaries,
-                    dictionary_title: dict_title,
-                    score,
-                    frequencies,
-                    pitches,
+                    dictionary_title: row.dict_title.clone(),
+                    score: row.score,
+                    frequencies: Vec::new(),
+                    pitches: Vec::new(),
                     word_status: None,
                     lookup_count: 0,
                 });
@@ -840,7 +969,64 @@ pub fn lookup_at(conn: &Connection, text: &str, char_offset: usize) -> Result<Lo
     });
     collected_terms.truncate(20);
 
-    // Collect Kanji entries for any kanji in the matched text or top term expressions
+    // Single batched `term_meta` query for the top terms (`C-07`)
+    let mut unique_exprs: Vec<String> = Vec::new();
+    for t in &collected_terms {
+        if !unique_exprs.contains(&t.expression) {
+            unique_exprs.push(t.expression.clone());
+        }
+    }
+    if !unique_exprs.is_empty() {
+        let placeholders = std::iter::repeat("?")
+            .take(unique_exprs.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let meta_sql = format!(
+            "SELECT expression, mode, data_json FROM term_meta WHERE expression IN ({placeholders})"
+        );
+        if let Ok(mut meta_stmt) = conn.prepare(&meta_sql) {
+            if let Ok(meta_rows) = meta_stmt.query_map(params_from_iter(unique_exprs.iter()), |mr| {
+                Ok((
+                    mr.get::<_, String>(0)?,
+                    mr.get::<_, String>(1)?,
+                    mr.get::<_, String>(2)?,
+                ))
+            }) {
+                let mut meta_by_expr: HashMap<String, Vec<(String, String)>> = HashMap::new();
+                for (expr, mode, data_str) in meta_rows.flatten() {
+                    let list = meta_by_expr.entry(expr).or_default();
+                    if list.len() < 24 {
+                        list.push((mode, data_str));
+                    }
+                }
+                for t in &mut collected_terms {
+                    if let Some(items) = meta_by_expr.get(&t.expression) {
+                        for (mode, data_str) in items {
+                            if mode == "freq" {
+                                if let Some(f) = parse_freq_meta(data_str) {
+                                    if !t.frequencies.contains(&f) {
+                                        t.frequencies.push(f);
+                                    }
+                                }
+                            } else if mode == "pitch" {
+                                for p in parse_pitch_meta(data_str, &t.reading) {
+                                    if !t
+                                        .pitches
+                                        .iter()
+                                        .any(|x: &PitchAccent| x.downstep == p.downstep && x.reading == p.reading)
+                                    {
+                                        t.pitches.push(p);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Collect Kanji entries for any kanji in the matched text or top term expressions via a single batched query
     let mut kanji_chars: Vec<char> = Vec::new();
     for ch in best_match_text.chars() {
         if is_kanji(ch) && !kanji_chars.contains(&ch) {
@@ -859,16 +1045,21 @@ pub fn lookup_at(conn: &Connection, text: &str, char_offset: usize) -> Result<Lo
     }
 
     let mut kanji_entries = Vec::new();
-    if let Ok(mut k_stmt) = conn.prepare(
-        "SELECT k.character, k.onyomi, k.kunyomi, k.tags, k.meanings_json, k.stats_json, d.title
-         FROM kanji k
-         JOIN dictionaries d ON d.id = k.dict_id
-         WHERE k.character = ?1
-         LIMIT 4",
-    ) {
-        for ch in kanji_chars {
-            let s = ch.to_string();
-            if let Ok(rows) = k_stmt.query_map([&s], |r| {
+    if !kanji_chars.is_empty() {
+        let kanji_strs: Vec<String> = kanji_chars.iter().map(|c| c.to_string()).collect();
+        let placeholders = std::iter::repeat("?")
+            .take(kanji_strs.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let k_sql = format!(
+            "SELECT k.character, k.onyomi, k.kunyomi, k.tags, k.meanings_json, k.stats_json, d.title
+             FROM kanji k
+             JOIN dictionaries d ON d.id = k.dict_id
+             WHERE k.character IN ({placeholders})
+             ORDER BY k.id ASC"
+        );
+        if let Ok(mut k_stmt) = conn.prepare(&k_sql) {
+            if let Ok(rows) = k_stmt.query_map(params_from_iter(kanji_strs.iter()), |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -879,20 +1070,30 @@ pub fn lookup_at(conn: &Connection, text: &str, char_offset: usize) -> Result<Lo
                     r.get::<_, String>(6)?,
                 ))
             }) {
-                if let Some((character, onyomi, kunyomi, tags, meanings_json, stats_json, dict_title)) =
-                    rows.flatten().next()
+                let mut first_by_char: HashMap<String, KanjiEntry> = HashMap::new();
+                for (character, onyomi, kunyomi, tags, meanings_json, stats_json, dict_title) in
+                    rows.flatten()
                 {
-                    let meanings: Vec<String> = serde_json::from_str(&meanings_json).unwrap_or_default();
-                    let stats: HashMap<String, String> = serde_json::from_str(&stats_json).unwrap_or_default();
-                    kanji_entries.push(KanjiEntry {
-                        character,
-                        onyomi: onyomi.split_whitespace().map(String::from).collect(),
-                        kunyomi: kunyomi.split_whitespace().map(String::from).collect(),
-                        meanings,
-                        tags: tags.split_whitespace().map(String::from).collect(),
-                        stats,
-                        dictionary_title: dict_title,
+                    first_by_char.entry(character.clone()).or_insert_with(|| {
+                        let meanings: Vec<String> =
+                            serde_json::from_str(&meanings_json).unwrap_or_default();
+                        let stats: HashMap<String, String> =
+                            serde_json::from_str(&stats_json).unwrap_or_default();
+                        KanjiEntry {
+                            character,
+                            onyomi: onyomi.split_whitespace().map(String::from).collect(),
+                            kunyomi: kunyomi.split_whitespace().map(String::from).collect(),
+                            meanings,
+                            tags: tags.split_whitespace().map(String::from).collect(),
+                            stats,
+                            dictionary_title: dict_title,
+                        }
                     });
+                }
+                for ch_s in &kanji_strs {
+                    if let Some(entry) = first_by_char.remove(ch_s) {
+                        kanji_entries.push(entry);
+                    }
                 }
             }
         }
@@ -1028,111 +1229,112 @@ fn parse_pitch_meta(data_str: &str, default_reading: &str) -> Vec<PitchAccent> {
 }
 
 // ---------------------------------------------------------------------------
-// Pure-Rust ZIP Reader & Yomitan v3 Archive Importer
+// Streaming Yomitan v3 Archive Importer (`C-09` & `H-06`)
 // ---------------------------------------------------------------------------
 
-/// Extract named JSON files from a `.zip` byte buffer using Central Directory parsing + `flate2`.
-pub fn read_zip_entries(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
-    // Find End of Central Directory (EOCD) signature: 0x06054b50
-    let min_eocd = 22usize;
-    if bytes.len() < min_eocd {
-        bail!("Invalid ZIP file (too short)");
+fn stream_yomitan_bank_rows<F>(
+    entry: &crate::subtitles::ZipCentralEntry<'_>,
+    max_uncompressed_bytes: u64,
+    on_row: F,
+) -> Result<()>
+where
+    F: FnMut(Value) -> Result<()>,
+{
+    struct BankArrayVisitor<'a, F> {
+        on_row: F,
+        row_err: &'a mut Option<anyhow::Error>,
     }
-    let search_start = bytes.len().saturating_sub(65557);
-    let mut eocd_pos = None;
-    for i in (search_start..=bytes.len() - min_eocd).rev() {
-        if bytes[i..i + 4] == [0x50, 0x4b, 0x05, 0x06] {
-            eocd_pos = Some(i);
-            break;
-        }
-    }
-    let eocd = eocd_pos.ok_or_else(|| anyhow!("Not a valid ZIP archive (EOCD not found)"))?;
-    let total_entries = u16::from_le_bytes([bytes[eocd + 10], bytes[eocd + 11]]) as usize;
-    let cd_offset = u32::from_le_bytes([
-        bytes[eocd + 16],
-        bytes[eocd + 17],
-        bytes[eocd + 18],
-        bytes[eocd + 19],
-    ]) as usize;
 
-    let mut out = Vec::with_capacity(total_entries);
-    let mut pos = cd_offset;
-    for _ in 0..total_entries {
-        if pos + 46 > bytes.len() || bytes[pos..pos + 4] != [0x50, 0x4b, 0x01, 0x02] {
-            break;
-        }
-        let method = u16::from_le_bytes([bytes[pos + 10], bytes[pos + 11]]);
-        let comp_size = u32::from_le_bytes([
-            bytes[pos + 20],
-            bytes[pos + 21],
-            bytes[pos + 22],
-            bytes[pos + 23],
-        ]) as usize;
-        let uncomp_size = u32::from_le_bytes([
-            bytes[pos + 24],
-            bytes[pos + 25],
-            bytes[pos + 26],
-            bytes[pos + 27],
-        ]) as usize;
-        let name_len = u16::from_le_bytes([bytes[pos + 28], bytes[pos + 29]]) as usize;
-        let extra_len = u16::from_le_bytes([bytes[pos + 30], bytes[pos + 31]]) as usize;
-        let comment_len = u16::from_le_bytes([bytes[pos + 32], bytes[pos + 33]]) as usize;
-        let local_header_offset = u32::from_le_bytes([
-            bytes[pos + 42],
-            bytes[pos + 43],
-            bytes[pos + 44],
-            bytes[pos + 45],
-        ]) as usize;
+    impl<'de, 'a, F> serde::de::Visitor<'de> for BankArrayVisitor<'a, F>
+    where
+        F: FnMut(Value) -> Result<()>,
+    {
+        type Value = ();
 
-        let name = String::from_utf8_lossy(&bytes[pos + 46..pos + 46 + name_len]).to_string();
-        pos += 46 + name_len + extra_len + comment_len;
-
-        if name.ends_with('/') || !name.ends_with(".json") {
-            continue;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a JSON array of Yomitan bank entries")
         }
-        if local_header_offset + 30 > bytes.len()
-            || bytes[local_header_offset..local_header_offset + 4] != [0x50, 0x4b, 0x03, 0x04]
+
+        fn visit_seq<A>(mut self, mut seq: A) -> std::result::Result<(), A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
         {
-            continue;
-        }
-        let l_name_len = u16::from_le_bytes([
-            bytes[local_header_offset + 26],
-            bytes[local_header_offset + 27],
-        ]) as usize;
-        let l_extra_len = u16::from_le_bytes([
-            bytes[local_header_offset + 28],
-            bytes[local_header_offset + 29],
-        ]) as usize;
-        let data_start = local_header_offset + 30 + l_name_len + l_extra_len;
-        if data_start + comp_size > bytes.len() {
-            continue;
-        }
-        let comp_slice = &bytes[data_start..data_start + comp_size];
-        let data = match method {
-            0 => comp_slice.to_vec(),
-            8 => {
-                let mut decoder = DeflateDecoder::new(comp_slice);
-                let mut buf = Vec::with_capacity(uncomp_size);
-                decoder.read_to_end(&mut buf)?;
-                buf
+            while let Some(row) = seq.next_element::<Value>()? {
+                if let Err(e) = (self.on_row)(row) {
+                    *self.row_err = Some(e);
+                    return Err(serde::de::Error::custom("bank row insert failed"));
+                }
             }
-            _ => continue,
-        };
-        let base_name = name.rsplit('/').next().unwrap_or(&name).to_string();
-        out.push((base_name, data));
+            Ok(())
+        }
     }
-    Ok(out)
+
+    fn run_stream<R: Read, F: FnMut(Value) -> Result<()>>(
+        entry_name: &str,
+        reader: R,
+        max_uncompressed_bytes: u64,
+        on_row: F,
+    ) -> Result<()> {
+        let mut limited = reader.take(max_uncompressed_bytes.saturating_add(1));
+        let mut row_err: Option<anyhow::Error> = None;
+        let parse_res = {
+            let buf_reader = BufReader::with_capacity(64 * 1024, &mut limited);
+            let mut de = serde_json::Deserializer::from_reader(buf_reader);
+            serde::Deserializer::deserialize_seq(
+                &mut de,
+                BankArrayVisitor {
+                    on_row,
+                    row_err: &mut row_err,
+                },
+            )
+        };
+        if limited.limit() == 0 {
+            bail!(
+                "Yomitan bank '{}' exceeds maximum allowed uncompressed size ({max_uncompressed_bytes} bytes)",
+                entry_name
+            );
+        }
+        if let Some(err) = row_err {
+            return Err(err);
+        }
+        parse_res.with_context(|| format!("Invalid JSON in Yomitan bank '{entry_name}'"))
+    }
+
+    match entry.method {
+        0 => run_stream(
+            &entry.name,
+            Cursor::new(entry.comp_slice),
+            max_uncompressed_bytes,
+            on_row,
+        ),
+        8 => run_stream(
+            &entry.name,
+            DeflateDecoder::new(entry.comp_slice),
+            max_uncompressed_bytes,
+            on_row,
+        ),
+        other => bail!(
+            "Unsupported ZIP compression method {other} for '{}'",
+            entry.name
+        ),
+    }
 }
 
 pub fn import_yomitan_zip_bytes(conn: &mut Connection, zip_bytes: &[u8]) -> Result<DictionaryInfo> {
-    let entries = read_zip_entries(zip_bytes)?;
-    let index_bytes = entries
+    const MAX_INDEX_BYTES: u64 = 4 * 1024 * 1024;
+    const MAX_BANK_BYTES: u64 = 64 * 1024 * 1024;
+
+    let entries = crate::subtitles::iter_zip_entries(zip_bytes)?;
+    let index_entry = entries
         .iter()
-        .find(|(name, _)| name == "index.json")
-        .map(|(_, b)| b)
+        .find(|e| {
+            let base = e.name.rsplit(['/', '\\']).next().unwrap_or(&e.name);
+            base == "index.json"
+        })
         .ok_or_else(|| anyhow!("Not a valid Yomitan dictionary (missing index.json)"))?;
 
-    let index_json: Value = serde_json::from_slice(index_bytes)?;
+    let index_bytes = index_entry.decompress(MAX_INDEX_BYTES)?;
+    let index_json: Value = serde_json::from_slice(&index_bytes)?;
     let title = index_json
         .get("title")
         .and_then(|v| v.as_str())
@@ -1140,7 +1342,11 @@ pub fn import_yomitan_zip_bytes(conn: &mut Connection, zip_bytes: &[u8]) -> Resu
         .to_string();
     let revision = index_json
         .get("revision")
-        .and_then(|v| v.as_str().map(String::from).or_else(|| v.as_i64().map(|n| n.to_string())))
+        .and_then(|v| {
+            v.as_str()
+                .map(String::from)
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+        })
         .unwrap_or_else(|| "1".to_string());
     let format = index_json
         .get("format")
@@ -1149,7 +1355,6 @@ pub fn import_yomitan_zip_bytes(conn: &mut Connection, zip_bytes: &[u8]) -> Resu
         .unwrap_or(3);
 
     let tx = conn.transaction()?;
-    // Replace existing dictionary with the same title
     tx.execute("DELETE FROM dictionaries WHERE title = ?1", [&title])?;
     let imported_at = now();
     tx.execute(
@@ -1176,87 +1381,101 @@ pub fn import_yomitan_zip_bytes(conn: &mut Connection, zip_bytes: &[u8]) -> Resu
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
 
-        for (name, bytes) in &entries {
-            if name.starts_with("term_bank_") {
-                if let Ok(Value::Array(rows)) = serde_json::from_slice::<Value>(bytes) {
-                    for row in rows {
-                        let Some(arr) = row.as_array() else { continue };
-                        if arr.len() < 6 {
-                            continue;
-                        }
-                        let expr = arr[0].as_str().unwrap_or("");
-                        if expr.is_empty() {
-                            continue;
-                        }
-                        let reading = arr[1].as_str().unwrap_or("");
-                        let def_tags = arr[2].as_str().unwrap_or("");
-                        let rules = arr[3].as_str().unwrap_or("");
-                        let score = arr[4].as_i64().unwrap_or(0);
-                        let glossary_json = serde_json::to_string(&arr[5]).unwrap_or_else(|_| "[]".into());
-                        let seq = arr.get(6).and_then(|v| v.as_i64()).unwrap_or(0);
-                        let term_tags = arr.get(7).and_then(|v| v.as_str()).unwrap_or("");
-                        term_stmt.execute(params![
-                            dict_id,
-                            expr,
-                            reading,
-                            def_tags,
-                            rules,
-                            score,
-                            glossary_json,
-                            seq,
-                            term_tags
-                        ])?;
-                        term_count += 1;
+        for entry in &entries {
+            if entry.name.ends_with('/') || entry.name.ends_with('\\') {
+                continue;
+            }
+            let base_name = entry.name.rsplit(['/', '\\']).next().unwrap_or(&entry.name);
+            if !base_name.ends_with(".json") {
+                continue;
+            }
+
+            if base_name.starts_with("term_bank_") {
+                stream_yomitan_bank_rows(entry, MAX_BANK_BYTES, |row| {
+                    let Some(arr) = row.as_array() else {
+                        return Ok(());
+                    };
+                    if arr.len() < 6 {
+                        return Ok(());
                     }
-                }
-            } else if name.starts_with("term_meta_bank_") {
-                if let Ok(Value::Array(rows)) = serde_json::from_slice::<Value>(bytes) {
-                    for row in rows {
-                        let Some(arr) = row.as_array() else { continue };
-                        if arr.len() < 3 {
-                            continue;
-                        }
-                        let expr = arr[0].as_str().unwrap_or("");
-                        let mode = arr[1].as_str().unwrap_or("");
-                        if expr.is_empty() || mode.is_empty() {
-                            continue;
-                        }
-                        let data_json = serde_json::to_string(&arr[2]).unwrap_or_else(|_| "{}".into());
-                        meta_stmt.execute(params![dict_id, expr, mode, data_json])?;
-                        meta_count += 1;
+                    let expr = arr[0].as_str().unwrap_or("");
+                    if expr.is_empty() {
+                        return Ok(());
                     }
-                }
-            } else if name.starts_with("kanji_bank_") {
-                if let Ok(Value::Array(rows)) = serde_json::from_slice::<Value>(bytes) {
-                    for row in rows {
-                        let Some(arr) = row.as_array() else { continue };
-                        if arr.len() < 5 {
-                            continue;
-                        }
-                        let character = arr[0].as_str().unwrap_or("");
-                        if character.is_empty() {
-                            continue;
-                        }
-                        let onyomi = arr[1].as_str().unwrap_or("");
-                        let kunyomi = arr[2].as_str().unwrap_or("");
-                        let tags = arr[3].as_str().unwrap_or("");
-                        let meanings_json = serde_json::to_string(&arr[4]).unwrap_or_else(|_| "[]".into());
-                        let stats_json = arr
-                            .get(5)
-                            .and_then(|v| serde_json::to_string(v).ok())
-                            .unwrap_or_else(|| "{}".into());
-                        kanji_stmt.execute(params![
-                            dict_id,
-                            character,
-                            onyomi,
-                            kunyomi,
-                            tags,
-                            meanings_json,
-                            stats_json
-                        ])?;
-                        kanji_count += 1;
+                    let reading = arr[1].as_str().unwrap_or("");
+                    let def_tags = arr[2].as_str().unwrap_or("");
+                    let rules = arr[3].as_str().unwrap_or("");
+                    let score = arr[4].as_i64().unwrap_or(0);
+                    let glossary_json =
+                        serde_json::to_string(&arr[5]).unwrap_or_else(|_| "[]".into());
+                    let seq = arr.get(6).and_then(|v| v.as_i64()).unwrap_or(0);
+                    let term_tags = arr.get(7).and_then(|v| v.as_str()).unwrap_or("");
+                    term_stmt.execute(params![
+                        dict_id,
+                        expr,
+                        reading,
+                        def_tags,
+                        rules,
+                        score,
+                        glossary_json,
+                        seq,
+                        term_tags
+                    ])?;
+                    term_count += 1;
+                    Ok(())
+                })?;
+            } else if base_name.starts_with("term_meta_bank_") {
+                stream_yomitan_bank_rows(entry, MAX_BANK_BYTES, |row| {
+                    let Some(arr) = row.as_array() else {
+                        return Ok(());
+                    };
+                    if arr.len() < 3 {
+                        return Ok(());
                     }
-                }
+                    let expr = arr[0].as_str().unwrap_or("");
+                    let mode = arr[1].as_str().unwrap_or("");
+                    if expr.is_empty() || mode.is_empty() {
+                        return Ok(());
+                    }
+                    let data_json =
+                        serde_json::to_string(&arr[2]).unwrap_or_else(|_| "{}".into());
+                    meta_stmt.execute(params![dict_id, expr, mode, data_json])?;
+                    meta_count += 1;
+                    Ok(())
+                })?;
+            } else if base_name.starts_with("kanji_bank_") {
+                stream_yomitan_bank_rows(entry, MAX_BANK_BYTES, |row| {
+                    let Some(arr) = row.as_array() else {
+                        return Ok(());
+                    };
+                    if arr.len() < 5 {
+                        return Ok(());
+                    }
+                    let character = arr[0].as_str().unwrap_or("");
+                    if character.is_empty() {
+                        return Ok(());
+                    }
+                    let onyomi = arr[1].as_str().unwrap_or("");
+                    let kunyomi = arr[2].as_str().unwrap_or("");
+                    let tags = arr[3].as_str().unwrap_or("");
+                    let meanings_json =
+                        serde_json::to_string(&arr[4]).unwrap_or_else(|_| "[]".into());
+                    let stats_json = arr
+                        .get(5)
+                        .and_then(|v| serde_json::to_string(v).ok())
+                        .unwrap_or_else(|| "{}".into());
+                    kanji_stmt.execute(params![
+                        dict_id,
+                        character,
+                        onyomi,
+                        kunyomi,
+                        tags,
+                        meanings_json,
+                        stats_json
+                    ])?;
+                    kanji_count += 1;
+                    Ok(())
+                })?;
             }
         }
     }
@@ -1266,6 +1485,13 @@ pub fn import_yomitan_zip_bytes(conn: &mut Connection, zip_bytes: &[u8]) -> Resu
         params![dict_id, term_count, kanji_count, meta_count],
     )?;
     tx.commit()?;
+
+    // Clear cached read-only connections so readers immediately observe newly imported tables/pages cleanly
+    if let Some(pool) = DICT_READ_POOL.get() {
+        if let Ok(mut map) = pool.lock() {
+            map.clear();
+        }
+    }
 
     Ok(DictionaryInfo {
         id: dict_id,
@@ -1302,22 +1528,44 @@ pub fn list_dictionaries(conn: &Connection) -> Result<Vec<DictionaryInfo>> {
 
 pub fn remove_dictionary(conn: &Connection, dict_id: i64) -> Result<()> {
     conn.execute("DELETE FROM dictionaries WHERE id = ?1", [dict_id])?;
+    if let Some(pool) = DICT_READ_POOL.get() {
+        if let Ok(mut map) = pool.lock() {
+            map.clear();
+        }
+    }
+    let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     Ok(())
 }
 
+fn dict_download_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(concat!(
+                "Kura/",
+                env!("CARGO_PKG_VERSION"),
+                " (+https://github.com/wantingCat/kura)"
+            ))
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 /// 1-click download of full Yomitan JMdict (English) + KanjiDic dictionaries from GitHub releases.
-pub async fn download_recommended_dictionaries(app: &AppHandle, data_dir: &Path) -> Result<Vec<DictionaryInfo>> {
-    let client = reqwest::Client::builder()
-        .user_agent("Kura/0.5.0 (+https://github.com/wantingCat/kura)")
-        .timeout(std::time::Duration::from_secs(120))
-        .build()?;
+pub async fn download_recommended_dictionaries(
+    app: &AppHandle,
+    data_dir: &Path,
+) -> Result<Vec<DictionaryInfo>> {
+    const MAX_DICT_ZIP_BYTES: usize = 128 * 1024 * 1024;
+    let client = dict_download_client();
 
     let _ = app.emit(
         "dictionary-progress",
         json!({ "stage": "discovering", "message": "Finding latest Yomitan JMdict & KanjiDic releases…" }),
     );
 
-    // Discover latest asset URLs from yomidevs/jmdict-yomitan releases (or fallback mirrors)
+    // Discover latest asset URLs from yomidevs/jmdict-yomitan releases
     let mut zip_urls: Vec<(&str, String)> = Vec::new();
     if let Ok(resp) = client
         .get("https://api.github.com/repos/yomidevs/jmdict-yomitan/releases/latest")
@@ -1352,13 +1600,22 @@ pub async fn download_recommended_dictionaries(app: &AppHandle, data_dir: &Path)
             "dictionary-progress",
             json!({ "stage": "downloading", "message": format!("Downloading {label}…") }),
         );
-        let bytes = client
+        let mut resp = client
             .get(&url)
             .send()
             .await
-            .with_context(|| format!("Failed to download {label}"))?
-            .bytes()
-            .await?;
+            .map_err(|e| anyhow!("Failed to download {label}: {}", e.without_url()))?;
+        if !resp.status().is_success() {
+            bail!("Failed to download {label} (HTTP {})", resp.status());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = resp.chunk().await? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_DICT_ZIP_BYTES {
+                bail!("{label} archive exceeds maximum allowed download size (128 MiB)");
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+
         let _ = app.emit(
             "dictionary-progress",
             json!({ "stage": "importing", "message": format!("Indexing {label} into SQLite…") }),
@@ -1388,11 +1645,12 @@ pub fn ensure_starter_dictionary(conn: &Connection) -> Result<()> {
     if has_any {
         return Ok(());
     }
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO dictionaries (title, revision, format, imported_at) VALUES ('Kura Built-in Core (Starter)', '1.0', 3, ?1)",
         [now()],
     )?;
-    let dict_id = conn.last_insert_rowid();
+    let dict_id = tx.last_insert_rowid();
 
     let starter_terms: &[(&str, &str, &str, &str, i64, &[&str], i64)] = &[
         ("食べる", "たべる", "v1 vt", "v1", 500, &["to eat", "to live on (e.g. a salary)"], 2),
@@ -1477,21 +1735,23 @@ pub fn ensure_starter_dictionary(conn: &Connection) -> Result<()> {
         ("ごめん", "ごめん", "int", "", 480, &["I'm sorry", "my apologies", "excuse me"], 0),
     ];
 
-    for (expr, read, def_tags, rules, score, glosses, pitch) in starter_terms {
-        let gloss_json = serde_json::to_string(glosses)?;
-        conn.execute(
+    {
+        let mut term_stmt = tx.prepare(
             "INSERT INTO terms (dict_id, expression, reading, definition_tags, rules, score, glossary_json, sequence, term_tags)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 'core')",
-            params![dict_id, expr, read, def_tags, rules, score, gloss_json],
         )?;
-        let pitch_json = json!({
-            "reading": read,
-            "pitches": [{ "position": pitch }]
-        });
-        conn.execute(
+        let mut meta_stmt = tx.prepare(
             "INSERT INTO term_meta (dict_id, expression, mode, data_json) VALUES (?1, ?2, 'pitch', ?3)",
-            params![dict_id, expr, pitch_json.to_string()],
         )?;
+        for (expr, read, def_tags, rules, score, glosses, pitch) in starter_terms {
+            let gloss_json = serde_json::to_string(glosses)?;
+            term_stmt.execute(params![dict_id, expr, read, def_tags, rules, score, gloss_json])?;
+            let pitch_json = json!({
+                "reading": read,
+                "pitches": [{ "position": pitch }]
+            });
+            meta_stmt.execute(params![dict_id, expr, pitch_json.to_string()])?;
+        }
     }
 
     let starter_kanji: &[(&str, &str, &str, &[&str], &str, &str)] = &[
@@ -1517,20 +1777,23 @@ pub fn ensure_starter_dictionary(conn: &Connection) -> Result<()> {
         ("人", "ジン ニン", "ひと", &["person"], "2", "N5"),
     ];
 
-    for (ch, on, kun, meanings, strokes, jlpt) in starter_kanji {
-        let meanings_json = serde_json::to_string(meanings)?;
-        let stats_json = json!({ "strokes": strokes, "jlpt": jlpt }).to_string();
-        conn.execute(
+    {
+        let mut kanji_stmt = tx.prepare(
             "INSERT INTO kanji (dict_id, character, onyomi, kunyomi, tags, meanings_json, stats_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![dict_id, ch, on, kun, jlpt, meanings_json, stats_json],
         )?;
+        for (ch, on, kun, meanings, strokes, jlpt) in starter_kanji {
+            let meanings_json = serde_json::to_string(meanings)?;
+            let stats_json = json!({ "strokes": strokes, "jlpt": jlpt }).to_string();
+            kanji_stmt.execute(params![dict_id, ch, on, kun, jlpt, meanings_json, stats_json])?;
+        }
     }
 
-    conn.execute(
+    tx.execute(
         "UPDATE dictionaries SET term_count = ?2, kanji_count = ?3, meta_count = ?2 WHERE id = ?1",
         params![dict_id, starter_terms.len() as i64, starter_kanji.len() as i64],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
