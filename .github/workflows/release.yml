@@ -60,7 +60,7 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Bundle libmpv-2.dll and portable mpv (Windows)
+      - name: Bundle libmpv-2.dll (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         env:
@@ -70,12 +70,11 @@ jobs:
           $dest = "src-tauri/resources/mpv"
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
-          $downloadedExe = $false
           $downloadedDll = $false
           $repos = @("zhongfly/mpv-winbuild", "shinchiro/mpv-winbuild-cmake")
           foreach ($repo in $repos) {
             try {
-              Write-Host "Checking recent libmpv and portable mpv releases from $repo..."
+              Write-Host "Checking recent libmpv releases from $repo..."
               $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=5" -Headers @{
                 Authorization = "Bearer $env:GH_TOKEN"
                 "User-Agent"  = "Kura-Release-Builder"
@@ -85,80 +84,82 @@ jobs:
                 if ($r.assets) { $allAssets += $r.assets }
               }
 
-              # 1. Download mpv-dev-x86_64 (contains libmpv-2.dll)
-              if (-not $downloadedDll) {
+              # Download mpv-dev-x86_64 (contains libmpv-2.dll for Kura's native built-in player)
+              $devAsset = $allAssets | Where-Object {
+                $_.name -match "^mpv-dev-x86_64-20.*\.7z$" -and $_.name -notmatch "v3"
+              } | Select-Object -First 1
+              if (-not $devAsset) {
                 $devAsset = $allAssets | Where-Object {
-                  $_.name -match "^mpv-dev-x86_64-20.*\.7z$" -and $_.name -notmatch "v3"
+                  $_.name -match "^mpv-dev-x86_64.*\.7z$"
                 } | Select-Object -First 1
-                if (-not $devAsset) {
-                  $devAsset = $allAssets | Where-Object {
-                    $_.name -match "^mpv-dev-x86_64.*\.7z$"
-                  } | Select-Object -First 1
-                }
-                if ($devAsset) {
-                  $devArchive = Join-Path $env:RUNNER_TEMP $devAsset.name
-                  Write-Host "Downloading $($devAsset.name) ($([math]::Round($devAsset.size / 1MB, 1)) MB)..."
-                  Invoke-WebRequest -Uri $devAsset.browser_download_url -OutFile $devArchive
-                  $devExtractDir = Join-Path $env:RUNNER_TEMP "mpv-dev-extract"
-                  if (Test-Path $devExtractDir) { Remove-Item -Recurse -Force $devExtractDir }
-                  7z x $devArchive "-o$devExtractDir" -y | Out-Null
-                  $libmpvDll = Get-ChildItem -Path $devExtractDir -Filter "libmpv-2.dll" -Recurse | Select-Object -First 1
-                  if ($libmpvDll) {
-                    $dllFolder = $libmpvDll.Directory.FullName
-                    Get-ChildItem -Path $dllFolder -Filter "*.dll" -File | ForEach-Object {
-                      Copy-Item -Path $_.FullName -Destination $dest -Force
-                    }
-                    $dllSize = [math]::Round((Get-Item (Join-Path $dest "libmpv-2.dll")).Length / 1MB, 1)
-                    Write-Host "Bundled libmpv-2.dll ($dllSize MB) from $($devAsset.name) into $dest"
-                    $downloadedDll = $true
-                  }
-                }
               }
-
-              # 2. Download mpv-x86_64 (contains mpv.exe and d3dcompiler)
-              if (-not $downloadedExe) {
-                $asset = $allAssets | Where-Object {
-                  $_.name -match "^mpv-x86_64-20.*\.7z$" -and $_.name -notmatch "v3" -and $_.name -notmatch "dev"
-                } | Select-Object -First 1
-                if (-not $asset) {
-                  $asset = $allAssets | Where-Object {
-                    $_.name -match "^mpv-x86_64.*\.7z$" -and $_.name -notmatch "dev"
-                  } | Select-Object -First 1
-                }
-                if ($asset) {
-                  $archive = Join-Path $env:RUNNER_TEMP $asset.name
-                  Write-Host "Downloading $($asset.name) ($([math]::Round($asset.size / 1MB, 1)) MB)..."
-                  Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive
-                  $extractDir = Join-Path $env:RUNNER_TEMP "mpv-extract"
-                  if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
-                  7z x $archive "-o$extractDir" -y | Out-Null
-                  $mpvExe = Get-ChildItem -Path $extractDir -Filter "mpv.exe" -Recurse | Select-Object -First 1
-                  if ($mpvExe) {
-                    $srcFolder = $mpvExe.Directory.FullName
-                    Copy-Item -Path (Join-Path $srcFolder "mpv.exe") -Destination $dest -Force
-                    Get-ChildItem -Path $srcFolder -Filter "*.dll" -File | ForEach-Object {
-                      Copy-Item -Path $_.FullName -Destination $dest -Force
-                    }
-                    $bundledSize = [math]::Round((Get-Item (Join-Path $dest "mpv.exe")).Length / 1MB, 1)
-                    Write-Host "Bundled mpv.exe ($bundledSize MB) from $($asset.name) into $dest"
-                    $downloadedExe = $true
+              if ($devAsset) {
+                $devArchive = Join-Path $env:RUNNER_TEMP $devAsset.name
+                Write-Host "Downloading $($devAsset.name) ($([math]::Round($devAsset.size / 1MB, 1)) MB)..."
+                Invoke-WebRequest -Uri $devAsset.browser_download_url -OutFile $devArchive
+                $devExtractDir = Join-Path $env:RUNNER_TEMP "mpv-dev-extract"
+                if (Test-Path $devExtractDir) { Remove-Item -Recurse -Force $devExtractDir }
+                7z x $devArchive "-o$devExtractDir" -y | Out-Null
+                $libmpvDll = Get-ChildItem -Path $devExtractDir -Filter "libmpv-2.dll" -Recurse | Select-Object -First 1
+                if ($libmpvDll) {
+                  $dllFolder = $libmpvDll.Directory.FullName
+                  Get-ChildItem -Path $dllFolder -Filter "*.dll" -File | ForEach-Object {
+                    Copy-Item -Path $_.FullName -Destination $dest -Force
                   }
+                  $dllSize = [math]::Round((Get-Item (Join-Path $dest "libmpv-2.dll")).Length / 1MB, 1)
+                  Write-Host "Bundled libmpv-2.dll ($dllSize MB) from $($devAsset.name) into $dest"
+                  $downloadedDll = $true
+                  break
                 }
-              }
-
-              if ($downloadedDll -and $downloadedExe) {
-                break
               }
             } catch {
-              Write-Warning "Failed to fetch mpv from ${repo}: $_"
+              Write-Warning "Failed to fetch libmpv from ${repo}: $_"
             }
           }
           if (-not $downloadedDll -or -not (Test-Path (Join-Path $dest "libmpv-2.dll"))) {
             throw "Could not download libmpv-2.dll from any release mirror"
           }
-          if (-not $downloadedExe -or -not (Test-Path (Join-Path $dest "mpv.exe"))) {
-            throw "Could not download portable mpv.exe from any release mirror"
-          }
+
+      - name: Extract release notes from src/lib/changelog.ts
+        id: notes
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const src = fs.readFileSync("src/lib/changelog.ts", "utf8").replace(/\r\n/g, "\n");
+            const ver = (process.env.TAG_NAME || "").replace(/^v/, "");
+            const verShort = ver.replace(/\.0$/, "");
+            const blocks = src.split(/\n  \{\s*\n\s*version:\s*"/).slice(1);
+            let body = "See the assets below to download Kura for Windows, macOS, or Linux.";
+            for (const raw of blocks) {
+              const vMatch = raw.match(/^([^"]+)"/);
+              if (!vMatch) continue;
+              const v = vMatch[1];
+              if (v === ver || v === verShort || v.replace(/\.0$/, "") === verShort) {
+                const title = (raw.match(/title:\s*"([^"]+)"/) || [])[1] || "";
+                const summary = (raw.match(/summary:\s*\n?\s*"([^"]+)"/) || [])[1] || "";
+                const itemRe = /\{\s*type:\s*"(new|improvement|fix)",\s*\n?\s*text:\s*"((?:\\.|[^"\\])*)"/g;
+                const groups = { new: [], improvement: [], fix: [] };
+                let m;
+                while ((m = itemRe.exec(raw)) !== null) {
+                  groups[m[1]].push(m[2].replace(/\\"/g, "\""));
+                }
+                const lines = [];
+                if (title) lines.push(`## ${title}`, "");
+                if (summary) lines.push(summary, "");
+                if (groups.new.length) lines.push("### New", ...groups.new.map(t => `- ${t}`), "");
+                if (groups.improvement.length) lines.push("### Improvements", ...groups.improvement.map(t => `- ${t}`), "");
+                if (groups.fix.length) lines.push("### Fixes & Security", ...groups.fix.map(t => `- ${t}`), "");
+                lines.push("---", "Download the installer for **Windows** (`.exe` / `.msi`), **macOS** (`.dmg`), or **Linux** (`.deb` / `.rpm` / `.AppImage`) below.");
+                body = lines.join("\n").trim();
+                break;
+              }
+            }
+            const delim = "EOF_" + Date.now();
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `body<<${delim}\n${body}\n${delim}\n`);
+          '
 
       - name: Stagger matrix upload to prevent latest.json race condition
         if: matrix.stagger > 0
@@ -175,7 +176,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Kura ${{ github.ref_name }}'
-          releaseBody: 'See the assets below to download Kura for Windows, macOS, or Linux.'
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           # Not marked as a pre-release even for alpha tags: the in-app updater reads
           # releases/latest, which GitHub never points at a pre-release.

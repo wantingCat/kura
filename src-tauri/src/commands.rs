@@ -4846,14 +4846,90 @@ pub async fn start_web_stream(
     req: crate::embedded_player::StartWebStreamReq,
 ) -> CmdResult<crate::embedded_player::BuiltinPlayerState> {
     // Bookmark in `stream_library` when playing a direct web stream
-    {
+    let player_kind = {
         let conn = st.db();
         let _ = conn.execute(
             "INSERT OR IGNORE INTO stream_library (anilist_id, added_at) VALUES (?1, ?2)",
             params![req.anilist_id, db::now()],
         );
+        crate::player::prefs(&conn).kind
+    };
+
+    // On Windows with Built-in Player selected, render inside Kura's embedded libmpv HWND surface.
+    // On Linux/macOS (or when an external player like MPV/VLC is chosen), route the proxied stream
+    // + companion soft-subs + auto-retimed Jimaku subtitles directly into the standalone player.
+    let use_embedded = cfg!(windows) && player_kind == crate::player::Kind::Builtin;
+    if use_embedded {
+        return crate::embedded_player::start_web_stream(app, st.inner().clone(), req).map_err(err);
     }
-    crate::embedded_player::start_web_stream(app, st.inner().clone(), req).map_err(err)
+
+    let proxy_url = crate::onlinestream::build_proxy_url(&req.url, &req.headers).map_err(err)?;
+    let mut extra_subs: Vec<String> = Vec::new();
+    let mut first_ref_url: Option<String> = None;
+
+    for sub in &req.subtitles {
+        let u = sub.url.trim();
+        if u.is_empty() {
+            continue;
+        }
+        let lang_low = sub.language.to_ascii_lowercase();
+        let lbl_low = sub.label.as_deref().unwrap_or("").to_ascii_lowercase();
+        if lang_low.contains("thumb") || lbl_low.contains("thumb") || u.to_ascii_lowercase().contains("thumbnails") {
+            continue;
+        }
+        if first_ref_url.is_none() && (lang_low.contains("eng") || lang_low == "en") {
+            first_ref_url = Some(u.to_string());
+        }
+        if let Ok(proxied_sub) = crate::onlinestream::build_proxy_url(u, &req.headers) {
+            extra_subs.push(proxied_sub);
+        }
+    }
+    if first_ref_url.is_none() {
+        first_ref_url = req.subtitles.first().map(|s| s.url.trim().to_string()).filter(|s| !s.is_empty());
+    }
+
+    let wants_jp = {
+        let conn = st.db_read();
+        crate::player::wants_japanese_subs(&crate::player::effective_track_prefs(&conn, req.anilist_id))
+    };
+    if wants_jp {
+        if let Ok(ep_num) = req.ep_key.parse::<i64>() {
+            let ref_cues = if let Some(ref ref_u) = first_ref_url {
+                crate::subtitles::fetch_remote_subtitle_cues(&st.providers.http, ref_u, &req.headers)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if let Some(jp_path) = crate::subtitles::auto_prepare_stream_subtitles(
+                &app,
+                st.inner(),
+                req.anilist_id,
+                &req.ep_key,
+                ep_num,
+                &ref_cues,
+                "Web Stream Soft-Sub (.vtt)",
+            )
+            .await
+            {
+                extra_subs.insert(0, jp_path);
+            }
+        }
+    }
+
+    crate::player::play_with_extra_subs(
+        app,
+        st.inner().clone(),
+        crate::player::Ep {
+            anilist_id: req.anilist_id,
+            ep_key: req.ep_key,
+            path: proxy_url,
+        },
+        extra_subs,
+    )
+    .map_err(err)?;
+
+    Ok(crate::embedded_player::BuiltinPlayerState::default())
 }
 
 #[tauri::command]

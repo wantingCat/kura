@@ -699,8 +699,51 @@ pub async fn install_mpv(app: AppHandle, st: Arc<AppState>) -> Result<InstallMpv
 
     #[cfg(not(any(windows, target_os = "macos")))]
     {
-        // No package-manager install on Linux (distro-specific); just point to mpv.io.
-        let _ = (&app, &st);
+        if check_tool_exists("pkexec") {
+            let pm: Option<(&str, &[&str])> = if check_tool_exists("dnf") {
+                Some(("dnf", &["dnf", "install", "-y", "mpv"]))
+            } else if check_tool_exists("apt-get") {
+                Some(("apt", &["apt-get", "install", "-y", "mpv"]))
+            } else if check_tool_exists("zypper") {
+                Some(("zypper", &["zypper", "--non-interactive", "install", "mpv"]))
+            } else if check_tool_exists("pacman") {
+                Some(("pacman", &["pacman", "-S", "--noconfirm", "mpv"]))
+            } else {
+                None
+            };
+
+            if let Some((method, args)) = pm {
+                let _ = app.emit(
+                    "mpv-install-progress",
+                    format!("Installing MPV via {method} (check system password prompt)..."),
+                );
+                let owned_args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+                let res = tokio::task::spawn_blocking(move || {
+                    std::process::Command::new("pkexec")
+                        .args(&owned_args)
+                        .status()
+                })
+                .await;
+                if let Ok(Ok(exit)) = res {
+                    if exit.success() {
+                        tokio::time::sleep(Duration::from_millis(800)).await;
+                        if let Some(p) = detect(Kind::Mpv) {
+                            let path_str = p.to_string_lossy().to_string();
+                            let conn = st.db();
+                            let _ = db::set_setting(&conn, "pref.player", "mpv");
+                            let _ = db::set_setting(&conn, "pref.player_path", &path_str);
+                            return Ok(InstallMpvResult {
+                                success: true,
+                                method: method.to_string(),
+                                message: format!("MPV successfully installed via {method}!"),
+                                path: Some(path_str),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         let _ = tauri_plugin_opener::open_url("https://mpv.io/installation/", None::<&str>);
         Ok(InstallMpvResult {
             success: false,
@@ -1907,6 +1950,20 @@ pub fn sync_discord_activity(st: &AppState, ep: &Ep, pos: f64, dur: f64, is_play
 
 /// Start playing an episode with the configured player. Returns immediately; tracking runs in the background.
 pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
+    play_with_extra_subs(app, st, ep, Vec::new())
+}
+
+/// Start playing an episode (local file, localhost torrent stream, or proxied web stream) with optional
+/// extra subtitle paths/URLs. On non-Windows platforms where the Win32 `HWND` embedded surface is unavailable,
+/// `Kind::Builtin` automatically routes to native single-window `mpv` with Kura's Tokyo Night OSD script,
+/// Anime4K shaders, subtitle sync, and IPC progress tracking.
+pub fn play_with_extra_subs(
+    app: AppHandle,
+    st: Arc<AppState>,
+    ep: Ep,
+    extra_subs: Vec<String>,
+) -> Result<()> {
+    #[cfg(windows)]
     {
         let conn = st.db();
         if prefs(&conn).kind == Kind::Builtin {
@@ -1914,9 +1971,12 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             return crate::embedded_player::start(app, st, ep);
         }
     }
-    let (p, start, track_prefs, linked_subs) = {
+    let (p, start, track_prefs, mut linked_subs, anime4k_preset) = {
         let conn = st.db();
-        let p = prefs(&conn);
+        let mut p = prefs(&conn);
+        if p.kind == Kind::Builtin {
+            p.kind = Kind::Mpv;
+        }
         let start = if p.resume { resume_point(saved_progress(&conn, ep.anilist_id, &ep.ep_key), p.threshold) } else { 0.0 };
         let track_prefs = effective_track_prefs(&conn, ep.anilist_id);
         let linked_subs = crate::subtitles::episode_subtitle_paths_for_pref(
@@ -1925,8 +1985,17 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             &ep.ep_key,
             track_prefs.sub.as_deref(),
         );
-        (p, start, track_prefs, linked_subs)
+        let anime4k_preset = db::get_setting(&conn, "pref.anime4k_preset")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "off".to_string());
+        (p, start, track_prefs, linked_subs, anime4k_preset)
     };
+    for s in extra_subs {
+        if !s.trim().is_empty() && !linked_subs.contains(&s) {
+            linked_subs.push(s);
+        }
+    }
     // Supersede any previous tracking session.
     let session = st.play_session.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -2036,6 +2105,12 @@ pub fn play(app: AppHandle, st: Arc<AppState>, ep: Ep) -> Result<()> {
             }
             for sub_path in &linked_subs {
                 cmd.arg(format!("--sub-file={sub_path}"));
+            }
+            if !anime4k_preset.trim().is_empty() && !anime4k_preset.eq_ignore_ascii_case("off") {
+                let shaders = crate::libmpv::resolve_shader_preset_paths(&anime4k_preset);
+                if !shaders.is_empty() {
+                    cmd.arg(format!("--glsl-shaders={shaders}"));
+                }
             }
             cmd.args([
                 "--osd-font=sans-serif",

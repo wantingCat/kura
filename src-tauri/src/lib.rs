@@ -265,7 +265,8 @@ pub fn run() {
             dht::warm_up();
 
             // Pre-warm the built-in libmpv engine & hidden Win32 video surface shortly after
-            // launch so the first click on Play opens instantaneously.
+            // launch on Windows so the first click on Play opens instantaneously.
+            #[cfg(windows)]
             {
                 let warm_app = app.handle().clone();
                 let warm_state = state.clone();

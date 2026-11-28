@@ -37,8 +37,8 @@
     "publisher": "Kura contributors",
     "copyright": "Copyright © 2026 Kura contributors. Licensed under GPL-3.0-or-later.",
     "category": "Video",
-    "shortDescription": "A local-first anime library",
-    "longDescription": "Kura scans your local anime folders, matches them with AniList, and presents them as a beautiful library with episode metadata and watch tracking.",
+    "shortDescription": "A Japanese immersion suite for anime",
+    "longDescription": "Kura combines a local & streaming anime library, native libmpv playback with Anime4K shaders, automatic Jimaku Japanese subtitle retiming, pause-to-hover Yomitan dictionary lookups, vocabulary revision tracking, and two-way AniList sync.",
     "license": "GPL-3.0-or-later",
     "licenseFile": "../LICENSE",
     "icon": [
@@ -54,6 +54,9 @@
     ],
     "linux": {
       "deb": {
+        "depends": ["mpv"]
+      },
+      "rpm": {
         "depends": ["mpv"]
       }
     },
