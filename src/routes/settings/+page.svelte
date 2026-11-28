@@ -178,6 +178,14 @@
       evictExtensionWorker(installed.id);
       invalidateOnlinestreamCache();
       await app.refreshExtensions();
+      if (installed.extType === "onlinestream-provider" && !app.hasEnabledTorrentProvider) {
+        await app.setStreamSource("web");
+      } else if (installed.extType === "anime-torrent-provider" && !app.hasEnabledWebStreamProvider) {
+        await app.setStreamSource("torrent");
+      }
+      if (app.appMode === "local") {
+        await app.setAppMode("streaming");
+      }
       app.toast(`Installed "${installed.name}" v${installed.version}`, "info", 4000);
     } catch (e) {
       app.toast(cleanExtensionError(e), "error", 6000);
@@ -247,6 +255,7 @@
   async function toggleExtension(ext: TorrentExtension) {
     try {
       torrentExtensions = await api.toggleTorrentExtension(ext.id, !ext.enabled);
+      await app.refreshExtensions();
     } catch (e) {
       app.toast(String(e), "error", 5000);
     }
@@ -255,6 +264,7 @@
   async function removeExtension(id: string) {
     try {
       torrentExtensions = await api.removeTorrentExtension(id);
+      await app.refreshExtensions();
     } catch (e) {
       app.toast(String(e), "error", 5000);
     }

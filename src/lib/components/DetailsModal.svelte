@@ -124,8 +124,9 @@
   const specials = $derived(d?.episodeList.filter((e) => e.isSpecial) ?? []);
   const owned = $derived(regular.filter((e) => e.files.length > 0).length);
   const totalEps = $derived(Math.max(d?.episodes ?? 0, regular.length));
+  const effectiveMode = $derived<"local" | "streaming">(app.canStream ? "streaming" : app.appMode);
   // Same rule as /anime/[id]: an episode left part-way wins over the first unwatched one.
-  const nextUp = $derived(computeNextUp(d, app.appMode));
+  const nextUp = $derived(computeNextUp(d, effectiveMode));
   /** Fully-watched shows still get a primary action: rewatch the first owned episode. */
   const ctaEp = $derived(nextUp ?? regular.find((e) => e.files.length > 0) ?? null);
   const rewatch = $derived(!nextUp && !!ctaEp);
@@ -200,7 +201,7 @@
       await app.play(d.anilistId, e.epKey, f.path);
       return;
     }
-    if (app.appMode === "streaming") {
+    if (app.canStream) {
       const action = await app.playStreamEpisode(d, e.number);
       if (action === "open_web_picker") {
         webTarget = { epKey: e.epKey, epNumber: e.number };
@@ -366,7 +367,7 @@
               {@const playingNow = app.isPlaying(d.anilistId, ctaEp.epKey)}
               {@const isMovie = d.format === "MOVIE"}
               {@const verb = ctaEp.progressPos ? "Resume" : rewatch ? "Watch again" : "Play"}
-              {#if ctaEp.files.length > 0 || app.appMode === "streaming"}
+              {#if ctaEp.files.length > 0 || app.canStream}
                 <button
                   class="btn btn-cta dm-cta"
                   class:launching
@@ -417,7 +418,7 @@
                 {#if anilistSaving}<span class="spinner spinner-sm"></span>{:else}<Icon name="plus" size={18} />{/if}
               </button>
             {/if}
-            {#if d && app.appMode === "streaming" && owned === 0}
+            {#if d && app.canStream && owned === 0}
               <button
                 class="dm-round"
                 onclick={toggleStreamLibrary}
@@ -427,6 +428,30 @@
                 aria-pressed={!!d.inStreamLibrary}
               >
                 <Icon name={d.inStreamLibrary ? "check" : "plus"} size={18} />
+              </button>
+            {/if}
+            {#if d && app.canStream && (ctaEp || regular[0])}
+              <button
+                class="dm-round"
+                onclick={() => {
+                  const target = ctaEp ?? regular[0];
+                  if (target) webTarget = { epKey: target.epKey, epNumber: target.number };
+                }}
+                aria-label="Web Sources"
+                title="Choose web streaming server or rematch anime"
+              >
+                <Icon name="sparkles" size={17} />
+              </button>
+              <button
+                class="dm-round"
+                onclick={() => {
+                  const target = ctaEp ?? regular[0];
+                  if (target) torrentTarget = { epKey: target.epKey, epNumber: target.number, autoStart: false };
+                }}
+                aria-label="Torrents"
+                title="Choose torrent release to stream or download"
+              >
+                <Icon name="download" size={17} />
               </button>
             {/if}
             {#if viewId !== null && !(d && !ctaEp)}
@@ -619,7 +644,7 @@
                       >
                         {@render epInner(e, thumb, pct, launchingThis, playingThis, isNext, true)}
                       </button>
-                    {:else if app.appMode === "streaming"}
+                    {:else if app.canStream}
                       <button
                         class="dm-ep-btn"
                         onclick={() => play(e)}

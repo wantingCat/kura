@@ -1061,6 +1061,14 @@ pub async fn extension_http_fetch(req: ExtensionFetchReq) -> Result<ExtensionFet
     let mut current_url = req.url.trim().to_string();
     let mut redirected = false;
     let mut final_resp_opt: Option<(reqwest::Response, reqwest::Url)> = None;
+    let mut cookie_jar: HashMap<String, String> = HashMap::new();
+    let mut set_cookie_history: Vec<String> = Vec::new();
+    if let Some(existing_cookie) = current_headers
+        .get(COOKIE)
+        .and_then(|v| v.to_str().ok())
+    {
+        parse_cookie_pairs_into_jar(existing_cookie, &mut cookie_jar);
+    }
 
     for hop in 0..=10 {
         let (hop_url, domain_opt, addrs) = validate_and_resolve_public_url(&current_url)
@@ -1092,6 +1100,8 @@ pub async fn extension_http_fetch(req: ExtensionFetchReq) -> Result<ExtensionFet
             bail!("redirect disallowed by redirect=error");
         }
 
+        collect_set_cookie_headers(resp.headers(), &mut cookie_jar, &mut set_cookie_history);
+
         if follow_redirects && matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
             if let Some(loc_val) = resp.headers().get(LOCATION) {
                 if hop >= 10 {
@@ -1103,10 +1113,18 @@ pub async fn extension_http_fetch(req: ExtensionFetchReq) -> Result<ExtensionFet
                 let next_url = hop_url
                     .join(loc_str)
                     .context("Invalid redirect Location URL")?;
-                if !same_origin(&hop_url, &next_url) {
+                if same_origin(&hop_url, &next_url) {
+                    if let Some(merged_cookie) = format_cookie_jar_header(&cookie_jar) {
+                        if let Ok(hv) = HeaderValue::from_str(&merged_cookie) {
+                            current_headers.insert(COOKIE, hv);
+                        }
+                    }
+                } else {
                     current_headers.remove(AUTHORIZATION);
                     current_headers.remove(PROXY_AUTHORIZATION);
                     current_headers.remove(COOKIE);
+                    cookie_jar.clear();
+                    set_cookie_history.clear();
                 }
                 let code = resp.status().as_u16();
                 if code == 303
@@ -1141,7 +1159,7 @@ pub async fn extension_http_fetch(req: ExtensionFetchReq) -> Result<ExtensionFet
 
     let mut headers = HashMap::new();
     let mut raw_headers: HashMap<String, Vec<String>> = HashMap::new();
-    let mut cookies = HashMap::new();
+    let cookies = cookie_jar;
 
     for (name, val) in resp.headers().iter() {
         let val_str = val.to_str().unwrap_or("").to_string();
@@ -1150,15 +1168,13 @@ pub async fn extension_http_fetch(req: ExtensionFetchReq) -> Result<ExtensionFet
         raw_headers
             .entry(key_lower)
             .or_default()
-            .push(val_str.clone());
-
-        if name == SET_COOKIE {
-            if let Some(first_pair) = val_str.split(';').next() {
-                if let Some((ck, cv)) = first_pair.split_once('=') {
-                    cookies.insert(ck.trim().to_string(), cv.trim().to_string());
-                }
-            }
-        }
+            .push(val_str);
+    }
+    if !set_cookie_history.is_empty() {
+        headers
+            .entry("set-cookie".to_string())
+            .or_insert_with(|| set_cookie_history.join(", "));
+        raw_headers.insert("set-cookie".to_string(), set_cookie_history);
     }
 
     if let Some(cl) = resp.content_length() {
@@ -1204,6 +1220,50 @@ pub async fn extension_http_fetch(req: ExtensionFetchReq) -> Result<ExtensionFet
         body_text,
         body_base64,
     })
+}
+
+fn parse_cookie_pairs_into_jar(cookie_header: &str, jar: &mut HashMap<String, String>) {
+    for part in cookie_header.split(';') {
+        if let Some((k, v)) = part.split_once('=') {
+            let key = k.trim();
+            if !key.is_empty() {
+                jar.insert(key.to_string(), v.trim().to_string());
+            }
+        }
+    }
+}
+
+fn collect_set_cookie_headers(
+    headers: &HeaderMap,
+    jar: &mut HashMap<String, String>,
+    raw_list: &mut Vec<String>,
+) {
+    for val in headers.get_all(SET_COOKIE).iter() {
+        if let Ok(val_str) = val.to_str() {
+            raw_list.push(val_str.to_string());
+            if let Some(first_pair) = val_str.split(';').next() {
+                if let Some((ck, cv)) = first_pair.split_once('=') {
+                    let key = ck.trim();
+                    if !key.is_empty() {
+                        jar.insert(key.to_string(), cv.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn format_cookie_jar_header(jar: &HashMap<String, String>) -> Option<String> {
+    if jar.is_empty() {
+        return None;
+    }
+    let mut keys: Vec<&String> = jar.keys().collect();
+    keys.sort();
+    let pairs: Vec<String> = keys
+        .into_iter()
+        .filter_map(|k| jar.get(k).map(|v| format!("{k}={v}")))
+        .collect();
+    Some(pairs.join("; "))
 }
 
 #[cfg(test)]
@@ -1320,5 +1380,31 @@ mod tests {
             let u = reqwest::Url::parse(allowed).unwrap();
             assert!(is_safe_redirect_url(&u), "expected {allowed} to be allowed");
         }
+    }
+
+    #[test]
+    fn redirect_cookie_jar_collects_and_formats_set_cookie_headers() {
+        let mut jar = HashMap::new();
+        let mut raw = Vec::new();
+        parse_cookie_pairs_into_jar("theme=dark; lang=ja", &mut jar);
+
+        let mut hop_headers = HeaderMap::new();
+        hop_headers.append(
+            SET_COOKIE,
+            HeaderValue::from_static("sid=abc123; Path=/; HttpOnly"),
+        );
+        hop_headers.append(
+            SET_COOKIE,
+            HeaderValue::from_static("cf_clearance=xyz987; Path=/; Secure"),
+        );
+        collect_set_cookie_headers(&hop_headers, &mut jar, &mut raw);
+
+        assert_eq!(raw.len(), 2);
+        assert_eq!(jar.get("sid").map(String::as_str), Some("abc123"));
+        assert_eq!(jar.get("cf_clearance").map(String::as_str), Some("xyz987"));
+        assert_eq!(
+            format_cookie_jar_header(&jar).as_deref(),
+            Some("cf_clearance=xyz987; lang=ja; sid=abc123; theme=dark")
+        );
     }
 }

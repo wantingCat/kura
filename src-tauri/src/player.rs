@@ -2077,6 +2077,7 @@ pub fn play_with_extra_subs(
                     "--demuxer-max-back-bytes=50MiB",
                     "--demuxer-readahead-secs=30",
                     "--force-seekable=yes",
+                    "--demuxer-lavf-o=allowed_extensions=ALL,allowed_segment_extensions=ALL",
                 ]);
             }
             if p.autoplay {

@@ -242,9 +242,35 @@ pub fn build_proxy_url(target_url: &str, headers: &HashMap<String, String>) -> R
     ))
 }
 
+fn proxy_path_for_target(target_url: &str) -> &'static str {
+    let path = target_url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(target_url)
+        .to_ascii_lowercase();
+    if path.ends_with(".m3u8") {
+        "/proxy/playlist.m3u8"
+    } else if path.ends_with(".mp4") || path.ends_with(".m4v") {
+        "/proxy/video.mp4"
+    } else if path.ends_with(".m4s") {
+        "/proxy/segment.m4s"
+    } else if path.ends_with(".vtt") {
+        "/proxy/sub.vtt"
+    } else if path.ends_with(".srt") {
+        "/proxy/sub.srt"
+    } else if path.ends_with(".ass") || path.ends_with(".ssa") {
+        "/proxy/sub.ass"
+    } else if path.ends_with(".key") {
+        "/proxy/enc.key"
+    } else {
+        "/proxy/segment.ts"
+    }
+}
+
 fn format_proxied_url(proxy_base: &str, token: &str, target_url: &str, hdrs_b64: &str) -> String {
+    let proxy_path = proxy_path_for_target(target_url);
     format!(
-        "{proxy_base}/proxy?token={}&url={}&hdrs={}",
+        "{proxy_base}{proxy_path}?token={}&url={}&hdrs={}",
         url_encode_component(token),
         url_encode_component(target_url),
         url_encode_component(hdrs_b64),
@@ -390,7 +416,7 @@ async fn handle_proxy_connection(
     }
 
     let (path, query) = raw_target.split_once('?').unwrap_or((raw_target, ""));
-    if path != "/proxy" {
+    if path != "/proxy" && !path.starts_with("/proxy/") {
         stream
             .write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
             .await?;
@@ -751,5 +777,32 @@ https://cdn.example.org/valid.ts
         );
         assert!(capped.lines().count() <= MAX_M3U8_LINES);
         assert!(capped.len() <= MAX_M3U8_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn proxied_urls_carry_ffmpeg_compatible_extensions() {
+        let m3u8 = format_proxied_url(
+            "http://127.0.0.1:50000",
+            "tok",
+            "https://cdn.example.org/hls/master.m3u8?sig=1",
+            "aGRycw==",
+        );
+        assert!(m3u8.starts_with("http://127.0.0.1:50000/proxy/playlist.m3u8?"));
+
+        let disguised_seg = format_proxied_url(
+            "http://127.0.0.1:50000",
+            "tok",
+            "https://cdn.example.org/chunks/0001.jpg?sig=2",
+            "aGRycw==",
+        );
+        assert!(disguised_seg.starts_with("http://127.0.0.1:50000/proxy/segment.ts?"));
+
+        let vtt = format_proxied_url(
+            "http://127.0.0.1:50000",
+            "tok",
+            "https://cdn.example.org/subs/en.vtt",
+            "aGRycw==",
+        );
+        assert!(vtt.starts_with("http://127.0.0.1:50000/proxy/sub.vtt?"));
     }
 }

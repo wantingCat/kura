@@ -16,10 +16,35 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.0.0",
+    title: "Kura 1.0 — Cross-Platform Native Playback, Reliable Extension Streaming & Automated Test Suite",
+    date: "November 2026",
+    badge: "Latest",
+    summary:
+      "Kura 1.0 marks the first full milestone release — uniting the Tokyo Night (蔵 · 東京ナイト) immersion experience with rock-solid Seanime web & torrent extension playback, single-window native mpv integration across Windows, Linux, and macOS, RPM + DEB packaging, slimmed installer bundles, and end-to-end Rust + Vitest automated test coverage.",
+    items: [
+      {
+        type: "new",
+        text: "Cross-Platform Single-Window Playback & Linux RPM/DEB Support: native libmpv surface on Windows paired with single-window Tokyo Night Lua mpv OSD, Anime4K GLSL shaders, and automatic package-manager dependency handling on Linux (.deb & .rpm) and macOS.",
+      },
+      {
+        type: "fix",
+        text: "End-to-End Extension Video Playback Overhaul: FFmpeg 7+ HLS proxy segment compatibility, automatic Streaming Mode activation on extension install, Sub-over-Dub server prioritization, graceful stream fallback when providers omit external subtitle arrays, same-origin redirect cookie jar support, and case-insensitive Fetch Headers (.get/.has) + Buffer.isBuffer worker compatibility.",
+      },
+      {
+        type: "improvement",
+        text: "Clear Stream Load Diagnostics & Slimmer Windows Installer: surfaces libmpv stream load errors immediately instead of stalling on a black frame, and trims redundant binaries from the Windows installer.",
+      },
+      {
+        type: "improvement",
+        text: "Automated Frontend & Backend Test Suites: Vitest unit test coverage for title matching, Japanese pitch-accent mora splitting, LRU caches, Seanime sandboxed worker shims, and stream resolution alongside 88 Rust unit tests in CI.",
+      },
+    ],
+  },
+  {
     version: "0.9.0",
     title: "Tokyo Night Redesign, Seanime Web & Torrent Extensions, Anime4K Upscaling & Security Overhaul",
     date: "November 2026",
-    badge: "Latest",
     summary:
       "Kura 0.9.0 introduces the Tokyo Night (蔵 · 東京ナイト) visual redesign, full compatibility with Seanime web-streaming and torrent extensions in a hardened Web Worker sandbox, real-time Anime4K GPU upscaling shaders, encrypted BitTorrent peer streaming with batch file selection and 85% next-episode preloading, and a 58-point security, memory, and SQLite performance overhaul.",
     items: [

@@ -164,6 +164,7 @@ export async function searchProviderAnime(
   ext: InstalledExtension,
   detail: MediaDetail,
   customQuery?: string,
+  preferDub = false,
 ): Promise<OnlinestreamSearchResult[]> {
   const media = buildSeanimeMedia(detail);
   const queries = customQuery?.trim()
@@ -181,7 +182,7 @@ export async function searchProviderAnime(
       onlinestreamProviderHost.search(ext, {
         media,
         query: q,
-        dub: false,
+        dub: preferDub,
         year: detail.seasonYear ?? undefined,
       }),
     ),
@@ -191,14 +192,24 @@ export async function searchProviderAnime(
   for (const res of settled) {
     if (res.status !== "fulfilled" || !Array.isArray(res.value)) continue;
     for (const item of res.value) {
-      if (!item?.id || item.subOrDub === "dub") continue;
+      if (!item?.id) continue;
       if (!byId.has(item.id)) byId.set(item.id, item);
     }
   }
 
   const list = Array.from(byId.values());
+  const subDubBonus = (item: OnlinestreamSearchResult): number => {
+    if (!item.subOrDub || item.subOrDub === "both") return 0;
+    const isDub = item.subOrDub.toLowerCase() === "dub";
+    return isDub === preferDub ? 0.15 : -0.45;
+  };
   if (!customQuery?.trim()) {
-    list.sort((a, b) => scoreProviderCandidate(b.title, detail) - scoreProviderCandidate(a.title, detail));
+    list.sort(
+      (a, b) =>
+        scoreProviderCandidate(b.title, detail) +
+        subDubBonus(b) -
+        (scoreProviderCandidate(a.title, detail) + subDubBonus(a)),
+    );
   }
   return list;
 }
@@ -207,8 +218,9 @@ async function resolveProviderEpisodes(
   ext: InstalledExtension,
   detail: MediaDetail,
   forceRefresh = false,
+  preferDub = false,
 ): Promise<CachedEpisodeContainer> {
-  const cacheKey = `${ext.id}:${detail.anilistId}`;
+  const cacheKey = `${ext.id}:${detail.anilistId}:${preferDub ? "dub" : "sub"}`;
   if (!forceRefresh) {
     const hit = episodeListCache.get(cacheKey);
     if (hit && Date.now() - hit.fetchedAt < EP_LIST_TTL_MS) {
@@ -222,7 +234,7 @@ async function resolveProviderEpisodes(
   let matchedTitle = manual?.providerTitle ?? "";
 
   if (!matchedId) {
-    const results = await searchProviderAnime(ext, detail);
+    const results = await searchProviderAnime(ext, detail, undefined, preferDub);
     if (results.length === 0) {
       throw new Error(`${ext.name}: Could not find "${detail.titleEnglish ?? detail.titleRomaji}"`);
     }
@@ -241,19 +253,25 @@ async function resolveProviderEpisodes(
   return container;
 }
 
+function isDubServerName(name: string): boolean {
+  return /\bdub(?:bed)?\b/i.test(name ?? "");
+}
+
 export async function resolveEpisodeOptionsForProvider(
   ext: InstalledExtension,
   detail: MediaDetail,
   episodeNum: number,
   softSubOnly: boolean,
   forceRefresh = false,
+  preferDub = false,
 ): Promise<{
   matchedId: string;
   matchedTitle: string;
   options: ResolvedWebStreamOption[];
+  allOptions: ResolvedWebStreamOption[];
   hardsubSkippedCount: number;
 }> {
-  const container = await resolveProviderEpisodes(ext, detail, forceRefresh);
+  const container = await resolveProviderEpisodes(ext, detail, forceRefresh, preferDub);
   const epDetails =
     container.episodes.find((e) => Number(e.number) === episodeNum) ??
     (detail.format === "MOVIE" && episodeNum === 1 ? container.episodes[0] : undefined);
@@ -271,7 +289,16 @@ export async function resolveEpisodeOptionsForProvider(
   }
   if (servers.length === 0) servers = ["default"];
 
+  // Prioritize Sub servers when Japanese audio is preferred (and Dub servers when English audio is preferred).
+  servers = [...servers].sort((a, b) => {
+    const aMatches = isDubServerName(a) === preferDub;
+    const bMatches = isDubServerName(b) === preferDub;
+    if (aMatches !== bMatches) return aMatches ? -1 : 1;
+    return 0;
+  });
+
   const options: ResolvedWebStreamOption[] = [];
+  const allOptions: ResolvedWebStreamOption[] = [];
   let hardsubSkippedCount = 0;
 
   const topServers = servers.slice(0, 4);
@@ -302,11 +329,7 @@ export async function resolveEpisodeOptionsForProvider(
       if (!vs?.url) continue;
       const subs = extractValidSubtitles(vs);
       const isSoft = subs.length > 0;
-      if (softSubOnly && !isSoft) {
-        hardsubSkippedCount++;
-        continue;
-      }
-      options.push({
+      const resolvedOpt: ResolvedWebStreamOption = {
         providerId: ext.id,
         providerName: ext.name,
         matchedAnimeId: container.matchedId,
@@ -319,19 +342,31 @@ export async function resolveEpisodeOptionsForProvider(
         headers,
         subtitles: subs,
         isSoftSub: isSoft,
-      });
+      };
+      allOptions.push(resolvedOpt);
+      if (softSubOnly && !isSoft) {
+        hardsubSkippedCount++;
+        continue;
+      }
+      options.push(resolvedOpt);
     }
   }
 
-  options.sort((a, b) => {
+  const sortOpts = (a: ResolvedWebStreamOption, b: ResolvedWebStreamOption) => {
+    const aAudioMatch = isDubServerName(a.server) === preferDub;
+    const bAudioMatch = isDubServerName(b.server) === preferDub;
+    if (aAudioMatch !== bAudioMatch) return aAudioMatch ? -1 : 1;
     if (a.isSoftSub !== b.isSoftSub) return a.isSoftSub ? -1 : 1;
     return qualityScore(b.quality) - qualityScore(a.quality);
-  });
+  };
+  options.sort(sortOpts);
+  allOptions.sort(sortOpts);
 
   return {
     matchedId: container.matchedId,
     matchedTitle: container.matchedTitle,
     options,
+    allOptions,
     hardsubSkippedCount,
   };
 }
@@ -343,7 +378,8 @@ export async function resolveEpisodeOptionsForProvider(
 export async function autoPlayWebEpisode(
   detail: MediaDetail,
   episodeNum: number,
-  softSubOnly = true,
+  softSubOnly = false,
+  preferDub = false,
 ): Promise<ResolvedWebStreamOption> {
   const providers = await listEnabledOnlinestreamProviders();
   if (providers.length === 0) {
@@ -353,27 +389,38 @@ export async function autoPlayWebEpisode(
   }
 
   const errors: string[] = [];
-  let totalHardsubSkipped = 0;
+  let bestHardsubFallback: ResolvedWebStreamOption | null = null;
 
   for (const ext of providers) {
     try {
-      const res = await resolveEpisodeOptionsForProvider(ext, detail, episodeNum, softSubOnly);
-      totalHardsubSkipped += res.hardsubSkippedCount;
+      const res = await resolveEpisodeOptionsForProvider(
+        ext,
+        detail,
+        episodeNum,
+        softSubOnly,
+        false,
+        preferDub,
+      );
       if (res.options.length > 0) {
         const picked = res.options[0];
         await launchResolvedWebOption(detail.anilistId, String(episodeNum), picked);
         return picked;
+      }
+      if (!bestHardsubFallback && res.allOptions.length > 0) {
+        bestHardsubFallback = res.allOptions[0];
       }
     } catch (e) {
       errors.push(e instanceof Error ? e.message : String(e));
     }
   }
 
-  if (softSubOnly && totalHardsubSkipped > 0) {
-    throw new Error(
-      `HARD_SUB_ONLY: Found ${totalHardsubSkipped} stream(s), but all had burned-in hardsubs (skipped by Soft-Sub Only mode). Open Web Sources to allow hardsub fallback or switch to Torrent.`,
-    );
+  // If soft-sub preference filtered out all streams, still play the best available stream
+  // instead of stranding playback when a provider uses HLS-embedded or burned-in subtitles!
+  if (bestHardsubFallback) {
+    await launchResolvedWebOption(detail.anilistId, String(episodeNum), bestHardsubFallback);
+    return bestHardsubFallback;
   }
+
   throw new Error(errors[0] || "No working web stream sources found for this episode.");
 }
 

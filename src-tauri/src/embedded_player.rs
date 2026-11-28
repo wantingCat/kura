@@ -675,6 +675,32 @@ fn run_mpv_event_loop(app: AppHandle, st: Arc<AppState>, mpv: MpvInstance) {
                         }
                     });
                 }
+            } else if end_ev.reason == crate::libmpv::MPV_END_FILE_REASON_ERROR {
+                klog!(
+                    "[libmpv] Playback failed with MPV_END_FILE_REASON_ERROR (code {})",
+                    end_ev.error
+                );
+                let failed_state = {
+                    let mut g = runtime().lock().unwrap_or_else(|e| e.into_inner());
+                    if g.state.active {
+                        g.state.active = false;
+                        g.state.paused = true;
+                        Some(g.state.clone())
+                    } else {
+                        None
+                    }
+                };
+                if let Some(snap) = failed_state {
+                    libmpv::sync_surface_bounds(&app, false);
+                    emit_state(&app, &snap);
+                    let _ = app.emit(
+                        "scan-error",
+                        format!(
+                            "Video stream failed to load (mpv code {}). Try another server or source.",
+                            end_ev.error
+                        ),
+                    );
+                }
             }
             continue;
         }

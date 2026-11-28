@@ -11,6 +11,7 @@ import {
   type PlaybackEvent,
   type PlayerKind,
   type ScanProgress,
+  type TorrentExtension,
   type TorrentSessionStatus,
   type UnmatchedGroup,
 } from "./api";
@@ -120,8 +121,8 @@ class AppStore {
   torrentSeeding = $state(true);
   /** Default stream backend for unowned episodes ("web" = Direct Soft-Sub Web Stream, "torrent" = BitTorrent Swarm). */
   streamSource = $state<"web" | "torrent">("web");
-  /** Enforce clean soft-sub streams only (skip burned-in hardsub servers unless manually overridden). */
-  streamSoftSubOnly = $state(true);
+  /** Enforce clean soft-sub streams only in the manual Web Sources picker (auto-play always prefers soft-subs first, then falls back cleanly). */
+  streamSoftSubOnly = $state(false);
   /** Default Anime4K real-time GPU shader preset in native libmpv. */
   anime4kPreset = $state<Anime4kPreset>("off");
   /** Auto-select release profile preferences for torrent scoring. */
@@ -131,6 +132,7 @@ class AppStore {
   torrentExclude = $state("");
   extensionMarketplaceUrl = $state("");
   installedExtensions = $state<InstalledExtension[]>([]);
+  torrentExtensions = $state<TorrentExtension[]>([]);
   torrentSessions = $state<TorrentSessionStatus[]>([]);
   discord = $state<DiscordPrefs>({
     enabled: true,
@@ -199,7 +201,13 @@ class AppStore {
       }, 2500);
       this.scheduleRefresh();
     });
-    await events.onScanError((msg) => (this.lastError = msg));
+    await events.onScanError((msg) => {
+      this.lastError = msg;
+      if (msg && msg.startsWith("Video stream failed")) {
+        this.launching = null;
+        this.toast(msg, "warn", 7000);
+      }
+    });
     await events.onAiringNotification((n) => {
       this.recordAlert(n);
       this.toast(n.message, "info", 10000, n.anilistId);
@@ -302,7 +310,12 @@ class AppStore {
         try {
           const detail = await getCachedOrLoadMediaDetail(ev.anilistId);
           this.launching = { anilistId: ev.anilistId, epKey: String(ev.nextEpisode) };
-          const picked = await autoPlayWebEpisode(detail, ev.nextEpisode, this.streamSoftSubOnly);
+          const picked = await autoPlayWebEpisode(
+            detail,
+            ev.nextEpisode,
+            this.streamSoftSubOnly,
+            this.playback.audioLang === "eng",
+          );
           this.toast(
             `Playing Ep ${ev.nextEpisode} via ${picked.providerName} (${picked.server})…`,
             "info",
@@ -384,7 +397,7 @@ class AppStore {
       this.torrentAutoSubs = prefs.torrent_auto_subs !== "0";
       this.torrentSeeding = prefs.torrent_seeding !== "0";
       this.streamSource = prefs.stream_source === "torrent" ? "torrent" : "web";
-      this.streamSoftSubOnly = prefs.stream_softsub_only !== "0";
+      this.streamSoftSubOnly = prefs.stream_strict_softsub === "1";
       this.anime4kPreset =
         prefs.anime4k_preset === "a_fast" ||
         prefs.anime4k_preset === "a_hq" ||
@@ -548,17 +561,35 @@ class AppStore {
   }
 
   async refreshExtensions() {
-    try {
-      this.installedExtensions = await api.listExtensions();
-      this.#extensionsLoaded = true;
-    } catch {
-      this.installedExtensions = [];
-    }
+    const [seanimeRes, torrentRes] = await Promise.allSettled([
+      api.listExtensions(),
+      api.listTorrentExtensions(),
+    ]);
+    this.installedExtensions = seanimeRes.status === "fulfilled" ? seanimeRes.value : [];
+    this.torrentExtensions = torrentRes.status === "fulfilled" ? torrentRes.value : [];
+    this.#extensionsLoaded = true;
   }
 
   get hasEnabledWebStreamProvider(): boolean {
     return this.installedExtensions.some(
       (e) => e.enabled && e.extType === "onlinestream-provider",
+    );
+  }
+
+  get hasEnabledTorrentProvider(): boolean {
+    return (
+      this.installedExtensions.some(
+        (e) => e.enabled && e.extType === "anime-torrent-provider",
+      ) || this.torrentExtensions.some((e) => e.enabled)
+    );
+  }
+
+  /** True whenever Streaming Mode is enabled OR at least one web/torrent extension is active. */
+  get canStream(): boolean {
+    return (
+      this.appMode === "streaming" ||
+      this.hasEnabledWebStreamProvider ||
+      this.hasEnabledTorrentProvider
     );
   }
 
@@ -569,7 +600,7 @@ class AppStore {
 
   async setStreamSoftSubOnly(on: boolean) {
     this.streamSoftSubOnly = on;
-    await api.setPref("stream_softsub_only", on ? "1" : "0");
+    await api.setPref("stream_strict_softsub", on ? "1" : "0");
   }
 
   async setAnime4kPreset(preset: Anime4kPreset) {
@@ -617,14 +648,18 @@ class AppStore {
     detail: MediaDetail,
     episodeNum: number,
   ): Promise<"launched" | "open_web_picker" | "open_torrent_picker"> {
-    if (this.streamSource === "torrent") {
-      return "open_torrent_picker";
-    }
-    if (!this.hasEnabledWebStreamProvider) {
+    if (!this.#extensionsLoaded) {
       await this.refreshExtensions();
     }
-    if (!this.hasEnabledWebStreamProvider) {
-      return "open_web_picker";
+    if (this.streamSource === "torrent") {
+      if (this.hasEnabledTorrentProvider || !this.hasEnabledWebStreamProvider) {
+        return "open_torrent_picker";
+      }
+    } else if (!this.hasEnabledWebStreamProvider) {
+      await this.refreshExtensions();
+      if (!this.hasEnabledWebStreamProvider) {
+        return this.hasEnabledTorrentProvider ? "open_torrent_picker" : "open_web_picker";
+      }
     }
 
     const epKey = String(episodeNum);
@@ -637,7 +672,12 @@ class AppStore {
     }, 18000);
 
     try {
-      const picked = await autoPlayWebEpisode(detail, episodeNum, this.streamSoftSubOnly);
+      const picked = await autoPlayWebEpisode(
+        detail,
+        episodeNum,
+        this.streamSoftSubOnly,
+        this.playback.audioLang === "eng",
+      );
       this.toast(
         `Streaming Ep ${episodeNum} via ${picked.providerName} (${picked.server})…`,
         "info",

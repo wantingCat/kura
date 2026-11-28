@@ -24,6 +24,7 @@ pub const MPV_EVENT_FILE_LOADED: c_int = 8;
 pub const MPV_EVENT_PROPERTY_CHANGE: c_int = 22;
 
 pub const MPV_END_FILE_REASON_EOF: c_int = 0;
+pub const MPV_END_FILE_REASON_ERROR: c_int = 4;
 
 #[repr(C)]
 pub struct MpvEvent {
@@ -427,6 +428,12 @@ impl MpvInstance {
         let _ = inst.set_option_string("sub-visibility", "no");
         let _ = inst.set_option_string("sub-auto", "exact");
         let _ = inst.set_option_string("audio-client-name", "Kura");
+        let _ = inst.set_option_string(
+            "demuxer-lavf-o",
+            "allowed_extensions=ALL,allowed_segment_extensions=ALL",
+        );
+        let _ = inst.set_option_string("network-timeout", "20");
+        let _ = inst.set_option_string("hls-bitrate", "max");
 
         let rc = unsafe { (api.initialize)(ctx) };
         if rc < 0 {

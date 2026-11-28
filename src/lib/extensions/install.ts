@@ -69,6 +69,18 @@ function isExplicitSeanimeManifestError(errStr: string): boolean {
   );
 }
 
+async function activateStreamingAfterInstall(installedKind: "web" | "torrent") {
+  await app.refreshExtensions();
+  if (installedKind === "web" && app.hasEnabledWebStreamProvider && !app.hasEnabledTorrentProvider) {
+    await app.setStreamSource("web");
+  } else if (installedKind === "torrent" && app.hasEnabledTorrentProvider && !app.hasEnabledWebStreamProvider) {
+    await app.setStreamSource("torrent");
+  }
+  if (app.appMode === "local") {
+    await app.setAppMode("streaming");
+  }
+}
+
 async function resolveCatalogResult(
   url: string,
   items: MarketplaceExtension[],
@@ -88,7 +100,9 @@ async function resolveCatalogResult(
     const extension = await api.installExtension(matching[0].manifestUri);
     evictExtensionWorker(extension.id);
     invalidateOnlinestreamCache();
-    await app.refreshExtensions();
+    await activateStreamingAfterInstall(
+      extension.extType === "onlinestream-provider" ? "web" : "torrent",
+    );
     return { kind: "seanime_installed", extension };
   }
 
@@ -153,7 +167,9 @@ export async function installUnifiedExtension(
       }
       evictExtensionWorker(extension.id);
       invalidateOnlinestreamCache();
-      await app.refreshExtensions();
+      await activateStreamingAfterInstall(
+        extension.extType === "onlinestream-provider" ? "web" : "torrent",
+      );
       return { kind: "seanime_installed", extension };
     } catch (seanimeErr) {
       const errStr = String(seanimeErr);
@@ -176,6 +192,7 @@ export async function installUnifiedExtension(
   // 3. Native Rust torrent feed / Hayase index.json / SubsPlease / SeaDex / AnimeTosho
   try {
     const extensions = await api.importTorrentExtension(val);
+    await activateStreamingAfterInstall("torrent");
     return { kind: "native_torrent_sources", extensions };
   } catch (e) {
     throw new Error(cleanExtensionError(e));

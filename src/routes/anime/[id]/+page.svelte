@@ -246,8 +246,9 @@
   const owned = $derived(regular.filter((e) => e.files.length > 0).length);
   const watched = $derived(regular.filter((e) => e.watchedAt).length);
   const totalEps = $derived(Math.max(d?.episodes ?? 0, regular.length));
+  const effectiveMode = $derived<"local" | "streaming">(app.canStream ? "streaming" : app.appMode);
   /** An episode left part-way through wins over the first unwatched one. */
-  const nextUp = $derived(computeNextUp(d, app.appMode));
+  const nextUp = $derived(computeNextUp(d, effectiveMode));
   const playingKey = $derived(
     d
       ? app.builtinPlayer?.active && app.builtinPlayer.anilistId === d.anilistId
@@ -375,7 +376,7 @@
     const f = e.files[0];
     if (f) {
       await app.play(d.anilistId, e.epKey, f.path);
-    } else if (app.appMode === "streaming") {
+    } else if (app.canStream) {
       const action = await app.playStreamEpisode(d, e.number);
       if (action === "open_web_picker") {
         webTarget = { epKey: e.epKey, epNumber: e.number };
@@ -616,7 +617,7 @@
                   {/if}
                 </button>
               {/if}
-              {#if app.appMode === "streaming" && owned === 0}
+              {#if app.canStream && owned === 0}
                 <button
                   class="btn btn-glass"
                   onclick={toggleStreamLibrary}
@@ -628,7 +629,7 @@
                   {d.inStreamLibrary ? "In Library" : "Add to Library"}
                 </button>
               {/if}
-              {#if app.appMode === "streaming" && (nextUp || regular[0])}
+              {#if app.canStream && (nextUp || regular[0])}
                 <button
                   class="btn btn-glass"
                   onclick={() => {
@@ -670,7 +671,7 @@
                   <!-- svelte-ignore a11y_click_events_have_key_events -->
                   <div class="more-backdrop" onclick={() => (moreOpen = false)}></div>
                   <div class="more-menu" role="menu">
-                    {#if owned > 0 || d.groups.length > 0 || app.appMode === "streaming"}
+                    {#if owned > 0 || d.groups.length > 0 || app.canStream}
                       <button role="menuitem" onclick={() => { moreOpen = false; showTracks = true; }} id="detail-track-prefs">
                         <Icon name="subtitles" size={15} /> Audio &amp; subtitles
                         {#if d.trackPref}<span class="custom-track-badge">Custom</span>{/if}
@@ -865,7 +866,7 @@
                   {@const isPlayingThis = playingKey === e.epKey}
                   <li
                     class="ep"
-                    class:missing={!has && app.appMode !== "streaming"}
+                    class:missing={!has && !app.canStream}
                     class:watched={!!e.watchedAt}
                     class:next={isNext}
                     style:--i={Math.min(i, 30)}
@@ -874,7 +875,7 @@
                     <button
                       class="ep-thumb"
                       onclick={() => play(e)}
-                      disabled={(!has && app.appMode !== "streaming") || isLaunchingThis}
+                      disabled={(!has && !app.canStream) || isLaunchingThis}
                       aria-label={`Play ${epTitle(e)}`}
                     >
                       {#if thumb}<img src={thumb} alt="" loading="lazy" class:fallback={!e.thumbUrl} />{/if}
@@ -882,7 +883,7 @@
                         <span class="play-ov active"><span class="spinner spinner-sm"></span></span>
                       {:else if isPlayingThis}
                         <span class="play-ov active"><span class="eq-bars"><span class="eq-bar"></span><span class="eq-bar"></span><span class="eq-bar"></span></span></span>
-                      {:else if has || app.appMode === "streaming"}
+                      {:else if has || app.canStream}
                         <span class="play-ov"><Icon name="play" size={20} fill /></span>
                       {/if}
                       {#if e.watchedAt}<span class="seen"><Icon name="check" size={12} stroke={3} /></span>{/if}
@@ -946,14 +947,14 @@
                             {formatBytes(e.files[0].size)}
                             {#if e.files.length > 1}· {e.files.length} files{/if}
                           </button>
-                        {:else if app.appMode === "streaming"}
+                        {:else if app.canStream}
                           <button
                             class="file-chip"
                             onclick={() => void play(e)}
-                            title={app.streamSource === "web" ? "Stream soft-sub web video + Jimaku subs" : "Stream or download via BitTorrent"}
+                            title={app.streamSource === "web" && app.hasEnabledWebStreamProvider ? "Stream soft-sub web video + Jimaku subs" : "Stream or download via BitTorrent"}
                           >
                             <Icon name="sparkles" size={12} />
-                            {app.streamSource === "web" ? "Web stream ready" : "Torrent ready"}
+                            {app.streamSource === "web" && app.hasEnabledWebStreamProvider ? "Web stream ready" : "Torrent ready"}
                           </button>
                         {:else}
                           <span class="no-file"><Icon name="file-missing" size={12} /> Not in library</span>

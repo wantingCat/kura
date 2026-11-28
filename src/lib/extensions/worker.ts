@@ -18,10 +18,15 @@ import {
 // Capture Trusted Worker Primitives & Lock Down Ambient Browser APIs (`C-01`)
 // ---------------------------------------------------------------------------
 
-const workerPostMessage = self.postMessage.bind(self);
-const workerSetTimeout = self.setTimeout.bind(self);
+const workerScope = (typeof self !== "undefined" ? self : globalThis) as unknown as DedicatedWorkerGlobalScope;
+const workerPostMessage =
+  typeof workerScope.postMessage === "function"
+    ? workerScope.postMessage.bind(workerScope)
+    : () => {};
+const workerSetTimeout = globalThis.setTimeout.bind(globalThis);
 
 function lockdownAmbientGlobals() {
+  if (typeof WorkerGlobalScope === "undefined") return;
   const blocked = [
     "XMLHttpRequest",
     "WebSocket",
@@ -47,7 +52,7 @@ function lockdownAmbientGlobals() {
   ];
 
   // Scrub prototype chain first so inherited getters/methods (postMessage, indexedDB, caches, importScripts) cannot be reached
-  let proto: unknown = Object.getPrototypeOf(self);
+  let proto: unknown = Object.getPrototypeOf(workerScope);
   while (proto && proto !== Object.prototype) {
     const rec = proto as Record<string, unknown>;
     for (const key of [...blocked, "fetch"]) {
@@ -87,8 +92,8 @@ function lockdownAmbientGlobals() {
   }
 
   const navBlocked = ["sendBeacon", "storage", "locks", "credentials", "serviceWorker"];
-  if (typeof self.navigator === "object" && self.navigator !== null) {
-    let navObj: unknown = self.navigator;
+  if (typeof workerScope.navigator === "object" && workerScope.navigator !== null) {
+    let navObj: unknown = workerScope.navigator;
     while (navObj && navObj !== Object.prototype) {
       const rec = navObj as Record<string, unknown>;
       for (const key of navBlocked) {
@@ -189,6 +194,45 @@ function hexToBytes(hex: string): Uint8Array {
 
 class KuraBuffer extends Uint8Array {
   static poolSize = 8192;
+
+  static isBuffer(obj: unknown): obj is KuraBuffer {
+    return obj instanceof KuraBuffer;
+  }
+
+  static allocUnsafe(size: number): KuraBuffer {
+    return new KuraBuffer(Math.max(0, size | 0));
+  }
+
+  static byteLength(
+    input: string | ArrayBufferView | ArrayBuffer,
+    encoding?: string,
+  ): number {
+    if (typeof input === "string") {
+      return KuraBuffer.from(input, encoding).byteLength;
+    }
+    if (input instanceof ArrayBuffer) return input.byteLength;
+    if (ArrayBuffer.isView(input)) return input.byteLength;
+    return 0;
+  }
+
+  static concat(list: readonly Uint8Array[], totalLength?: number): KuraBuffer {
+    const total =
+      totalLength !== undefined
+        ? Math.max(0, totalLength | 0)
+        : list.reduce((acc, chunk) => acc + (chunk?.byteLength ?? 0), 0);
+    const out = new KuraBuffer(total);
+    let offset = 0;
+    for (const chunk of list) {
+      if (!chunk || offset >= total) break;
+      const slice =
+        offset + chunk.byteLength > total
+          ? chunk.subarray(0, total - offset)
+          : chunk;
+      out.set(slice, offset);
+      offset += slice.byteLength;
+    }
+    return out;
+  }
 
   static override from(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -496,14 +540,47 @@ function makeCaseInsensitiveMap<V>(raw: Record<string, V>): Record<string, V> {
   }
   return new Proxy(lowerMap, {
     get(target, prop) {
+      if (prop === Symbol.iterator) {
+        return () => Object.entries(target)[Symbol.iterator]();
+      }
       if (typeof prop === "string") {
-        return target[prop.toLowerCase()];
+        const low = prop.toLowerCase();
+        if (Object.prototype.hasOwnProperty.call(target, low)) {
+          return target[low];
+        }
+        if (prop === "get") {
+          return (name: string) => {
+            const k = String(name ?? "").toLowerCase();
+            return Object.prototype.hasOwnProperty.call(target, k) ? target[k] : null;
+          };
+        }
+        if (prop === "has") {
+          return (name: string) =>
+            Object.prototype.hasOwnProperty.call(target, String(name ?? "").toLowerCase());
+        }
+        if (prop === "entries") {
+          return () => Object.entries(target)[Symbol.iterator]();
+        }
+        if (prop === "keys") {
+          return () => Object.keys(target)[Symbol.iterator]();
+        }
+        if (prop === "values") {
+          return () => Object.values(target)[Symbol.iterator]();
+        }
+        if (prop === "forEach") {
+          return (cb: (value: V, key: string, parent: Record<string, V>) => void) => {
+            for (const [k, v] of Object.entries(target)) {
+              cb(v, k, target);
+            }
+          };
+        }
+        return target[low];
       }
       return Reflect.get(target, prop);
     },
     has(target, prop) {
       if (typeof prop === "string") {
-        return prop.toLowerCase() in target;
+        return Object.prototype.hasOwnProperty.call(target, prop.toLowerCase());
       }
       return Reflect.has(target, prop);
     },
@@ -1067,7 +1144,7 @@ installSeanimeGlobals();
 // Message Dispatcher
 // ---------------------------------------------------------------------------
 
-self.onmessage = async (ev: MessageEvent<IncomingMsg>) => {
+const handleWorkerMessage = async (ev: MessageEvent<IncomingMsg>) => {
   const msg = ev.data;
   if (!msg) return;
 
@@ -1144,4 +1221,20 @@ self.onmessage = async (ev: MessageEvent<IncomingMsg>) => {
       });
     }
   }
+};
+
+if (typeof self !== "undefined" && "onmessage" in self) {
+  self.onmessage = handleWorkerMessage;
+}
+
+export const __workerTestHooks = {
+  makeCaseInsensitiveMap,
+  $habari,
+  $goFeed,
+  $scannerUtils,
+  $torrentUtils,
+  KuraBuffer,
+  LoadDoc,
+  Doc,
+  handleWorkerMessage,
 };
