@@ -12,6 +12,19 @@
 
 Kura is a free, open-source desktop app built for watching anime and immersing in Japanese. It combines a fast local & streaming library, a native `libmpv`-powered player with real-time **Anime4K** shaders, automatic **Jimaku** Japanese subtitle downloading & retiming, pause-to-hover **Yomitan** dictionary lookups, a **Looked-Up Words Leaderboard**, and two-way **AniList** sync.
 
+<p align="center">
+  <img src="assets/screenshots/home-library.png" alt="Kura Tokyo Night Home Library" width="100%" />
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/immersion-hub.png" alt="Kura Japanese Immersion Hub & Looked-Up Words Leaderboard" width="100%" />
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/anime-details.png" alt="Kura Anime Details & AniList Tracker" width="49%" />
+  <img src="assets/screenshots/episodes-list.png" alt="Kura Episode List & Subtitle Controls" width="49%" />
+</p>
+
 ## Why Kura
 
 Immersion usually means juggling a video player, a subtitle site, an audio/subtitle retiming tool, a browser dictionary extension, a spreadsheet/timer, and an episode tracker. Kura puts the entire loop in one window:
